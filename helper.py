@@ -57,7 +57,7 @@ def download_file(url, path, session, filename=None, content=None):
 			else:
 				print(f"Could not get filename from {url} ...")
 				return False
-		downloadpath = path + clean_filename(filename)
+		downloadpath = os.path.join(path,clean_filename(filename))
 		if not os.path.exists(downloadpath):
 			if not os.path.exists(path):
 				os.makedirs(path)
