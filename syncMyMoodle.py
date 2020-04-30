@@ -120,7 +120,7 @@ for cid, semestername in courses:
 			response = session.get(p, params=params)
 			soup = bs(response.text, features="html.parser")
 
-			pagename = soup.find("a",{"title": "Page"}).text
+			pagename = clean_filename(soup.find("a",{"title": "Page"}).text)
 
 			links = re.findall("https://www.youtube.com/embed/.{11}", response.text)
 			path = os.path.join(sectionpath,pagename)
