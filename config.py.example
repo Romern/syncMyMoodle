@@ -1,0 +1,15 @@
+onlyfetchcurrentsemester = True
+user = "USERNAME"
+password = "PASSWORD"
+basedir = "./"
+cookie_file = "./session"
+
+params = {
+	'lang': 'en' #Titles for some pages differ
+}
+
+valid_filename_chars = "-_.() %s%süöäßÖÄÜ" % (string.ascii_letters, string.digits)
+char_limit = 255
+
+if not os.path.exists(basedir):
+	os.makedirs(basedir)
