@@ -37,8 +37,9 @@ def login(username, password):
 
 def clean_filename(filename, whitelist=valid_filename_chars, replace=' '):
 	filename = urllib.parse.unquote(filename)
-	for r in replace:
-		filename = filename.replace(r,'_')
+	if replace_spaces_by_underscores:
+		for r in replace:
+			filename = filename.replace(r,'_')
 	cleaned_filename = unicodedata.normalize('NFKD', filename)
 	cleaned_filename = ''.join(c for c in cleaned_filename if c in whitelist)
 	return cleaned_filename[:char_limit]

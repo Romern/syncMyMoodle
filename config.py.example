@@ -1,8 +1,13 @@
+import string
+import os
+
 onlyfetchcurrentsemester = True
+replace_spaces_by_underscores = True
 user = "USERNAME"
 password = "PASSWORD"
 basedir = "./"
 cookie_file = "./session"
+
 
 params = {
 	'lang': 'en' #Titles for some pages differ

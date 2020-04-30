@@ -56,7 +56,8 @@ for cid, semestername in courses:
 		resources = [r.find('a', href=True)["href"] for r in resources if r.find('a', href=True)]
 		for r in resources:
 			# First check if the file is a video:
-			if not download_file(r,sectionpath, session): #no filenames here unfortunately
+			if not download_file(r,sectionpath, session): # No filenames here unfortunately
+				# If no file was found, then its probably an html page with an enbedded video
 				response = session.get(r, params=params)
 				if "Content-Type" in response.headers and "text/html" in response.headers["Content-Type"]:
 					tempsoup = bs(response.text, features="html.parser")
@@ -74,7 +75,7 @@ for cid, semestername in courses:
 			if "Location" in response.headers:
 				url = response.headers["Location"]
 				response = session.head(url, params=params)
-				if "Content-Type" in response.headers and "text/html" not in response.headers["Content-Type"]: # don't download html pages
+				if "Content-Type" in response.headers and "text/html" not in response.headers["Content-Type"]: # Don't download html pages
 					download_file(url,sectionpath, session)
 
 		## Get Folders
@@ -88,7 +89,7 @@ for cid, semestername in courses:
 			foldername = clean_filename(soup.find("a",{"title": "Folder"}).text)
 
 			filemanager = soup.select(".filemanager")[0].findAll('a', href=True)
-			#scheiß auf folder, das mach ich 1 andernmal
+			# Scheiß auf folder, das mach ich 1 andernmal
 			for file in filemanager:
 				link = file["href"]
 				filename = file.select(".fp-filename")[0].text
@@ -108,7 +109,7 @@ for cid, semestername in courses:
 			for file in files:
 				link = file.find('a', href=True)["href"]
 				filename = file.text
-				if len(filename) > 2: #remove space around the file
+				if len(filename) > 2 and filename[0] == " " and filename[-1] == " ": # Remove space around the file
 					filename = filename[1:-1]
 				download_file(link, os.path.join(sectionpath,foldername), session, filename)
 
@@ -135,10 +136,10 @@ for cid, semestername in courses:
 				ydl.download(links)
 
 			opendataltipage = soup.find("form", {"name": "ltiLaunchForm"})
-			if opendataltipage: # opencast in pages embedded
+			if opendataltipage: # Opencast in pages embedded
 				downloadOpenCastVideos(soup, opendataltipage, path, session, False)
 
+		## Get Opencast Videos directly embedded in section
 		if opendatalti:
-			## Get Opencast Videos directly embedded in section
 			downloadOpenCastVideos(s, opendatalti, sectionpath, session, loginOnce)
 			loginOnce = False
