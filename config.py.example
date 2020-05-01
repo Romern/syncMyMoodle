@@ -3,6 +3,7 @@ import os
 
 onlyfetchcurrentsemester = True
 replace_spaces_by_underscores = True
+enableExperimentalCategories = False
 user = "USERNAME"
 password = "PASSWORD"
 basedir = "./"

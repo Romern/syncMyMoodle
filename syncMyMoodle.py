@@ -47,99 +47,120 @@ for cid, semestername in courses:
 		sections = [(c,soup.find("form", {"name": "ltiLaunchForm"})) for c in soup.select(".topics")[0].children]
 		loginOnce = True
 
-	for s,opendatalti in sections:
-		sectionname = clean_filename(s.attrs["aria-label"])
-		sectionpath = os.path.join(basedir,semestername,coursename,sectionname)
+	for sec,opendatalti in sections:
+		sectionname = clean_filename(sec.attrs["aria-label"])
+		mainsectionpath = os.path.join(basedir,semestername,coursename,sectionname)
 
-		## Get Resources
-		resources = s.findAll("li", {"class": "resource"})
-		resources = [r.find('a', href=True)["href"] for r in resources if r.find('a', href=True)]
-		for r in resources:
-			# First check if the file is a video:
-			if not download_file(r,sectionpath, session): # No filenames here unfortunately
-				# If no file was found, then its probably an html page with an enbedded video
-				response = session.get(r, params=params)
-				if "Content-Type" in response.headers and "text/html" in response.headers["Content-Type"]:
-					tempsoup = bs(response.text, features="html.parser")
-					videojs = tempsoup.select(".video-js")
-					if videojs:
-						videojs = tempsoup.select(".video-js")[0].find("source")
-						if videojs and "src" in videojs.attrs.keys():
-							download_file(videojs["src"],sectionpath, session, videojs["src"].split("/")[-1])
+		# Categories can be multiple levels deep like folders, see https://moodle.rwth-aachen.de/course/view.php?id=7053&section=1
 
-		## Get Resources in URLs
-		url_resources = s.findAll("li", {"class": "url"})
-		url_resources = [r.find('a', href=True)["href"] for r in url_resources if r.find('a', href=True)]
-		for r in url_resources:
-			response = session.head(r, params=params)
-			if "Location" in response.headers:
-				url = response.headers["Location"]
-				response = session.head(url, params=params)
-				if "Content-Type" in response.headers and "text/html" not in response.headers["Content-Type"]: # Don't download html pages
-					download_file(url,sectionpath, session)
+		label_categories = sec.findAll("li", {"class": [
+			"modtype_label", 
+			"modtype_resource", 
+			"modtype_url", 
+			"modtype_folder", 
+			"modtype_assign", 
+			"modtype_page"]})
 
-		## Get Folders
-		folders = s.findAll("li", {"class": "folder"})
-		folders = [r.find('a', href=True)["href"] for r in folders if r.find('a', href=True)]
-
-		for f in folders:
-			response = session.get(f, params=params)
-			soup = bs(response.text, features="html.parser")
-			
-			foldername = clean_filename(soup.find("a",{"title": "Folder"}).text)
-
-			filemanager = soup.select(".filemanager")[0].findAll('a', href=True)
-			# Scheiß auf folder, das mach ich 1 andernmal
-			for file in filemanager:
-				link = file["href"]
-				filename = file.select(".fp-filename")[0].text
-				download_file(link, os.path.join(sectionpath,foldername), session, filename)
-
-		## Get Assignments
-		assignments = s.findAll("li", {"class": "assign"})
-		assignments = [r.find('a', href=True)["href"] for r in assignments if r.find('a', href=True)]
-		for a in assignments:
-			response = session.get(a, params=params)
-			soup = bs(response.text, features="html.parser")
-
-			files = soup.select(".fileuploadsubmission")
-
-			foldername = clean_filename(soup.find("a",{"title": "Assignment"}).text)
-			
-			for file in files:
-				link = file.find('a', href=True)["href"]
-				filename = file.text
-				if len(filename) > 2 and filename[0] == " " and filename[-1] == " ": # Remove space around the file
-					filename = filename[1:-1]
-				download_file(link, os.path.join(sectionpath,foldername), session, filename)
-
-		## Get embedded videos in pages
-		pages = s.findAll("li", {"class": "page"})
-		pages = [r.find('a', href=True)["href"] for r in pages if r.find('a', href=True)]
-		for p in pages:
-			response = session.get(p, params=params)
-			soup = bs(response.text, features="html.parser")
-
-			pagename = clean_filename(soup.find("a",{"title": "Page"}).text)
-
-			links = re.findall("https://www.youtube.com/embed/.{11}", response.text)
-			path = os.path.join(sectionpath,pagename)
-			if not os.path.exists(path):
-				os.makedirs(path)
-			ydl_opts = {
-							"outtmpl": "{}/%(title)s-%(id)s.%(ext)s".format(path),
-							"ignoreerrors": True,
-							"nooverwrites": True,
-							"retries": 15
-						}
-			with youtube_dl.YoutubeDL(ydl_opts) as ydl:
-				ydl.download(links)
-
-			opendataltipage = soup.find("form", {"name": "ltiLaunchForm"})
-			if opendataltipage: # Opencast in pages embedded
-				downloadOpenCastVideos(soup, opendataltipage, path, session, False)
-
+		categories = []
+		category = None
+		for l in label_categories:
+			if "modtype_label" in l['class'] and enableExperimentalCategories:
+				category = (clean_filename(l.findAll(text=True)[-1]), [])
+				categories.append(category)
+			else:
+				if category == None:
+					category = (None, [])
+					categories.append(category)
+				category[1].append(l)
 		## Get Opencast Videos directly embedded in section
 		if opendatalti:
-			downloadOpenCastVideos(s, opendatalti, sectionpath, session, loginOnce)
+			downloadOpenCastVideos(sec, opendatalti, mainsectionpath, session, loginOnce)
 			loginOnce = False
+
+		for c in categories:
+			if c[0] == None:
+				sectionpath = mainsectionpath
+			else:
+				sectionpath = os.path.join(mainsectionpath, c[0])
+			for s in c[1]:
+				## Get Resources
+				if "modtype_resource" in s["class"] and s.find('a', href=True):
+					r = s.find('a', href=True)["href"]
+					# First check if the file is a video:
+					if not download_file(r,sectionpath, session): # No filenames here unfortunately
+					# If no file was found, then its probably an html page with an enbedded video
+						response = session.get(r, params=params)
+						if "Content-Type" in response.headers and "text/html" in response.headers["Content-Type"]:
+							tempsoup = bs(response.text, features="html.parser")
+							videojs = tempsoup.select(".video-js")
+							if videojs:
+								videojs = tempsoup.select(".video-js")[0].find("source")
+								if videojs and "src" in videojs.attrs.keys():
+									download_file(videojs["src"],sectionpath, session, videojs["src"].split("/")[-1])
+
+				## Get Resources in URLs
+				if "modtype_url" in s["class"] and s.find('a', href=True):
+					r = s.find('a', href=True)["href"]
+					response = session.head(r, params=params)
+					if "Location" in response.headers:
+						url = response.headers["Location"]
+						response = session.head(url, params=params)
+						if "Content-Type" in response.headers and "text/html" not in response.headers["Content-Type"]: # Don't download html pages
+							download_file(url,sectionpath, session)
+
+				## Get Folders
+				if "modtype_folder" in s["class"] and s.find('a', href=True):
+					f = s.find('a', href=True)["href"]
+					response = session.get(f, params=params)
+					soup = bs(response.text, features="html.parser")
+					
+					foldername = clean_filename(soup.find("a",{"title": "Folder"}).text)
+
+					filemanager = soup.select(".filemanager")[0].findAll('a', href=True)
+					# Scheiß auf folder, das mach ich 1 andernmal
+					for file in filemanager:
+						link = file["href"]
+						filename = file.select(".fp-filename")[0].text
+						download_file(link, os.path.join(sectionpath,foldername), session, filename)
+
+				## Get Assignments
+				if "modtype_assign" in s["class"] and s.find('a', href=True):
+					a = s.find('a', href=True)["href"]
+					response = session.get(a, params=params)
+					soup = bs(response.text, features="html.parser")
+
+					files = soup.select(".fileuploadsubmission")
+
+					foldername = clean_filename(soup.find("a",{"title": "Assignment"}).text)
+					
+					for file in files:
+						link = file.find('a', href=True)["href"]
+						filename = file.text
+						if len(filename) > 2 and filename[0] == " " and filename[-1] == " ": # Remove space around the file
+							filename = filename[1:-1]
+						download_file(link, os.path.join(sectionpath,foldername), session, filename)
+
+				## Get embedded videos in pages
+				if "modtype_page" in s["class"] and s.find('a', href=True):
+					p = s.find('a', href=True)["href"]
+					response = session.get(p, params=params)
+					soup = bs(response.text, features="html.parser")
+
+					pagename = clean_filename(soup.find("a",{"title": "Page"}).text)
+
+					links = re.findall("https://www.youtube.com/embed/.{11}", response.text)
+					path = os.path.join(sectionpath,pagename)
+					if not os.path.exists(path):
+						os.makedirs(path)
+					ydl_opts = {
+									"outtmpl": "{}/%(title)s-%(id)s.%(ext)s".format(path),
+									"ignoreerrors": True,
+									"nooverwrites": True,
+									"retries": 15
+								}
+					with youtube_dl.YoutubeDL(ydl_opts) as ydl:
+						ydl.download(links)
+
+					opendataltipage = soup.find("form", {"name": "ltiLaunchForm"})
+					if opendataltipage: # Opencast in pages embedded
+						downloadOpenCastVideos(soup, opendataltipage, path, session, False)
