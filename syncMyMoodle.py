@@ -113,58 +113,63 @@ for cid, semestername in courses:
 					f = s.find('a', href=True)["href"]
 					response = session.get(f, params=params)
 					soup = bs(response.text, features="html.parser")
-					
-					foldername = clean_filename(soup.find("a",{"title": "Folder"}).text)
+					soup_results = soup.find("a",{"title": "Folder"})
 
-					filemanager = soup.select(".filemanager")[0].findAll('a', href=True)
-					# Scheiß auf folder, das mach ich 1 andernmal
-					for file in filemanager:
-						link = file["href"]
-						filename = file.select(".fp-filename")[0].text
-						download_file(link, os.path.join(sectionpath,foldername), session, filename)
+					if soup_results is not None:
+						foldername = clean_filename(soup_results.text)
+
+						filemanager = soup.select(".filemanager")[0].findAll('a', href=True)
+						# Scheiß auf folder, das mach ich 1 andernmal
+						for file in filemanager:
+							link = file["href"]
+							filename = file.select(".fp-filename")[0].text
+							download_file(link, os.path.join(sectionpath,foldername), session, filename)
 
 				## Get Assignments
 				if "modtype_assign" in s["class"] and s.find('a', href=True):
 					a = s.find('a', href=True)["href"]
 					response = session.get(a, params=params)
 					soup = bs(response.text, features="html.parser")
-
 					files = soup.select(".fileuploadsubmission")
+					soup_results = soup.find("a",{"title": "Assignment"})
 
-					foldername = clean_filename(soup.find("a",{"title": "Assignment"}).text)
-					
-					for file in files:
-						link = file.find('a', href=True)["href"]
-						filename = file.text
-						if len(filename) > 2 and filename[0] == " " and filename[-1] == " ": # Remove space around the file
-							filename = filename[1:-1]
-						download_file(link, os.path.join(sectionpath,foldername), session, filename)
+					if soup_results is not None:
+						foldername = clean_filename(soup_results.text)
+						
+						for file in files:
+							link = file.find('a', href=True)["href"]
+							filename = file.text
+							if len(filename) > 2 and filename[0] == " " and filename[-1] == " ": # Remove space around the file
+								filename = filename[1:-1]
+							download_file(link, os.path.join(sectionpath,foldername), session, filename)
 
 				## Get embedded videos in pages
 				if "modtype_page" in s["class"] and s.find('a', href=True):
 					p = s.find('a', href=True)["href"]
 					response = session.get(p, params=params)
 					soup = bs(response.text, features="html.parser")
+					soup_results = soup.find("a",{"title": "Page"})
 
-					pagename = clean_filename(soup.find("a",{"title": "Page"}).text)
+					if soup_results is not None:
+						pagename = clean_filename(soup_results.text)
 
-					links = re.findall("https://www.youtube.com/embed/.{11}", response.text)
-					path = os.path.join(sectionpath,pagename)
-					if not os.path.exists(path):
-						os.makedirs(path)
-					finallinks = []
-					for l in links:
-						if len([f for f in os.listdir(path) if l[-11:] in f])==0:
-							finallinks.append(l)
-					ydl_opts = {
-									"outtmpl": "{}/%(title)s-%(id)s.%(ext)s".format(path),
-									"ignoreerrors": True,
-									"nooverwrites": True,
-									"retries": 15
-								}
-					with youtube_dl.YoutubeDL(ydl_opts) as ydl:
-						ydl.download(finallinks)
+						links = re.findall("https://www.youtube.com/embed/.{11}", response.text)
+						path = os.path.join(sectionpath,pagename)
+						if not os.path.exists(path):
+							os.makedirs(path)
+						finallinks = []
+						for l in links:
+							if len([f for f in os.listdir(path) if l[-11:] in f])==0:
+								finallinks.append(l)
+						ydl_opts = {
+										"outtmpl": "{}/%(title)s-%(id)s.%(ext)s".format(path),
+										"ignoreerrors": True,
+										"nooverwrites": True,
+										"retries": 15
+									}
+						with youtube_dl.YoutubeDL(ydl_opts) as ydl:
+							ydl.download(finallinks)
 
-					opendataltipage = soup.find("form", {"name": "ltiLaunchForm"})
-					if opendataltipage: # Opencast in pages embedded
-						downloadOpenCastVideos(soup, opendataltipage, path, session, False)
+						opendataltipage = soup.find("form", {"name": "ltiLaunchForm"})
+						if opendataltipage: # Opencast in pages embedded
+							downloadOpenCastVideos(soup, opendataltipage, path, session, False)
