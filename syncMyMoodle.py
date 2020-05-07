@@ -150,6 +150,10 @@ for cid, semestername in courses:
 
 					links = re.findall("https://www.youtube.com/embed/.{11}", response.text)
 					path = os.path.join(sectionpath,pagename)
+					finallinks = []
+					for l in links:
+						if len([f for f in os.listdir(path) if l[-11:] in f])==0:
+							finallinks.append(l)
 					if not os.path.exists(path):
 						os.makedirs(path)
 					ydl_opts = {
@@ -159,7 +163,7 @@ for cid, semestername in courses:
 									"retries": 15
 								}
 					with youtube_dl.YoutubeDL(ydl_opts) as ydl:
-						ydl.download(links)
+						ydl.download(finallinks)
 
 					opendataltipage = soup.find("form", {"name": "ltiLaunchForm"})
 					if opendataltipage: # Opencast in pages embedded
