@@ -150,12 +150,12 @@ for cid, semestername in courses:
 
 					links = re.findall("https://www.youtube.com/embed/.{11}", response.text)
 					path = os.path.join(sectionpath,pagename)
+					if not os.path.exists(path):
+						os.makedirs(path)
 					finallinks = []
 					for l in links:
 						if len([f for f in os.listdir(path) if l[-11:] in f])==0:
 							finallinks.append(l)
-					if not os.path.exists(path):
-						os.makedirs(path)
 					ydl_opts = {
 									"outtmpl": "{}/%(title)s-%(id)s.%(ext)s".format(path),
 									"ignoreerrors": True,
