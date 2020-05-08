@@ -81,14 +81,10 @@ def downloadOpenCastVideos(section, opendatalti, path, session, loginOnce):
 			episodejson = f'https://engage.streaming.rwth-aachen.de/search/episode.json?id={linkid.groups()[0]}'
 			episodejson = json.loads(session.get(episodejson).text)
 			tracks = episodejson["search-results"]["result"]["mediapackage"]["media"]["track"]
-			# Get mp4 1080p (is not always 1080p, but the one with the highest quality)
-			finaltrack = [t for t in tracks if (t["mimetype"] == 'video/mp4') and ("1080" in str(t["tags"])) ]
-			if len(finaltrack)==0: # No 1080p
-				finaltrack = [t for t in tracks if (t["mimetype"] == 'video/mp4') and ("720" in str(t["tags"])) ]
-			if len(finaltrack)==0: # No 720p
-				finaltrack = [t for t in tracks if t["mimetype"] == 'video/mp4' ]
-			finaltrack = finaltrack[0]
-			download_file(finaltrack["url"], 
+			tracks = sorted([(t["url"],t["video"]["resolution"]) for t in tracks if t["mimetype"] == 'video/mp4' and "transport" not in t], key=(lambda x: int(x[1].split("x")[0]) ))
+			# only choose mp4s provided with plain https (no transport key), and use the one with the highest resolution (sorted by width) (could also use bitrate)
+			finaltrack = tracks[-1]
+			download_file(finaltrack[0],
 				path, 
 				session, 
-				finaltrack["url"].split("/")[-1])
+				finaltrack[0].split("/")[-1])
