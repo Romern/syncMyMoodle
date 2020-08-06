@@ -1,6 +1,10 @@
 import string
 import os
 
+
+selected_courses = []
+#selected_courses = ["https://moodle.rwth-aachen.de/course/view.php?id=8276"]
+
 onlyfetchcurrentsemester = True
 replace_spaces_by_underscores = True
 enableExperimentalCategories = False

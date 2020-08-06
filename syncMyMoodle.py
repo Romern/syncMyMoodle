@@ -18,10 +18,15 @@ response = session.get('https://moodle.rwth-aachen.de/my/', params=params)
 soup = bs(response.text, features="html.parser")
 
 ## Get Courses
+
 categories = [(c["value"], c.text) for c in soup.find("select", {"name": "coc-category"}).findAll("option")]
 categories.remove(('all', 'All'))
 selected_categories = [c for c in categories if c == max(categories,key=lambda item:int(item[0])) ] if onlyfetchcurrentsemester else categories
+
 courses = [(c.find("h3").find("a")["href"], semestername) for (sid, semestername) in selected_categories for c in soup.select(f".coc-category-{sid}")]
+
+if selected_courses:
+	courses = [(cid, semestername) for (cid, semestername) in courses if cid in selected_courses]
 
 ##DEBUG
 #courses=[courses[1]]
