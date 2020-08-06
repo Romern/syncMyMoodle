@@ -75,9 +75,10 @@ def downloadOpenCastVideos(section, opendatalti, path, session, loginOnce):
 
 	opencastembedds = section.findAll("iframe")
 	for o in opencastembedds:
-		if "data-framesrc" not in o:
-			continue
-		link = o["data-framesrc"]
+		try:
+			link = o["data-framesrc"]
+		except KeyError:
+			print("ERR: iframe is not an opencast embed")
 		linkid = re.match("https://engage.streaming.rwth-aachen.de/play/([a-z0-9\-]{36})$", link)
 		if linkid:
 			episodejson = f'https://engage.streaming.rwth-aachen.de/search/episode.json?id={linkid.groups()[0]}'
