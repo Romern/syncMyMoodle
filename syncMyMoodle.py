@@ -35,7 +35,7 @@ class SyncMyMoodle:
 		self.max_semester = max(categories,key=lambda item:int(item[0]))
 		self.selected_categories = [c for c in categories if c == self.max_semester ] if (not getAllCourses and self.config["onlyfetchcurrentsemester"]) else categories
 
-		self.courses = [(c.find("h3").find("a")["href"], semestername, c.get_text().replace("\n","")) for (sid, semestername) in self.selected_categories for c in soup.select(f".coc-category-{sid}")]
+		self.courses = [(c.find("h3").find("a")["href"], helper.clean_filename(semestername), c.get_text().replace("\n","")) for (sid, semestername) in self.selected_categories for c in soup.select(f".coc-category-{sid}")]
 
 		if self.config["selected_courses"] and not getAllCourses:
 			self.courses = [(cid, semestername, title) for (cid, semestername, title) in self.courses if cid in self.config["selected_courses"]]
@@ -48,7 +48,7 @@ class SyncMyMoodle:
 		helper.replace_spaces_by_underscores = self.config["replace_spaces_by_underscores"]
 		### Main program
 
-		for cid, semestername,title in self.courses:
+		for cid, semestername, title in self.courses:
 			response = self.session.get(cid, params=self.params)
 			soup = bs(response.text, features="html.parser")
 
