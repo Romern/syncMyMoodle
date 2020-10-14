@@ -53,7 +53,7 @@ for cid, semestername in courses:
 		loginOnce = True
 
 	for sec,opendatalti in sections:
-		sectionname = clean_filename(sec.attrs["aria-label"])
+		sectionname = clean_filename(sec.select(".sectionname")[0].get_text())
 		mainsectionpath = os.path.join(basedir,semestername,coursename,sectionname)
 
 		# Categories can be multiple levels deep like folders, see https://moodle.rwth-aachen.de/course/view.php?id=7053&section=1
