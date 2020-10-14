@@ -1,16 +1,20 @@
 import requests, pickle
 from bs4 import BeautifulSoup as bs
+import string
 import os
 import unicodedata
 import re
 from contextlib import closing
 import urllib.parse
 import json
-from config import *
+
+valid_filename_chars = "-_.() %s%süöäßÖÄÜ" % (string.ascii_letters, string.digits)
+char_limit = 255
+replace_spaces_by_underscores = True
 
 ### Helper functions
 
-def login(username, password):
+def login(username, password, cookie_file):
 	s = requests.Session()
 	if os.path.exists(cookie_file):
 		with open(cookie_file, 'rb') as f:
