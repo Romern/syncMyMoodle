@@ -120,10 +120,10 @@ class SyncMyMoodle:
 								response = self.session.get(r, params=self.params)
 								if "Content-Type" in response.headers and "text/html" in response.headers["Content-Type"]:
 									tempsoup = bs(response.text, features="html.parser")
-									videojs = tempsoup.select(".video-js")
+									videojs = tempsoup.select_one(".video-js")
 									if videojs:
-										videojs = tempsoup.select(".video-js")[0].find("source")
-										if videojs and "src" in videojs.attrs.keys():
+										videojs = videojs.select_one("source")
+										if videojs and videojs.get("src"):
 											helper.download_file(videojs["src"],sectionpath, self.session, videojs["src"].split("/")[-1])
 
 						## Get Resources in URLs

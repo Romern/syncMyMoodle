@@ -60,7 +60,7 @@ def download_file(url, path, session, filename=None, content=None):
 			elif "Content-Type" in response.headers and "text/html" not in response.headers["Content-Type"]: #if not html page, get the filename from the url
 				filename = urllib.parse.urlsplit(url).path.split("/")[-1]
 			else:
-				print(f"Could not get filename from {url} ...")
+				#print(f"Could not get filename from {url} ...")
 				return False
 		downloadpath = os.path.join(path,clean_filename(filename))
 		if not os.path.exists(downloadpath):
