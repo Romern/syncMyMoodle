@@ -52,6 +52,12 @@ class SyncMyMoodle:
 			response = self.session.get(cid, params=self.params)
 			soup = bs(response.text, features="html.parser")
 
+
+			session_key = soup.find("a",{"data-title": "logout,moodle"})["href"]
+			session_key = re.findall("sesskey=([a-zA-Z0-9]*)",session_key)[0]
+
+			course_id = re.findall("id=([0-9]*)",cid)[0]
+
 			coursename = helper.clean_filename(soup.select(".page-header-headings")[0].text)
 			print(f"Syncing {coursename}...")
 
@@ -62,14 +68,14 @@ class SyncMyMoodle:
 				for s in sectionpages:
 					response = self.session.get(cid+s, params=self.params)
 					tempsoup = bs(response.text, features="html.parser")
-					opendatalti = tempsoup.find("form", {"name": "ltiLaunchForm"})
-					sections.extend([(c,opendatalti) for c in tempsoup.select(".topics")[0].children])
+					engage_videos = tempsoup.select('iframe[data-framesrc*="engage.streaming.rwth-aachen.de"]')
+					sections.extend([(c,engage_videos) for c in tempsoup.select(".topics")[0].children])
 				loginOnce = False
 			else:
-				sections = [(c,soup.find("form", {"name": "ltiLaunchForm"})) for c in soup.select(".topics")[0].children]
+				sections = [(c,soup.select('iframe[data-framesrc*="engage.streaming.rwth-aachen.de"]')) for c in soup.select(".topics")[0].children]
 				loginOnce = True
 
-			for sec,opendatalti in sections:
+			for sec,engage_videos in sections:
 				sectionname = helper.clean_filename(sec.select(".sectionname")[0].get_text())
 				mainsectionpath = os.path.join(self.config["basedir"],semestername,coursename,sectionname)
 
@@ -95,9 +101,9 @@ class SyncMyMoodle:
 							categories.append(category)
 						category[1].append(l)
 				## Get Opencast Videos directly embedded in section
-				if opendatalti:
-					downloadOpenCastVideos(sec, opendatalti, mainsectionpath, self.session, loginOnce)
-					loginOnce = False
+				if engage_videos:
+					for vid in engage_videos:
+						helper.downloadOpenCastVideos(vid.get("data-framesrc"), course_id, session_key, path, self.session)
 
 				for c in categories:
 					if c[0] == None:
@@ -192,9 +198,10 @@ class SyncMyMoodle:
 								with youtube_dl.YoutubeDL(ydl_opts) as ydl:
 									ydl.download(finallinks)
 
-								opendataltipage = soup.find("form", {"name": "ltiLaunchForm"})
-								if opendataltipage: # Opencast in pages embedded
-									downloadOpenCastVideos(soup, opendataltipage, path, self.session, False)
+								engage_video = soup.select('iframe[data-framesrc*="engage.streaming.rwth-aachen.de"]')
+								if engage_video:
+									for vid in engage_video:
+										helper.downloadOpenCastVideos(vid.get("data-framesrc"), course_id, session_key, path, self.session)
 
 if __name__ == '__main__':
 	if not os.path.exists("config.json"):

@@ -72,25 +72,28 @@ def download_file(url, path, session, filename=None, content=None):
 			return True
 	return False	
 
-def downloadOpenCastVideos(section, opendatalti, path, session, loginOnce):
-	if not loginOnce:
-		engageData = dict([(i["name"], i["value"]) for i in opendatalti.findAll("input")])
-		response = session.post('https://engage.streaming.rwth-aachen.de/lti', data=engageData)
+def downloadOpenCastVideos(engageLink, courseid, session_key, path, session):
 
-	opencastembedds = section.findAll("iframe")
-	for o in opencastembedds:
-		if "data-framesrc" not in o:
-			continue
-		link = o["data-framesrc"]
-		linkid = re.match("https://engage.streaming.rwth-aachen.de/play/([a-z0-9\-]{36})$", link)
-		if linkid:
-			episodejson = f'https://engage.streaming.rwth-aachen.de/search/episode.json?id={linkid.groups()[0]}'
-			episodejson = json.loads(session.get(episodejson).text)
-			tracks = episodejson["search-results"]["result"]["mediapackage"]["media"]["track"]
-			tracks = sorted([(t["url"],t["video"]["resolution"]) for t in tracks if t["mimetype"] == 'video/mp4' and "transport" not in t], key=(lambda x: int(x[1].split("x")[0]) ))
-			# only choose mp4s provided with plain https (no transport key), and use the one with the highest resolution (sorted by width) (could also use bitrate)
-			finaltrack = tracks[-1]
-			download_file(finaltrack[0],
-				path, 
-				session, 
-				finaltrack[0].split("/")[-1])
+	# get engage authentication form
+	course_info = [{"index":0,"methodname":"filter_opencast_get_lti_form","args":{"courseid":str(courseid)}}]
+	response = session.post(f'https://moodle.rwth-aachen.de/lib/ajax/service.php?sesskey={session_key}&info=filter_opencast_get_lti_form', data=json.dumps(course_info))
+
+	# submit engage authentication info
+	engageDataSoup = bs(response.json()[0]["data"], features="html.parser")
+	engageData = dict([(i["name"], i["value"]) for i in engageDataSoup.findAll("input")])
+	response = session.post('https://engage.streaming.rwth-aachen.de/lti', data=engageData)
+
+	linkid = re.match("https://engage.streaming.rwth-aachen.de/play/([a-z0-9\-]{36})$", engageLink)
+	if not linkid:
+		return
+	episodejson = f'https://engage.streaming.rwth-aachen.de/search/episode.json?id={linkid.groups()[0]}'
+	episodejson = json.loads(session.get(episodejson).text)
+	#print(episodejson)
+	tracks = episodejson["search-results"]["result"]["mediapackage"]["media"]["track"]
+	tracks = sorted([(t["url"],t["video"]["resolution"]) for t in tracks if t["mimetype"] == 'video/mp4' and "transport" not in t], key=(lambda x: int(x[1].split("x")[0]) ))
+	# only choose mp4s provided with plain https (no transport key), and use the one with the highest resolution (sorted by width) (could also use bitrate)
+	finaltrack = tracks[-1]
+	download_file(finaltrack[0],
+		path, 
+		session, 
+		finaltrack[0].split("/")[-1])
