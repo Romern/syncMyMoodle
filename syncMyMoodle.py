@@ -58,7 +58,7 @@ class SyncMyMoodle:
 
 			course_id = re.findall("id=([0-9]*)",cid)[0]
 
-			coursename = helper.clean_filename(soup.select(".page-header-headings")[0].text)
+			coursename = helper.clean_filename(soup.select_one(".page-header-headings").text)
 			print(f"Syncing {coursename}...")
 
 			# Get Sections. Some courses have them on one page, others on multiple, then we need to crawl all of them
@@ -69,14 +69,14 @@ class SyncMyMoodle:
 					response = self.session.get(cid+s, params=self.params)
 					tempsoup = bs(response.text, features="html.parser")
 					engage_videos = tempsoup.select('iframe[data-framesrc*="engage.streaming.rwth-aachen.de"]')
-					sections.extend([(c,engage_videos) for c in tempsoup.select(".topics")[0].children])
+					sections.extend([(c,engage_videos) for c in tempsoup.select_one(".topics").children])
 				loginOnce = False
 			else:
-				sections = [(c,soup.select('iframe[data-framesrc*="engage.streaming.rwth-aachen.de"]')) for c in soup.select(".topics")[0].children]
+				sections = [(c,soup.select('iframe[data-framesrc*="engage.streaming.rwth-aachen.de"]')) for c in soup.select_one(".topics").children]
 				loginOnce = True
 
 			for sec,engage_videos in sections:
-				sectionname = helper.clean_filename(sec.select(".sectionname")[0].get_text())
+				sectionname = helper.clean_filename(sec.select_one(".sectionname").get_text())
 				mainsectionpath = os.path.join(self.config["basedir"],semestername,coursename,sectionname)
 
 				# Categories can be multiple levels deep like folders, see https://moodle.rwth-aachen.de/course/view.php?id=7053&section=1
@@ -146,11 +146,11 @@ class SyncMyMoodle:
 							if soup_results is not None:
 								foldername = helper.clean_filename(soup_results.text)
 
-								filemanager = soup.select(".filemanager")[0].findAll('a', href=True)
+								filemanager = soup.select_one(".filemanager").findAll('a', href=True)
 								# Scheiß auf folder, das mach ich 1 andernmal
 								for file in filemanager:
 									link = file["href"]
-									filename = file.select(".fp-filename")[0].text
+									filename = file.select_one(".fp-filename").text
 									helper.download_file(link, os.path.join(sectionpath,foldername), self.session, filename)
 
 						## Get Assignments
