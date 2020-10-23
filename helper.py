@@ -1,5 +1,6 @@
 import requests, pickle
 from bs4 import BeautifulSoup as bs
+import youtube_dl
 import string
 import os
 import unicodedata
@@ -70,7 +71,29 @@ def download_file(url, path, session, filename=None, content=None):
 				file.write(response.content)
 			print(f"Downloaded {downloadpath}")
 			return True
-	return False	
+	return False
+
+def scanAndDownloadYouTube(soup, path):
+	links = re.findall("https://www.youtube.com/embed/.{11}", str(soup))
+	finallinks = []
+	if os.path.exists(path):
+		for l in links:
+			if len([f for f in os.listdir(path) if l[-11:] in f])==0:
+				finallinks.append(l)
+	else:
+		finallinks = links
+	ydl_opts = {
+		"outtmpl": "{}/%(title)s-%(id)s.%(ext)s".format(path),
+		"ignoreerrors": True,
+		"nooverwrites": True,
+		"retries": 15
+	}
+	if not finallinks:
+		return
+	if not os.path.exists(path):
+		os.makedirs(path)
+	with youtube_dl.YoutubeDL(ydl_opts) as ydl:
+		ydl.download(finallinks)
 
 def downloadOpenCastVideos(engageLink, courseid, session_key, path, session):
 

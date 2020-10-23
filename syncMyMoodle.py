@@ -6,7 +6,6 @@ import string
 import re
 from contextlib import closing
 import urllib.parse
-import youtube_dl
 import json
 import helper
 
@@ -52,10 +51,9 @@ class SyncMyMoodle:
 			response = self.session.get(cid, params=self.params)
 			soup = bs(response.text, features="html.parser")
 
-
+			# needed for OpenCast
 			session_key = soup.find("a",{"data-title": "logout,moodle"})["href"]
 			session_key = re.findall("sesskey=([a-zA-Z0-9]*)",session_key)[0]
-
 			course_id = re.findall("id=([0-9]*)",cid)[0]
 
 			coursename = helper.clean_filename(soup.select_one(".page-header-headings").text)
@@ -68,14 +66,11 @@ class SyncMyMoodle:
 				for s in sectionpages:
 					response = self.session.get(cid+s, params=self.params)
 					tempsoup = bs(response.text, features="html.parser")
-					engage_videos = tempsoup.select('iframe[data-framesrc*="engage.streaming.rwth-aachen.de"]')
-					sections.extend([(c,engage_videos) for c in tempsoup.select_one(".topics").children])
-				loginOnce = False
+					sections.extend(tempsoup.select_one(".topics").children)
 			else:
-				sections = [(c,soup.select('iframe[data-framesrc*="engage.streaming.rwth-aachen.de"]')) for c in soup.select_one(".topics").children]
-				loginOnce = True
+				sections = soup.select_one(".topics").children
 
-			for sec,engage_videos in sections:
+			for sec in sections:
 				sectionname = helper.clean_filename(sec.select_one(".sectionname").get_text())
 				mainsectionpath = os.path.join(self.config["basedir"],semestername,coursename,sectionname)
 
@@ -92,6 +87,7 @@ class SyncMyMoodle:
 				categories = []
 				category = None
 				for l in label_categories:
+					# Create a category for all labels if enableExperimentalCategories is set
 					if "modtype_label" in l['class'] and self.config["enableExperimentalCategories"]:
 						category = (helper.clean_filename(l.findAll(text=True)[-1]), [])
 						categories.append(category)
@@ -100,24 +96,26 @@ class SyncMyMoodle:
 							category = (None, [])
 							categories.append(category)
 						category[1].append(l)
-				## Get Opencast Videos directly embedded in section
+
+				## Download Opencast Videos directly embedded in section
+				engage_videos = sec.select('iframe[data-framesrc*="engage.streaming.rwth-aachen.de"]')
 				if engage_videos:
 					for vid in engage_videos:
-						helper.downloadOpenCastVideos(vid.get("data-framesrc"), course_id, session_key, path, self.session)
+						helper.downloadOpenCastVideos(vid.get("data-framesrc"), course_id, session_key, mainsectionpath, self.session)
 
-				for c in categories:
-					if c[0] == None:
+				for category_name, category_soups in categories:
+					if category_name == None:
 						sectionpath = mainsectionpath
 					else:
-						sectionpath = os.path.join(mainsectionpath, c[0])
-					for s in c[1]:
+						sectionpath = os.path.join(mainsectionpath, category_name)
+					for s in category_soups:
 						## Get Resources
 						if "modtype_resource" in s["class"] and s.find('a', href=True):
-							r = s.find('a', href=True)["href"]
+							mod_resource = s.find('a', href=True)["href"]
 							# First check if the file is a video:
-							if not helper.download_file(r,sectionpath, self.session): # No filenames here unfortunately
-							# If no file was found, then its probably an html page with an enbedded video
-								response = self.session.get(r, params=self.params)
+							if not helper.download_file(mod_resource,sectionpath, self.session): # No filenames here unfortunately
+								# If no file was found, then its probably an html page with an enbedded video
+								response = self.session.get(mod_resource, params=self.params)
 								if "Content-Type" in response.headers and "text/html" in response.headers["Content-Type"]:
 									tempsoup = bs(response.text, features="html.parser")
 									videojs = tempsoup.select_one(".video-js")
@@ -128,24 +126,28 @@ class SyncMyMoodle:
 
 						## Get Resources in URLs
 						if "modtype_url" in s["class"] and s.find('a', href=True):
-							r = s.find('a', href=True)["href"]
-							response = self.session.head(r, params=self.params)
-							if "Location" in response.headers:
-								url = response.headers["Location"]
-								response = self.session.head(url, params=self.params)
-								if "Content-Type" in response.headers and "text/html" not in response.headers["Content-Type"]: # Don't download html pages
-									helper.download_file(url,sectionpath, self.session)
+							mod_url = s.find('a', href=True)["href"]
+							url = mod_url
+							try:
+								response = self.session.head(mod_url, params=self.params)
+								if "Location" in response.headers:
+									url = response.headers["Location"]
+									response = self.session.head(url, params=self.params)
+									if "Content-Type" in response.headers and "text/html" not in response.headers["Content-Type"]: # Don't download html pages
+										helper.download_file(url,sectionpath, self.session)
+							except:
+								# Maybe the url is down?
+								print(f"Error while downloading url {url}")
 
 						## Get Folders
 						if "modtype_folder" in s["class"] and s.find('a', href=True):
-							f = s.find('a', href=True)["href"]
-							response = self.session.get(f, params=self.params)
+							mod_folder = s.find('a', href=True)["href"]
+							response = self.session.get(mod_folder, params=self.params)
 							soup = bs(response.text, features="html.parser")
 							soup_results = soup.find("a",{"title": "Folder"})
 
 							if soup_results is not None:
 								foldername = helper.clean_filename(soup_results.text)
-
 								filemanager = soup.select_one(".filemanager").findAll('a', href=True)
 								# Scheiß auf folder, das mach ich 1 andernmal
 								for file in filemanager:
@@ -155,15 +157,14 @@ class SyncMyMoodle:
 
 						## Get Assignments
 						if "modtype_assign" in s["class"] and s.find('a', href=True):
-							a = s.find('a', href=True)["href"]
-							response = self.session.get(a, params=self.params)
+							mod_assign = s.find('a', href=True)["href"]
+							response = self.session.get(mod_assign, params=self.params)
 							soup = bs(response.text, features="html.parser")
 							files = soup.select(".fileuploadsubmission")
 							soup_results = soup.find("a",{"title": "Assignment"})
 
 							if soup_results is not None:
 								foldername = helper.clean_filename(soup_results.text)
-								
 								for file in files:
 									link = file.find('a', href=True)["href"]
 									filename = file.text
@@ -173,34 +174,22 @@ class SyncMyMoodle:
 
 						## Get embedded videos in pages
 						if "modtype_page" in s["class"] and s.find('a', href=True):
-							p = s.find('a', href=True)["href"]
-							response = self.session.get(p, params=self.params)
+							mod_page = s.find('a', href=True)["href"]
+							response = self.session.get(mod_page, params=self.params)
 							soup = bs(response.text, features="html.parser")
 							soup_results = soup.find("a",{"title": "Page"})
 
 							if soup_results is not None:
 								pagename = helper.clean_filename(soup_results.text)
+								path = os.path.join(sectionpath, pagename)
 
-								links = re.findall("https://www.youtube.com/embed/.{11}", response.text)
-								path = os.path.join(sectionpath,pagename)
-								if not os.path.exists(path):
-									os.makedirs(path)
-								finallinks = []
-								for l in links:
-									if len([f for f in os.listdir(path) if l[-11:] in f])==0:
-										finallinks.append(l)
-								ydl_opts = {
-												"outtmpl": "{}/%(title)s-%(id)s.%(ext)s".format(path),
-												"ignoreerrors": True,
-												"nooverwrites": True,
-												"retries": 15
-											}
-								with youtube_dl.YoutubeDL(ydl_opts) as ydl:
-									ydl.download(finallinks)
+								# Youtube videos
+								helper.scanAndDownloadYouTube(soup, path)
 
-								engage_video = soup.select('iframe[data-framesrc*="engage.streaming.rwth-aachen.de"]')
-								if engage_video:
-									for vid in engage_video:
+								# OpenCast videos
+								engage_videos = soup.select('iframe[data-framesrc*="engage.streaming.rwth-aachen.de"]')
+								if engage_videos:
+									for vid in engage_videos:
 										helper.downloadOpenCastVideos(vid.get("data-framesrc"), course_id, session_key, path, self.session)
 
 if __name__ == '__main__':
