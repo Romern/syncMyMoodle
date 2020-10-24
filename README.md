@@ -5,7 +5,7 @@ Downloads all lecture material including embedded YouTube and OpenCast videos, b
 # How to use
 Intially you need to install the requirements (bs4, requests and youtube-dl):
 ```
-pip install -r requirements.txt
+pip3 install -r requirements.txt
 ```
 You also need to install tkinter, on arch this can be done by installing the ``tk`` package.  
   
