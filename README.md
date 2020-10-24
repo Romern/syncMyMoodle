@@ -17,10 +17,3 @@ python3 syncMyMoodle.py
 ```
 
 And your courses will be synced into the ``basedir`` you specified (default is the current directory). Your cookies will be stored in a session file.
-
-# GUI
-Run 
-```
-python3 syncMyMoodleGUI.py
-```
-for the GUI.
