@@ -8,10 +8,12 @@ import re
 from contextlib import closing
 import urllib.parse
 import json
+from tqdm import tqdm
 
 valid_filename_chars = "-_.() %s%süöäßÖÄÜ" % (string.ascii_letters, string.digits)
 char_limit = 255
 replace_spaces_by_underscores = True
+block_size = 1024
 
 ### Helper functions
 
@@ -65,11 +67,16 @@ def download_file(url, path, session, filename=None, content=None):
 				return False
 		downloadpath = os.path.join(path,clean_filename(filename))
 		if not os.path.exists(downloadpath):
+			print(f"Downloading {downloadpath}")
+			total_size_in_bytes= int(response.headers.get('content-length', 0))
+			progress_bar = tqdm(total=total_size_in_bytes, unit='iB', unit_scale=True)
 			if not os.path.exists(path):
 				os.makedirs(path)
 			with open(downloadpath,"wb") as file:
-				file.write(response.content)
-			print(f"Downloaded {downloadpath}")
+				for data in response.iter_content(block_size):
+					progress_bar.update(len(data))
+					file.write(data)
+			progress_bar.close()
 			return True
 	return False
 
