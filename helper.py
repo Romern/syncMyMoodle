@@ -44,11 +44,20 @@ def login(username, password, cookie_file):
 
 def clean_filename(filename, whitelist=valid_filename_chars, replace=' '):
 	filename = urllib.parse.unquote(filename)
+
+	# Remove space around the file
+	while len(filename) > 1 and filename[0] == " ":
+		filename = filename[1:]
+
+	while len(filename) > 1 and filename[-1] == " ":
+		filename = filename[:-1]
+
 	if replace_spaces_by_underscores:
 		for r in replace:
 			filename = filename.replace(r,'_')
 	cleaned_filename = unicodedata.normalize('NFKD', filename)
 	cleaned_filename = ''.join(c for c in cleaned_filename if c in whitelist)
+
 	return cleaned_filename[:char_limit]
 
 def download_file(url, path, session, filename=None, content=None):
