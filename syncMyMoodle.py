@@ -119,10 +119,13 @@ class SyncMyMoodle:
 					else:
 						sectionpath = os.path.join(mainsectionpath, category_name)
 					for s in category_soups:
-						mod_link = s.find('a', href=True)["href"]
+						mod_link = s.find('a', href=True)
+						if not mod_link:
+							continue
+						mod_link = mod_link["href"]
 
 						## Get Resources
-						if "modtype_resource" in s["class"] and s.find('a', href=True):
+						if "modtype_resource" in s["class"]:
 							# First check if the file is directly accessible:
 							if helper.download_file(mod_link,sectionpath, self.session):
 								continue
@@ -137,7 +140,7 @@ class SyncMyMoodle:
 										helper.download_file(videojs["src"],sectionpath, self.session, videojs["src"].split("/")[-1])
 
 						## Get Resources in URLs
-						if "modtype_url" in s["class"] and s.find('a', href=True):
+						if "modtype_url" in s["class"]:
 							url = None
 							try:
 								response = self.session.head(mod_link, params=self.params)
@@ -155,7 +158,7 @@ class SyncMyMoodle:
 								print(f"Error while downloading url {url}")
 
 						## Get Folders
-						if "modtype_folder" in s["class"] and s.find('a', href=True):
+						if "modtype_folder" in s["class"]:
 							response = self.session.get(mod_link, params=self.params)
 							soup = bs(response.text, features="html.parser")
 							soup_results = soup.find("a", {"title": "Folder"})
@@ -173,7 +176,7 @@ class SyncMyMoodle:
 								helper.download_file(link, os.path.join(sectionpath, foldername), self.session, filename)
 
 						## Get Assignments
-						if "modtype_assign" in s["class"] and s.find('a', href=True):
+						if "modtype_assign" in s["class"]:
 							response = self.session.get(mod_link, params=self.params)
 							soup = bs(response.text, features="html.parser")
 							soup_results = soup.find("a", {"title": "Assignment"})
@@ -190,7 +193,7 @@ class SyncMyMoodle:
 								helper.download_file(link, os.path.join(sectionpath, foldername), self.session, filename)
 
 						## Get embedded videos in pages
-						if "modtype_page" in s["class"] and s.find('a', href=True):
+						if "modtype_page" in s["class"]:
 							response = self.session.get(mod_link, params=self.params)
 							soup = bs(response.text, features="html.parser")
 							soup_results = soup.find("a", {"title": "Page"})
