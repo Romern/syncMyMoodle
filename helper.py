@@ -111,6 +111,11 @@ def scanAndDownloadYouTube(soup, path):
 	with youtube_dl.YoutubeDL(ydl_opts) as ydl:
 		ydl.download(finallinks)
 
+def scan_for_opencast(soup, courseid, session_key, path, session):
+	engage_videos = soup.select('iframe[data-framesrc*="engage.streaming.rwth-aachen.de"]')
+	for vid in engage_videos:
+		downloadOpenCastVideos(vid.get("data-framesrc"), courseid, session_key, path, session)
+
 def downloadOpenCastVideos(engageLink, courseid, session_key, path, session):
 
 	# get engage authentication form
