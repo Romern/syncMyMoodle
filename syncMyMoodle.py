@@ -147,6 +147,9 @@ class SyncMyMoodle:
 									if "Content-Type" in response.headers and "text/html" not in response.headers["Content-Type"]:
 										# Don't download html pages
 										helper.download_file(url, sectionpath, self.session)
+									elif "engage.streaming.rwth-aachen.de" in url:
+										# Maybe its a link to an OpenCast video
+										helper.downloadOpenCastVideos(url, course_id, session_key, sectionpath, self.session)
 							except:
 								# Maybe the url is down?
 								print(f"Error while downloading url {url}")
