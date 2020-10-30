@@ -7,7 +7,6 @@ Intially you need to install the requirements (bs4, requests, tqdm and youtube-d
 ```
 pip3 install -r requirements.txt
 ```
-You also need to install tkinter, on arch this can be done by installing the ``tk`` package.  
   
 Copy ``config.json.example`` to ``config.json`` and adjust the settings, most notably the ``user`` and ``password`` (the credentials you use in the RWTH SSO).  
 
