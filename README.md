@@ -12,7 +12,7 @@ Copy ``config.json.example`` to ``config.json`` and adjust the settings, most no
 
 Now you just need to run
 ```
-python3 syncMyMoodle.py
+./syncMyMoodle.py
 ```
 
 And your courses will be synced into the ``basedir`` you specified (default is the current directory). Your cookies will be stored in a session file.
