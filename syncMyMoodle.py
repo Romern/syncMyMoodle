@@ -90,12 +90,13 @@ class SyncMyMoodle:
 				# Categories can be multiple levels deep like folders, see https://moodle.rwth-aachen.de/course/view.php?id=7053&section=1
 
 				label_categories = sec.findAll("li", {"class": [
-					"modtype_label", 
-					"modtype_resource", 
-					"modtype_url", 
-					"modtype_folder", 
-					"modtype_assign", 
-					"modtype_page"]})
+					"modtype_label",
+					"modtype_resource",
+					"modtype_url",
+					"modtype_folder",
+					"modtype_assign",
+					"modtype_page",
+				]})
 
 				categories = []
 				category = None
