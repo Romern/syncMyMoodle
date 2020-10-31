@@ -1,3 +1,5 @@
+#!/usr/bin/env python3
+
 import requests, pickle
 from bs4 import BeautifulSoup as bs
 import os
