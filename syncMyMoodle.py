@@ -259,8 +259,8 @@ class SyncMyMoodle:
 							for vid in engage_videos:
 								self.downloadOpenCastVideos(vid.get("data-framesrc"), course["id"], sectionpath)
 
-						if module["modname"] not in ["page", "folder", "url", "resource", "assign", "label"]:
-							print(json.dumps(module, indent=4))
+#						if module["modname"] not in ["page", "folder", "url", "resource", "assign", "label"]:
+#							print(json.dumps(module, indent=4))
 					except Exception as e:
 						print(f"Failed to download the module {module}: {e}")
 
