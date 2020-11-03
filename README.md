@@ -10,10 +10,10 @@ pip3 install -r requirements.txt
 
 Copy ``config.json.example`` to ``config.json`` and adjust the settings:
 
-```json
+```js
 {
-    "selected_courses": [], //Only these courses will be synced, of the form "https://moodle.rwth-aachen.de/course/view.php?id=XXXXX"
-    "only_sync_semester": [], //Only these semesters will be synced, of the form 20ws (only used if selected_courses is empty)
+    "selected_courses": [], //Only these courses will be synced, of the form "https://moodle.rwth-aachen.de/course/view.php?id=XXXXX" (if empty, all courses will be synced)
+    "only_sync_semester": [], //Only these semesters will be synced, of the form 20ws (only used if selected_courses is empty, if empty all semesters will be synced)
     "user": "", //Your RWTH SSO username
     "password": "", //Your RWTH SSO password
     "basedir": "./", //The base directory where all files will be synced to
