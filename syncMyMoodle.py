@@ -66,7 +66,12 @@ class SyncMyMoodle:
 	def get_moodle_wstoken(self):
 		if not self.session:
 			raise Exception("You need to login() first.")
-		response = self.session.get("https://moodle.rwth-aachen.de/admin/tool/mobile/launch.php?service=moodle_mobile_app&passport=1&urlscheme=moodlemobile", allow_redirects=False)
+		params = {
+			"service": "moodle_mobile_app",
+			"passport" :1,
+			"urlscheme": "moodlemobile"
+		}
+		response = self.session.get("https://moodle.rwth-aachen.de/admin/tool/mobile/launch.php", params=params, allow_redirects=False)
 		# token is in an app schema, which contains the wstoken base64-encoded along with some other token
 		token_base64d = response.headers["Location"].split("token=")[1]
 		self.wstoken = base64.b64decode(token_base64d).decode().split(":::")[1]
@@ -81,7 +86,11 @@ class SyncMyMoodle:
 			"wsfunction": "tool_mobile_call_external_functions",
 			"wstoken": self.wstoken
 		}
-		resp = self.session.post(f"https://moodle.rwth-aachen.de/webservice/rest/server.php?moodlewsrestformat=json&wsfunction=tool_mobile_call_external_functions", data=data)
+		params = {
+			"moodlewsrestformat": "json",
+			"wsfunction": "tool_mobile_call_external_functions"
+		}
+		resp = self.session.post(f"https://moodle.rwth-aachen.de/webservice/rest/server.php", params=params, data=data)
 		return json.loads(resp.json()["responses"][0]["data"])
 
 	def get_course(self, course_id):
@@ -92,7 +101,11 @@ class SyncMyMoodle:
 			"wsfunction": "core_course_get_contents",
 			"wstoken": self.wstoken,
 		}
-		resp = self.session.post(f"https://moodle.rwth-aachen.de/webservice/rest/server.php?moodlewsrestformat=json&wsfunction=core_course_get_contents", data=data)
+		params = {
+			"moodlewsrestformat": "json",
+			"wsfunction": "core_course_get_contents"
+		}
+		resp = self.session.post(f"https://moodle.rwth-aachen.de/webservice/rest/server.php", params=params, data=data)
 		return resp.json()
 
 	def get_userid(self):
@@ -102,7 +115,11 @@ class SyncMyMoodle:
 			"wsfunction": "core_webservice_get_site_info",
 			"wstoken": self.wstoken,
 		}
-		resp = self.session.post(f"https://moodle.rwth-aachen.de/webservice/rest/server.php?moodlewsrestformat=json&wsfunction=core_webservice_get_site_info", data=data)
+		params = {
+			"moodlewsrestformat": "json",
+			"wsfunction": "core_webservice_get_site_info"
+		}
+		resp = self.session.post(f"https://moodle.rwth-aachen.de/webservice/rest/server.php", params=params, data=data)
 		self.user_id = resp.json()["userid"]
 		return self.user_id
 
@@ -115,7 +132,11 @@ class SyncMyMoodle:
 			"wsfunction": "mod_assign_get_assignments",
 			"wstoken": self.wstoken
 		}
-		resp = self.session.post(f"https://moodle.rwth-aachen.de/webservice/rest/server.php?moodlewsrestformat=json&wsfunction=mod_assign_get_assignments", data=data)
+		params = {
+			"moodlewsrestformat": "json",
+			"wsfunction": "mod_assign_get_assignments"
+		}
+		resp = self.session.post(f"https://moodle.rwth-aachen.de/webservice/rest/server.php", params=params, data=data)
 		return resp.json()["courses"][0]
 
 	# The main syncing part
@@ -148,87 +169,90 @@ class SyncMyMoodle:
 				sectionpath = os.path.join(self.config["basedir"],semestername,coursename,sectionname)
 
 				for module in section["modules"]:
-					## Get Assignments
-					if module["modname"] == "assign":
-						ass = [a for a in assignments["assignments"] if a["cmid"] == module["id"]][0]["introattachments"]
-						for c in ass:
-							if c["filepath"] != "/":
-								filepath = os.path.join(sectionpath, c["filepath"])
-							else:
-								filepath = sectionpath
-							self.download_file(c["fileurl"], filepath, c["filename"])
+					try:
+						## Get Assignments
+						if module["modname"] == "assign":
+							ass = [a for a in assignments["assignments"] if a["cmid"] == module["id"]][0]["introattachments"]
+							for c in ass:
+								if c["filepath"] != "/":
+									filepath = os.path.join(sectionpath, c["filepath"])
+								else:
+									filepath = sectionpath
+								self.download_file(c["fileurl"], filepath, c["filename"])
 
-					## Get Resources
-					if module["modname"] == "resource":
-						if not module.get("contents"):
-							continue
-						for c in module["contents"]:
-							path = sectionpath
-							if len(module["contents"])>0:
-								path = os.path.join(path,module["name"])
-							# First check if the file is directly accessible:
-							if self.download_file(c["fileurl"], sectionpath, c["filename"]):
+						## Get Resources
+						if module["modname"] == "resource":
+							if not module.get("contents"):
 								continue
-							# If no file was found, then it could be an html page with an enbedded video
-							response = self.session.get(c["fileurl"])
-							if "Content-Type" in response.headers and "text/html" in response.headers["Content-Type"]:
-								tempsoup = bs(response.text, features="html.parser")
-								videojs = tempsoup.select_one(".video-js")
-								if videojs:
-									videojs = videojs.select_one("source")
-									if videojs and videojs.get("src"):
-										self.download_file(videojs["src"], sectionpath, videojs["src"].split("/")[-1])
-								elif "engage.streaming.rwth-aachen.de" in response.text:
-									engage_videos = soup.select('iframe[data-framesrc*="engage.streaming.rwth-aachen.de"]')
-									for vid in engage_videos:
-										self.downloadOpenCastVideos(vid.get("data-framesrc"), course["id"], path)
-
-					## Get Resources in URLs
-					if module["modname"] == "url":
-						if not module.get("contents"):
-							continue
-						for c in module["contents"]:
-							try:
-								if "engage.streaming.rwth-aachen.de" in c["fileurl"]:
-									# Maybe its a link to an OpenCast video
-									self.downloadOpenCastVideos(c["fileurl"], course["id"], sectionpath)
+							for c in module["contents"]:
+								path = sectionpath
+								if len(module["contents"])>0:
+									path = os.path.join(path,module["name"])
+								# First check if the file is directly accessible:
+								if self.download_file(c["fileurl"], sectionpath, c["filename"]):
 									continue
-								if "youtube" in c["fileurl"]:
-									self.scanAndDownloadYouTube(c["fileurl"], sectionpath)
-								response = self.session.head(c["fileurl"])
-								if "Content-Type" in response.headers and "text/html" not in response.headers["Content-Type"]:
-									# Don't download html pages
-									self.download_file(c["fileurl"], sectionpath, c["fileurl"].split("/")[-1])
-							except Exception as e:
-								# Maybe the url is down?
-								print(f'Error while downloading url {c["fileurl"]}: {e}')
+								# If no file was found, then it could be an html page with an enbedded video
+								response = self.session.get(c["fileurl"])
+								if "Content-Type" in response.headers and "text/html" in response.headers["Content-Type"]:
+									tempsoup = bs(response.text, features="html.parser")
+									videojs = tempsoup.select_one(".video-js")
+									if videojs:
+										videojs = videojs.select_one("source")
+										if videojs and videojs.get("src"):
+											self.download_file(videojs["src"], sectionpath, videojs["src"].split("/")[-1])
+									elif "engage.streaming.rwth-aachen.de" in response.text:
+										engage_videos = soup.select('iframe[data-framesrc*="engage.streaming.rwth-aachen.de"]')
+										for vid in engage_videos:
+											self.downloadOpenCastVideos(vid.get("data-framesrc"), course["id"], path)
 
-					## Get Folders
-					if module["modname"] == "folder":
-						if not module.get("contents"):
-							continue
-						for c in module["contents"]:
-							if c["filepath"] != "/":
-								filepath = os.path.join(sectionpath, c["filepath"])
-							else:
-								filepath = sectionpath
-							self.download_file(c["fileurl"], filepath,  c["filename"])
+						## Get Resources in URLs
+						if module["modname"] == "url":
+							if not module.get("contents"):
+								continue
+							for c in module["contents"]:
+								try:
+									if "engage.streaming.rwth-aachen.de" in c["fileurl"]:
+										# Maybe its a link to an OpenCast video
+										self.downloadOpenCastVideos(c["fileurl"], course["id"], sectionpath)
+										continue
+									if "youtube" in c["fileurl"]:
+										self.scanAndDownloadYouTube(c["fileurl"], sectionpath)
+										continue
+									response = self.session.head(c["fileurl"])
+									if "Content-Type" in response.headers and "text/html" not in response.headers["Content-Type"]:
+										# Don't download html pages
+										self.download_file(c["fileurl"], sectionpath, c["fileurl"].split("/")[-1])
+								except Exception as e:
+									# Maybe the url is down?
+									print(f'Error while downloading url {c["fileurl"]}: {e}')
 
-					## Get embedded videos in pages
-					if module["modname"] == "page":
-						response = self.session.get(module["url"], params=self.params)
-						soup = bs(response.text, features="html.parser")
+						## Get Folders
+						if module["modname"] == "folder":
+							if not module.get("contents"):
+								continue
+							for c in module["contents"]:
+								if c["filepath"] != "/":
+									filepath = os.path.join(sectionpath, c["filepath"])
+								else:
+									filepath = sectionpath
+								self.download_file(c["fileurl"], filepath,  c["filename"])
 
-						# Youtube videos
-						links = re.findall("https://www.youtube.com/embed/.{11}", str(response.text))
-						for l in links:
-							self.scanAndDownloadYouTube(l, sectionpath)
+						## Get embedded videos in pages
+						if module["modname"] == "page":
+							response = self.session.get(module["url"], params=self.params)
+							soup = bs(response.text, features="html.parser")
 
-						# OpenCast videos
-						engage_videos = soup.select('iframe[data-framesrc*="engage.streaming.rwth-aachen.de"]')
-						for vid in engage_videos:
-							self.downloadOpenCastVideos(vid.get("data-framesrc"), course["id"], sectionpath)
+							# Youtube videos
+							links = re.findall("https://www.youtube.com/embed/.{11}", str(response.text))
+							for l in links:
+								self.scanAndDownloadYouTube(l, sectionpath)
 
+							# OpenCast videos
+							engage_videos = soup.select('iframe[data-framesrc*="engage.streaming.rwth-aachen.de"]')
+							for vid in engage_videos:
+								self.downloadOpenCastVideos(vid.get("data-framesrc"), course["id"], sectionpath)
+					except Exception as e:
+						print(f"Failed to download the module {module}: {e}")
 	# Downloads file with progress bar if it isn't already downloaded
 	# TODO: while writing use temporary filename and only rename it when finished
 
