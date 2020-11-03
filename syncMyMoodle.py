@@ -232,15 +232,22 @@ class SyncMyMoodle:
 								continue
 							for c in module["contents"]:
 								if c["filepath"] != "/":
+									while c["filepath"][-1] == "/":
+										c["filepath"] = c["filepath"][:-1]
+									while c["filepath"][0] == "/":
+										c["filepath"] = c["filepath"][1:]
 									filepath = os.path.join(sectionpath, c["filepath"])
 								else:
 									filepath = sectionpath
 								self.download_file(c["fileurl"], filepath,  c["filename"])
 
-						## Get embedded videos in pages
-						if module["modname"] == "page":
-							response = self.session.get(module["url"], params=self.params)
-							soup = bs(response.text, features="html.parser")
+						## Get embedded videos in pages or labels
+						if module["modname"] in ["page","label"]:
+							if module["modname"] == "page":
+								response = self.session.get(module["url"], params=self.params)
+								soup = bs(response.text, features="html.parser")
+							else:
+								soup = bs(module["description"], features="html.parser")
 
 							# Youtube videos
 							links = re.findall("https://www.youtube.com/embed/.{11}", str(response.text))
@@ -251,12 +258,19 @@ class SyncMyMoodle:
 							engage_videos = soup.select('iframe[data-framesrc*="engage.streaming.rwth-aachen.de"]')
 							for vid in engage_videos:
 								self.downloadOpenCastVideos(vid.get("data-framesrc"), course["id"], sectionpath)
+
+						if module["modname"] not in ["page", "folder", "url", "resource", "assign", "label"]:
+							print(json.dumps(module, indent=4))
 					except Exception as e:
 						print(f"Failed to download the module {module}: {e}")
+
 	# Downloads file with progress bar if it isn't already downloaded
-	# TODO: while writing use temporary filename and only rename it when finished
 
 	def download_file(self, url, path, filename):
+		while filename[-1] == " ":
+			filename = filename[:-1]
+		while filename[0] == " ":
+			filename = filename[1:]
 		downloadpath = os.path.join(path,filename)
 		if os.path.exists(downloadpath):
 			return True
@@ -269,11 +283,12 @@ class SyncMyMoodle:
 				progress_bar = tqdm(total=total_size_in_bytes, unit='iB', unit_scale=True)
 				if not os.path.exists(path):
 					os.makedirs(path)
-				with open(downloadpath,"wb") as file:
+				with open(downloadpath + ".temp","wb") as file:
 					for data in response.iter_content(self.block_size):
 						progress_bar.update(len(data))
 						file.write(data)
 				progress_bar.close()
+				os.rename(downloadpath + ".temp", downloadpath)
 				return True
 		return False
 
@@ -291,7 +306,7 @@ class SyncMyMoodle:
 
 		linkid = re.match("https://engage.streaming.rwth-aachen.de/play/([a-z0-9\-]{36})$", engageLink)
 		if not linkid:
-			return
+			return False
 		episodejson = f'https://engage.streaming.rwth-aachen.de/search/episode.json?id={linkid.groups()[0]}'
 		episodejson = json.loads(self.session.get(episodejson).text)
 		
@@ -299,24 +314,27 @@ class SyncMyMoodle:
 		tracks = sorted([(t["url"],t["video"]["resolution"]) for t in tracks if t["mimetype"] == 'video/mp4' and "transport" not in t], key=(lambda x: int(x[1].split("x")[0]) ))
 		# only choose mp4s provided with plain https (no transport key), and use the one with the highest resolution (sorted by width) (could also use bitrate)
 		finaltrack = tracks[-1]
-		self.download_file(finaltrack[0], path, finaltrack[0].split("/")[-1])
+		return self.download_file(finaltrack[0], path, finaltrack[0].split("/")[-1])
 
 	# Downloads Youtube-Videos using youtube_dl
 
 	def scanAndDownloadYouTube(self, link, path):
 		if os.path.exists(path):
 			if len([f for f in os.listdir(path) if link[-11:] in f])!=0:
-				return
+				return False
 		ydl_opts = {
 			"outtmpl": "{}/%(title)s-%(id)s.%(ext)s".format(path),
 			"ignoreerrors": True,
 			"nooverwrites": True,
 			"retries": 15
 		}
+		if self.dryrun:
+			return True
 		if not os.path.exists(path):
 			os.makedirs(path)
 		with youtube_dl.YoutubeDL(ydl_opts) as ydl:
 			ydl.download([link])
+		return True
 
 if __name__ == '__main__':
 	if not os.path.exists("config.json"):
