@@ -3,236 +3,305 @@
 import requests, pickle
 from bs4 import BeautifulSoup as bs
 import os
-import unicodedata
-import string
 import re
 from contextlib import closing
-import urllib.parse
 import json
-import helper
-#from datetime import datetime
+import base64
+import youtube_dl
+from tqdm import tqdm
 
 class SyncMyMoodle:
 	params = {
 		'lang': 'en' #Titles for some pages differ
 	}
-	courses = []
+	block_size = 1024
 
-	def __init__(self, config):
+	def __init__(self, config, dryrun=False):
 		self.config = config
-		helper.replace_spaces_by_underscores = self.config["replace_spaces_by_underscores"]
 		self.session = None
 		self.courses = None
+		self.session_key = None
+		self.wstoken = None
+		self.user_id = None
 		self.sections = dict()
 		self.max_semester = -1
+		self.dryrun = dryrun
+
+	# RWTH SSO Login
 
 	def login(self):
-		self.session = helper.login(self.config["user"], self.config["password"], self.config["cookie_file"])
-
-	def get_courses(self, getAllCourses=False):
-		if not self.session:
-			raise Exception("You need to login() first.")
-		response = self.session.get('https://moodle.rwth-aachen.de/my/', params=self.params)
-		soup = bs(response.text, features="html.parser")
-		categories = [(c["value"], c.text) for c in soup.find("select", {"name": "coc-category"}).findAll("option")]
-		categories.remove(('all', 'All'))
-		self.max_semester = max(categories, key=lambda item:int(item[0]))
-		self.selected_categories = [c for c in categories if c == self.max_semester] if (not getAllCourses and self.config["onlyfetchcurrentsemester"]) else categories
-
-		self.courses = [(c.find("h3").find("a")["href"], helper.clean_filename(semestername), c.get_text().replace("\n","")) for (sid, semestername) in self.selected_categories for c in soup.select(f".coc-category-{sid}")]
-
-		if self.config["selected_courses"] and not getAllCourses:
-			self.courses = [(cid, semestername, title) for (cid, semestername, title) in self.courses if cid in self.config["selected_courses"]]
-
-	def get_sections(self):
-		if not self.session:
-			raise Exception("You need to login() first.")
-		if not self.courses:
-			raise Exception("You need to get_courses() first.")
-
-		for cid, semestername, _ in self.courses:
-			response = self.session.get(cid, params=self.params)
-			soup = bs(response.text, features="html.parser")
-
-			# needed for OpenCast
+		def get_session_key(soup):
 			session_key = soup.find("a", {"data-title": "logout,moodle"})["href"]
-			session_key = re.findall("sesskey=([a-zA-Z0-9]*)", session_key)[0]
-			course_id = re.findall("id=([0-9]*)", cid)[0]
+			return re.findall("sesskey=([a-zA-Z0-9]*)", session_key)[0]
 
-			coursename = helper.clean_filename(soup.select_one(".page-header-headings").text)
+		self.session = requests.Session()
+		if os.path.exists(self.config["cookie_file"]):
+			with open(self.config["cookie_file"], 'rb') as f:
+				self.session.cookies.update(pickle.load(f))
+		resp = self.session.get("https://moodle.rwth-aachen.de/")
+		resp = self.session.get("https://moodle.rwth-aachen.de/auth/shibboleth/index.php")
+		if resp.url == "https://moodle.rwth-aachen.de/my/":
+			soup = bs(resp.text, features="html.parser")
+			self.session_key = get_session_key(soup)
+			with open(self.config["cookie_file"], 'wb') as f:
+				pickle.dump(self.session.cookies, f)
+			return
+		soup = bs(resp.text, features="html.parser")
+		if soup.find("input",{"name": "RelayState"}) is None:
+			data = {'j_username': self.config["user"],
+					'j_password': self.config["password"],
+					'_eventId_proceed': ''}
+			resp2 = self.session.post(resp.url,data=data)
+			soup = bs(resp2.text, features="html.parser")
+		data = {"RelayState": soup.find("input",{"name": "RelayState"})["value"], 
+				"SAMLResponse": soup.find("input",{"name": "SAMLResponse"})["value"]}
+		resp = self.session.post("https://moodle.rwth-aachen.de/Shibboleth.sso/SAML2/POST", data=data)
+		with open(self.config["cookie_file"], 'wb') as f:
+			soup = bs(resp.text, features="html.parser")
+			self.session_key = get_session_key(soup)
+			pickle.dump(self.session.cookies, f)
 
-			# Get Sections. Some courses have them on one page, others on multiple, then we need to crawl all of them
-			sectionpages = re.findall("&section=[0-9]+", response.text)
-			if sectionpages:
-				self.sections[course_id,session_key,semestername,coursename] = []
-				for s in sectionpages:
-					response = self.session.get(cid+s, params=self.params)
-					tempsoup = bs(response.text, features="html.parser")
-					self.sections[course_id,session_key,semestername,coursename].extend(tempsoup.select_one(".topics").children)
-			else:
-				self.sections[course_id,session_key,semestername,coursename] = soup.select_one(".topics").children
+	# Moodle Web Services API
+
+	def get_moodle_wstoken(self):
+		if not self.session:
+			raise Exception("You need to login() first.")
+		response = self.session.get("https://moodle.rwth-aachen.de/admin/tool/mobile/launch.php?service=moodle_mobile_app&passport=1&urlscheme=moodlemobile", allow_redirects=False)
+		# token is in an app schema, which contains the wstoken base64-encoded along with some other token
+		token_base64d = response.headers["Location"].split("token=")[1]
+		self.wstoken = base64.b64decode(token_base64d).decode().split(":::")[1]
+		return self.wstoken
+
+	def get_all_courses(self):
+		data = {
+			"requests[0][function]": "core_enrol_get_users_courses",
+			"requests[0][arguments]": json.dumps({"userid": str(self.user_id), "returnusercount": "0"}),
+			"requests[0][settingfilter]": 1,
+			"requests[0][settingfileurl]": 1,
+			"wsfunction": "tool_mobile_call_external_functions",
+			"wstoken": self.wstoken
+		}
+		resp = self.session.post(f"https://moodle.rwth-aachen.de/webservice/rest/server.php?moodlewsrestformat=json&wsfunction=tool_mobile_call_external_functions", data=data)
+		return json.loads(resp.json()["responses"][0]["data"])
+
+	def get_course(self, course_id):
+		data = {
+			"courseid": int(course_id),
+			"moodlewssettingfilter": True,
+			"moodlewssettingfileurl": True,
+			"wsfunction": "core_course_get_contents",
+			"wstoken": self.wstoken,
+		}
+		resp = self.session.post(f"https://moodle.rwth-aachen.de/webservice/rest/server.php?moodlewsrestformat=json&wsfunction=core_course_get_contents", data=data)
+		return resp.json()
+
+	def get_userid(self):
+		data = {
+			"moodlewssettingfilter": True,
+			"moodlewssettingfileurl": True,
+			"wsfunction": "core_webservice_get_site_info",
+			"wstoken": self.wstoken,
+		}
+		resp = self.session.post(f"https://moodle.rwth-aachen.de/webservice/rest/server.php?moodlewsrestformat=json&wsfunction=core_webservice_get_site_info", data=data)
+		self.user_id = resp.json()["userid"]
+		return self.user_id
+
+	def get_assignment(self, course_id):
+		data = {
+			"courseids[0]": int(course_id),
+			"includenotenrolledcourses": 1,
+			"moodlewssettingfilter": True,
+			"moodlewssettingfileurl": True,
+			"wsfunction": "mod_assign_get_assignments",
+			"wstoken": self.wstoken
+		}
+		resp = self.session.post(f"https://moodle.rwth-aachen.de/webservice/rest/server.php?moodlewsrestformat=json&wsfunction=mod_assign_get_assignments", data=data)
+		return resp.json()["courses"][0]
+
+	# The main syncing part
 
 	def sync(self):
 		if not self.session:
 			raise Exception("You need to login() first.")
-		if not self.courses:
-			raise Exception("You need to get_courses() first.")
-		if not self.sections:
-			raise Exception("You need to get_sections() first.")
+		if not self.wstoken:
+			raise Exception("You need to get_moodle_wstoken() first.")
+		if not self.user_id:
+			raise Exception("You need to get_userid() first.")
 
 		### Syncing all courses
+		for course in self.get_all_courses():
+			# Skip not selected courses
+			if len(self.config["selected_courses"])>0 and len([c for c in self.config["selected_courses"] if str(course["id"]) in c])==0:
+				continue
 
-		for course_id, session_key, semestername, coursename in self.sections.keys():
+			semestername = course["idnumber"][:4]
+			# Skip not selected semesters
+			if len(self.config["selected_courses"])==0 and self.config["only_sync_semester"] and semestername not in self.config["only_sync_semester"]:
+				continue
+
+			coursename = course["shortname"]
 			print(f"Syncing {coursename}...")
-			for sec in self.sections[course_id, session_key, semestername, coursename]:
-				sectionname = helper.clean_filename(sec.select_one(".sectionname").get_text())
+			assignments = self.get_assignment(course["id"])
+			for section in self.get_course(course["id"]):
+				sectionname = section["name"]
 				#print(f"[{datetime.now()}] Section {sectionname}")
-				mainsectionpath = os.path.join(self.config["basedir"],semestername,coursename,sectionname)
+				sectionpath = os.path.join(self.config["basedir"],semestername,coursename,sectionname)
 
-				# Categories can be multiple levels deep like folders, see https://moodle.rwth-aachen.de/course/view.php?id=7053&section=1
+				for module in section["modules"]:
+					## Get Assignments
+					if module["modname"] == "assign":
+						ass = [a for a in assignments["assignments"] if a["cmid"] == module["id"]][0]["introattachments"]
+						for c in ass:
+							if c["filepath"] != "/":
+								filepath = os.path.join(sectionpath, c["filepath"])
+							else:
+								filepath = sectionpath
+							self.download_file(c["fileurl"], filepath, c["filename"])
 
-				label_categories = sec.findAll("li", {"class": [
-					"modtype_label",
-					"modtype_resource",
-					"modtype_url",
-					"modtype_folder",
-					"modtype_assign",
-					"modtype_page",
-				]})
-
-				categories = []
-				category = None
-				for l in label_categories:
-					# Create a category for all labels if enableExperimentalCategories is set
-					if "modtype_label" in l['class'] and self.config["enableExperimentalCategories"]:
-						category = (helper.clean_filename(l.findAll(text=True)[-1]), [])
-						categories.append(category)
-					else:
-						if category == None:
-							category = (None, [])
-							categories.append(category)
-						category[1].append(l)
-
-				## Download Opencast Videos directly embedded in section
-				helper.scan_for_opencast(sec, course_id, session_key, mainsectionpath, self.session)
-
-				for category_name, category_soups in categories:
-					if category_name == None:
-						sectionpath = mainsectionpath
-					else:
-						sectionpath = os.path.join(mainsectionpath, category_name)
-					for s in category_soups:
-						mod_link = s.find('a', href=True)
-						if not mod_link:
+					## Get Resources
+					if module["modname"] == "resource":
+						if not module.get("contents"):
 							continue
-						mod_link = mod_link["href"]
-
-						## Get Resources
-						if "modtype_resource" in s["class"]:
+						for c in module["contents"]:
+							path = sectionpath
+							if len(module["contents"])>0:
+								path = os.path.join(path,module["name"])
 							# First check if the file is directly accessible:
-							if helper.download_file(mod_link,sectionpath, self.session):
+							if self.download_file(c["fileurl"], sectionpath, c["filename"]):
 								continue
 							# If no file was found, then it could be an html page with an enbedded video
-							response = self.session.get(mod_link, params=self.params)
+							response = self.session.get(c["fileurl"])
 							if "Content-Type" in response.headers and "text/html" in response.headers["Content-Type"]:
 								tempsoup = bs(response.text, features="html.parser")
 								videojs = tempsoup.select_one(".video-js")
 								if videojs:
 									videojs = videojs.select_one("source")
 									if videojs and videojs.get("src"):
-										helper.download_file(videojs["src"],sectionpath, self.session, videojs["src"].split("/")[-1])
+										self.download_file(videojs["src"], sectionpath, videojs["src"].split("/")[-1])
+								elif "engage.streaming.rwth-aachen.de" in response.text:
+									engage_videos = soup.select('iframe[data-framesrc*="engage.streaming.rwth-aachen.de"]')
+									for vid in engage_videos:
+										self.downloadOpenCastVideos(vid.get("data-framesrc"), course["id"], path)
 
-						## Get Resources in URLs
-						if "modtype_url" in s["class"]:
-							url = None
+					## Get Resources in URLs
+					if module["modname"] == "url":
+						if not module.get("contents"):
+							continue
+						for c in module["contents"]:
 							try:
-								response = self.session.head(mod_link, params=self.params)
-								if "Location" in response.headers:
-									url = response.headers["Location"]
-									response = self.session.head(url, params=self.params)
-									if "Content-Type" in response.headers and "text/html" not in response.headers["Content-Type"]:
-										# Don't download html pages
-										helper.download_file(url, sectionpath, self.session)
-									elif "engage.streaming.rwth-aachen.de" in url:
-										# Maybe its a link to an OpenCast video
-										helper.downloadOpenCastVideos(url, course_id, session_key, sectionpath, self.session)
-							except:
+								if "engage.streaming.rwth-aachen.de" in c["fileurl"]:
+									# Maybe its a link to an OpenCast video
+									self.downloadOpenCastVideos(c["fileurl"], course["id"], sectionpath)
+									continue
+								if "youtube" in c["fileurl"]:
+									self.scanAndDownloadYouTube(c["fileurl"], sectionpath)
+								response = self.session.head(c["fileurl"])
+								if "Content-Type" in response.headers and "text/html" not in response.headers["Content-Type"]:
+									# Don't download html pages
+									self.download_file(c["fileurl"], sectionpath, c["fileurl"].split("/")[-1])
+							except Exception as e:
 								# Maybe the url is down?
-								print(f"Error while downloading url {url}")
+								print(f'Error while downloading url {c["fileurl"]}: {e}')
 
-						## Get Folders
-						if "modtype_folder" in s["class"]:
-							response = self.session.get(mod_link, params=self.params)
-							soup = bs(response.text, features="html.parser")
-							soup_results = soup.find("a", {"title": "Folder"})
+					## Get Folders
+					if module["modname"] == "folder":
+						if not module.get("contents"):
+							continue
+						for c in module["contents"]:
+							if c["filepath"] != "/":
+								filepath = os.path.join(sectionpath, c["filepath"])
+							else:
+								filepath = sectionpath
+							self.download_file(c["fileurl"], filepath,  c["filename"])
 
-							if not soup_results:
-								# page has no title?
-								continue
+					## Get embedded videos in pages
+					if module["modname"] == "page":
+						response = self.session.get(module["url"], params=self.params)
+						soup = bs(response.text, features="html.parser")
 
-							foldername = helper.clean_filename(soup_results.text)
-							filemanager = soup.select_one(".filemanager").findAll('a', href=True)
-							# Scheiß auf folder, das mach ich 1 andernmal
-							for file in filemanager:
-								link = file["href"]
-								filename = file.select_one(".fp-filename").text
-								helper.download_file(link, os.path.join(sectionpath, foldername), self.session, filename)
+						# Youtube videos
+						links = re.findall("https://www.youtube.com/embed/.{11}", str(response.text))
+						for l in links:
+							self.scanAndDownloadYouTube(l, sectionpath)
 
-						## Get Assignments
-						if "modtype_assign" in s["class"]:
-							response = self.session.get(mod_link, params=self.params)
-							soup = bs(response.text, features="html.parser")
-							soup_results = soup.find("a", {"title": "Assignment"})
+						# OpenCast videos
+						engage_videos = soup.select('iframe[data-framesrc*="engage.streaming.rwth-aachen.de"]')
+						for vid in engage_videos:
+							self.downloadOpenCastVideos(vid.get("data-framesrc"), course["id"], sectionpath)
 
-							if not soup_results:
-								# page has no title?
-								continue
+	# Downloads file with progress bar if it isn't already downloaded
+	# TODO: while writing use temporary filename and only rename it when finished
 
-							foldername = helper.clean_filename(soup_results.text)
-							files = soup.select(".fileuploadsubmission")
-							for file in files:
-								link = file.find('a', href=True)["href"]
-								filename = file.text
-								helper.download_file(link, os.path.join(sectionpath, foldername), self.session, filename)
+	def download_file(self, url, path, filename):
+		downloadpath = os.path.join(path,filename)
+		if os.path.exists(downloadpath):
+			return True
+		with closing(self.session.get(url, stream=True)) as response:
+			if not os.path.exists(downloadpath):
+				print(f"Downloading {downloadpath}")
+				if self.dryrun:
+					return True
+				total_size_in_bytes= int(response.headers.get('content-length', 0))
+				progress_bar = tqdm(total=total_size_in_bytes, unit='iB', unit_scale=True)
+				if not os.path.exists(path):
+					os.makedirs(path)
+				with open(downloadpath,"wb") as file:
+					for data in response.iter_content(self.block_size):
+						progress_bar.update(len(data))
+						file.write(data)
+				progress_bar.close()
+				return True
+		return False
 
-						## Get embedded videos in pages
-						if "modtype_page" in s["class"]:
-							response = self.session.get(mod_link, params=self.params)
-							soup = bs(response.text, features="html.parser")
-							soup_results = soup.find("a", {"title": "Page"})
+	# Downloads Opencast videos by using the engage API
 
-							if not soup_results:
-								# page has no title?
-								continue
+	def downloadOpenCastVideos(self, engageLink, courseid, path):
+		# get engage authentication form
+		course_info = [{"index":0,"methodname":"filter_opencast_get_lti_form","args":{"courseid":str(courseid)}}]
+		response = self.session.post(f'https://moodle.rwth-aachen.de/lib/ajax/service.php?sesskey={self.session_key}&info=filter_opencast_get_lti_form', data=json.dumps(course_info))
 
-							pagename = helper.clean_filename(soup_results.text)
-							path = os.path.join(sectionpath, pagename)
+		# submit engage authentication info
+		engageDataSoup = bs(response.json()[0]["data"], features="html.parser")
+		engageData = dict([(i["name"], i["value"]) for i in engageDataSoup.findAll("input")])
+		response = self.session.post('https://engage.streaming.rwth-aachen.de/lti', data=engageData)
 
-							# Youtube videos
-							helper.scanAndDownloadYouTube(soup, path)
+		linkid = re.match("https://engage.streaming.rwth-aachen.de/play/([a-z0-9\-]{36})$", engageLink)
+		if not linkid:
+			return
+		episodejson = f'https://engage.streaming.rwth-aachen.de/search/episode.json?id={linkid.groups()[0]}'
+		episodejson = json.loads(self.session.get(episodejson).text)
+		
+		tracks = episodejson["search-results"]["result"]["mediapackage"]["media"]["track"]
+		tracks = sorted([(t["url"],t["video"]["resolution"]) for t in tracks if t["mimetype"] == 'video/mp4' and "transport" not in t], key=(lambda x: int(x[1].split("x")[0]) ))
+		# only choose mp4s provided with plain https (no transport key), and use the one with the highest resolution (sorted by width) (could also use bitrate)
+		finaltrack = tracks[-1]
+		self.download_file(finaltrack[0], path, finaltrack[0].split("/")[-1])
 
-							# OpenCast videos
-							helper.scan_for_opencast(soup, course_id, session_key, path, self.session)
+	# Downloads Youtube-Videos using youtube_dl
+
+	def scanAndDownloadYouTube(self, link, path):
+		if os.path.exists(path):
+			if len([f for f in os.listdir(path) if link[-11:] in f])!=0:
+				return
+		ydl_opts = {
+			"outtmpl": "{}/%(title)s-%(id)s.%(ext)s".format(path),
+			"ignoreerrors": True,
+			"nooverwrites": True,
+			"retries": 15
+		}
+		if not os.path.exists(path):
+			os.makedirs(path)
+		with youtube_dl.YoutubeDL(ydl_opts) as ydl:
+			ydl.download([link])
 
 if __name__ == '__main__':
 	if not os.path.exists("config.json"):
-		config = {
-			"selected_courses": [],
-			"onlyfetchcurrentsemester": True,
-			"enableExperimentalCategories": False,
-			"user": "",
-			"password": "",
-			"basedir": "./",
-			"cookie_file": "./self.session",
-			"replace_spaces_by_underscores": True
-		}
-	else:
-		config = json.load(open("config.json"))
-	smm = SyncMyMoodle(config)
+		print("You need to copy config.json.example to config.json and adjust the settings!")
+	config = json.load(open("config.json"))
+	smm = SyncMyMoodle(config, dryrun=config.get("dryrun"))
 
 	print(f"Logging in...")
 	smm.login()
-	print(f"Getting course info...")
-	smm.get_courses()
-	smm.get_sections()
+	smm.get_moodle_wstoken()
+	smm.get_userid()
 	smm.sync()

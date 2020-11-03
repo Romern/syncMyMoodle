@@ -1,10 +1,8 @@
 {
-  "selected_courses": [],
-  "onlyfetchcurrentsemester": true,
-  "enableExperimentalCategories": false,
-  "user": "",
-  "password": "",
-  "basedir": "./",
-  "cookie_file": "./session",
-  "replace_spaces_by_underscores": true
+    "selected_courses": [],
+    "only_sync_semester": [],
+    "user": "",
+    "password": "",
+    "basedir": "./",
+    "cookie_file": "./session"
 }
