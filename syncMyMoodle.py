@@ -274,6 +274,8 @@ class SyncMyMoodle:
 		downloadpath = os.path.join(path,filename)
 		if os.path.exists(downloadpath):
 			return True
+		url = url.replace("webservice/pluginfile.php","tokenpluginfile.php/ccecbbbb10e0622b41a97086ac9fb054")
+
 		with closing(self.session.get(url, stream=True)) as response:
 			if not os.path.exists(downloadpath):
 				print(f"Downloading {downloadpath}")
