@@ -185,6 +185,10 @@ class SyncMyMoodle:
 						if module["modname"] == "resource":
 							if not module.get("contents"):
 								continue
+
+							if self.config.get("downloaded_modules") != None and self.config.get("downloaded_modules").get(str(module["id"])) and int(self.config.get("downloaded_modules")[str(module["id"])]) >= int(module["contentsinfo"]["lastmodified"]):
+								continue
+
 							for c in module["contents"]:
 								path = sectionpath
 								if len(module["contents"])>0:
@@ -206,10 +210,18 @@ class SyncMyMoodle:
 										for vid in engage_videos:
 											self.downloadOpenCastVideos(vid.get("data-framesrc"), course["id"], path)
 
+							if self.config.get("downloaded_modules") != None:
+								self.config.get("downloaded_modules")[str(module["id"])] = int(module["contentsinfo"]["lastmodified"])
+
 						## Get Resources in URLs
 						if module["modname"] == "url":
 							if not module.get("contents"):
 								continue
+
+							if self.config.get("downloaded_modules") != None and self.config.get("downloaded_modules").get(str(module["id"])):
+								continue
+
+							failed = False
 							for c in module["contents"]:
 								try:
 									if "engage.streaming.rwth-aachen.de" in c["fileurl"]:
@@ -225,12 +237,21 @@ class SyncMyMoodle:
 										self.download_file(c["fileurl"], sectionpath, c["fileurl"].split("/")[-1])
 								except Exception as e:
 									# Maybe the url is down?
+									failed = True
 									print(f'Error while downloading url {c["fileurl"]}: {e}')
+
+							if not failed:
+								if self.config.get("downloaded_modules") != None:
+									self.config.get("downloaded_modules")[str(module["id"])] = "downloaded"
 
 						## Get Folders
 						if module["modname"] == "folder":
 							if not module.get("contents"):
 								continue
+
+							if self.config.get("downloaded_modules") != None and self.config.get("downloaded_modules").get(str(module["id"])) and int(self.config.get("downloaded_modules")[str(module["id"])]) >= int(module["contentsinfo"]["lastmodified"]):
+								continue
+
 							for c in module["contents"]:
 								if c["filepath"] != "/":
 									while c["filepath"][-1] == "/":
@@ -242,16 +263,21 @@ class SyncMyMoodle:
 									filepath = sectionpath
 								self.download_file(c["fileurl"], filepath,  c["filename"])
 
+							if self.config.get("downloaded_modules") != None:
+								self.config.get("downloaded_modules")[str(module["id"])] = int(module["contentsinfo"]["lastmodified"])
+
 						## Get embedded videos in pages or labels
 						if module["modname"] in ["page","label"]:
 							if module["modname"] == "page":
+								if self.config.get("downloaded_modules") != None and self.config.get("downloaded_modules").get(str(module["id"])) and int(self.config.get("downloaded_modules")[str(module["id"])]) >= int(module["contentsinfo"]["lastmodified"]):
+									continue
 								response = self.session.get(module["url"], params=self.params)
 								soup = bs(response.text, features="html.parser")
 							else:
 								soup = bs(module["description"], features="html.parser")
 
 							# Youtube videos
-							links = re.findall("https://www.youtube.com/embed/.{11}", str(response.text))
+							links = re.findall("https://www.youtube.com/embed/.{11}", str(soup))
 							for l in links:
 								self.scanAndDownloadYouTube(l, sectionpath)
 
@@ -260,12 +286,13 @@ class SyncMyMoodle:
 							for vid in engage_videos:
 								self.downloadOpenCastVideos(vid.get("data-framesrc"), course["id"], sectionpath)
 
+							if module["modname"] == "page" and self.config.get("downloaded_modules") != None:
+								self.config.get("downloaded_modules")[str(module["id"])] = int(module["contentsinfo"]["lastmodified"])
+
 #						if module["modname"] not in ["page", "folder", "url", "resource", "assign", "label"]:
-#							print(json.dumps(module, indent=4))
+#						print(json.dumps(module, indent=4))
 					except Exception as e:
 						print(f"Failed to download the module {module}: {e}")
-
-	# Downloads file with progress bar if it isn't already downloaded
 
 	def sanitize(self, path):
 		path = "".join([s for s in path if s not in self.invalid_chars])
@@ -274,6 +301,8 @@ class SyncMyMoodle:
 		while path[0] == " ":
 			path = path[1:]
 		return path
+
+	# Downloads file with progress bar if it isn't already downloaded
 
 	def download_file(self, url, path, filename):
 		filename = self.sanitize(filename)
@@ -349,6 +378,8 @@ if __name__ == '__main__':
 	if not os.path.exists("config.json"):
 		print("You need to copy config.json.example to config.json and adjust the settings!")
 	config = json.load(open("config.json"))
+	if config.get("downloaded_modules") == None:
+		config["downloaded_modules"] = dict()
 	smm = SyncMyMoodle(config, dryrun=config.get("dryrun"))
 
 	print(f"Logging in...")
@@ -356,3 +387,5 @@ if __name__ == '__main__':
 	smm.get_moodle_wstoken()
 	smm.get_userid()
 	smm.sync()
+	with open("config.json","w") as file:
+		file.write(json.dumps(smm.config, indent=4))
