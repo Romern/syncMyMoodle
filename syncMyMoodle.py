@@ -15,6 +15,7 @@ class SyncMyMoodle:
 		'lang': 'en' #Titles for some pages differ
 	}
 	block_size = 1024
+	invalid_chars = '~"#%&*:<>?/\\{|}'
 
 	def __init__(self, config, dryrun=False):
 		self.config = config
@@ -166,7 +167,7 @@ class SyncMyMoodle:
 			for section in self.get_course(course["id"]):
 				sectionname = section["name"]
 				#print(f"[{datetime.now()}] Section {sectionname}")
-				sectionpath = os.path.join(self.config["basedir"],semestername,coursename,sectionname)
+				sectionpath = os.path.join(self.config["basedir"],self.sanitize(semestername),self.sanitize(coursename),self.sanitize(sectionname))
 
 				for module in section["modules"]:
 					try:
@@ -175,7 +176,7 @@ class SyncMyMoodle:
 							ass = [a for a in assignments["assignments"] if a["cmid"] == module["id"]][0]["introattachments"]
 							for c in ass:
 								if c["filepath"] != "/":
-									filepath = os.path.join(sectionpath, c["filepath"])
+									filepath = os.path.join(sectionpath, self.sanitize(c["filepath"]))
 								else:
 									filepath = sectionpath
 								self.download_file(c["fileurl"], filepath, c["filename"])
@@ -187,7 +188,7 @@ class SyncMyMoodle:
 							for c in module["contents"]:
 								path = sectionpath
 								if len(module["contents"])>0:
-									path = os.path.join(path,module["name"])
+									path = os.path.join(path,self.sanitize(module["name"]))
 								# First check if the file is directly accessible:
 								if self.download_file(c["fileurl"], sectionpath, c["filename"]):
 									continue
@@ -236,7 +237,7 @@ class SyncMyMoodle:
 										c["filepath"] = c["filepath"][:-1]
 									while c["filepath"][0] == "/":
 										c["filepath"] = c["filepath"][1:]
-									filepath = os.path.join(sectionpath, c["filepath"])
+									filepath = os.path.join(sectionpath, self.sanitize(c["filepath"]))
 								else:
 									filepath = sectionpath
 								self.download_file(c["fileurl"], filepath,  c["filename"])
@@ -266,12 +267,18 @@ class SyncMyMoodle:
 
 	# Downloads file with progress bar if it isn't already downloaded
 
+	def sanitize(self, path):
+		path = "".join([s for s in path if s not in self.invalid_chars])
+		while path[-1] == " ":
+			path = path[:-1]
+		while path[0] == " ":
+			path = path[1:]
+		return path
+
 	def download_file(self, url, path, filename):
-		while filename[-1] == " ":
-			filename = filename[:-1]
-		while filename[0] == " ":
-			filename = filename[1:]
+		filename = self.sanitize(filename)
 		downloadpath = os.path.join(path,filename)
+
 		if os.path.exists(downloadpath):
 			return True
 		url = url.replace("webservice/pluginfile.php","tokenpluginfile.php/ccecbbbb10e0622b41a97086ac9fb054")
