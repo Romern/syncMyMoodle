@@ -8,6 +8,8 @@ from contextlib import closing
 import json
 import base64
 import youtube_dl
+import traceback
+
 from tqdm import tqdm
 
 class SyncMyMoodle:
@@ -176,9 +178,9 @@ class SyncMyMoodle:
 							ass = [a for a in assignments["assignments"] if a["cmid"] == module["id"]][0]["introattachments"]
 							for c in ass:
 								if c["filepath"] != "/":
-									filepath = os.path.join(sectionpath, self.sanitize(c["filepath"]))
+									filepath = os.path.join(sectionpath, self.sanitize(module["name"]), self.sanitize(c["filepath"]))
 								else:
-									filepath = sectionpath
+									filepath = os.path.join(sectionpath, self.sanitize(module["name"]))
 								self.download_file(c["fileurl"], filepath, c["filename"])
 
 						## Get Resources
@@ -210,7 +212,7 @@ class SyncMyMoodle:
 										for vid in engage_videos:
 											self.downloadOpenCastVideos(vid.get("data-framesrc"), course["id"], path)
 
-							if self.config.get("downloaded_modules") != None:
+							if self.config.get("downloaded_modules") != None and module["contentsinfo"]:
 								self.config.get("downloaded_modules")[str(module["id"])] = int(module["contentsinfo"]["lastmodified"])
 
 						## Get Resources in URLs
@@ -228,8 +230,16 @@ class SyncMyMoodle:
 										# Maybe its a link to an OpenCast video
 										self.downloadOpenCastVideos(c["fileurl"], course["id"], sectionpath)
 										continue
-									if "youtube" in c["fileurl"]:
+									if "youtube.com" in c["fileurl"]:
 										self.scanAndDownloadYouTube(c["fileurl"], sectionpath)
+										continue
+									if "sciebo.de" in c["fileurl"]:
+										response = self.session.get(c["fileurl"])
+										soup = bs(response.text, features="html.parser")
+										url = soup.find("input",{"name": "downloadURL"})
+										filename = soup.find("input",{"name": "filename"})
+										if url and filename:
+											self.download_file(url["value"], sectionpath, filename["value"])
 										continue
 									response = self.session.head(c["fileurl"])
 									if "Content-Type" in response.headers and "text/html" not in response.headers["Content-Type"]:
@@ -237,6 +247,7 @@ class SyncMyMoodle:
 										self.download_file(c["fileurl"], sectionpath, c["fileurl"].split("/")[-1])
 								except Exception as e:
 									# Maybe the url is down?
+									traceback.print_exc()
 									failed = True
 									print(f'Error while downloading url {c["fileurl"]}: {e}')
 
@@ -263,7 +274,7 @@ class SyncMyMoodle:
 									filepath = sectionpath
 								self.download_file(c["fileurl"], filepath,  c["filename"])
 
-							if self.config.get("downloaded_modules") != None:
+							if self.config.get("downloaded_modules") != None and module["contentsinfo"]:
 								self.config.get("downloaded_modules")[str(module["id"])] = int(module["contentsinfo"]["lastmodified"])
 
 						## Get embedded videos in pages or labels
@@ -286,12 +297,13 @@ class SyncMyMoodle:
 							for vid in engage_videos:
 								self.downloadOpenCastVideos(vid.get("data-framesrc"), course["id"], sectionpath)
 
-							if module["modname"] == "page" and self.config.get("downloaded_modules") != None:
+							if module["modname"] == "page" and self.config.get("downloaded_modules") != None and module["contentsinfo"]:
 								self.config.get("downloaded_modules")[str(module["id"])] = int(module["contentsinfo"]["lastmodified"])
 
 #						if module["modname"] not in ["page", "folder", "url", "resource", "assign", "label"]:
 #						print(json.dumps(module, indent=4))
 					except Exception as e:
+						traceback.print_exc()
 						print(f"Failed to download the module {module}: {e}")
 
 	def sanitize(self, path):
@@ -313,21 +325,19 @@ class SyncMyMoodle:
 		url = url.replace("webservice/pluginfile.php","tokenpluginfile.php/ccecbbbb10e0622b41a97086ac9fb054")
 
 		with closing(self.session.get(url, stream=True)) as response:
-			if not os.path.exists(downloadpath):
-				print(f"Downloading {downloadpath}")
-				if self.dryrun:
-					return True
-				total_size_in_bytes= int(response.headers.get('content-length', 0))
-				progress_bar = tqdm(total=total_size_in_bytes, unit='iB', unit_scale=True)
-				if not os.path.exists(path):
-					os.makedirs(path)
-				with open(downloadpath + ".temp","wb") as file:
-					for data in response.iter_content(self.block_size):
-						progress_bar.update(len(data))
-						file.write(data)
-				progress_bar.close()
-				os.rename(downloadpath + ".temp", downloadpath)
+			print(f"Downloading {downloadpath}")
+			if self.dryrun:
 				return True
+			total_size_in_bytes= int(response.headers.get('content-length', 0))
+			progress_bar = tqdm(total=total_size_in_bytes, unit='iB', unit_scale=True)
+			os.makedirs(path, exist_ok=True)
+			with open(downloadpath + ".temp","wb") as file:
+				for data in response.iter_content(self.block_size):
+					progress_bar.update(len(data))
+					file.write(data)
+			progress_bar.close()
+			os.rename(downloadpath + ".temp", downloadpath)
+			return True
 		return False
 
 	# Downloads Opencast videos by using the engage API
@@ -368,8 +378,7 @@ class SyncMyMoodle:
 		}
 		if self.dryrun:
 			return True
-		if not os.path.exists(path):
-			os.makedirs(path)
+		os.makedirs(path, exist_ok=True)
 		with youtube_dl.YoutubeDL(ydl_opts) as ydl:
 			ydl.download([link])
 		return True
@@ -377,6 +386,7 @@ class SyncMyMoodle:
 if __name__ == '__main__':
 	if not os.path.exists("config.json"):
 		print("You need to copy config.json.example to config.json and adjust the settings!")
+		exit(1)
 	config = json.load(open("config.json"))
 	if config.get("downloaded_modules") == None:
 		config["downloaded_modules"] = dict()
