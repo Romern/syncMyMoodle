@@ -297,7 +297,7 @@ class SyncMyMoodle:
 							for vid in engage_videos:
 								self.downloadOpenCastVideos(vid.get("data-framesrc"), course["id"], sectionpath)
 
-							if module["modname"] == "page" and self.config.get("downloaded_modules") != None and module["contentsinfo"]:
+							if module["modname"] == "page" and self.config.get("downloaded_modules") != None and "contentsinfo" in module:
 								self.config.get("downloaded_modules")[str(module["id"])] = int(module["contentsinfo"]["lastmodified"])
 
 #						if module["modname"] not in ["page", "folder", "url", "resource", "assign", "label"]:
