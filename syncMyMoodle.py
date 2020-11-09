@@ -25,6 +25,7 @@ class SyncMyMoodle:
 		self.courses = None
 		self.session_key = None
 		self.wstoken = None
+		self.user_private_access_key = None
 		self.user_id = None
 		self.sections = dict()
 		self.max_semester = -1
@@ -64,7 +65,7 @@ class SyncMyMoodle:
 			self.session_key = get_session_key(soup)
 			pickle.dump(self.session.cookies, f)
 
-	# Moodle Web Services API
+	### Moodle Web Services API
 
 	def get_moodle_wstoken(self):
 		if not self.session:
@@ -124,7 +125,8 @@ class SyncMyMoodle:
 		}
 		resp = self.session.post(f"https://moodle.rwth-aachen.de/webservice/rest/server.php", params=params, data=data)
 		self.user_id = resp.json()["userid"]
-		return self.user_id
+		self.user_private_access_key = resp.json()["userprivateaccesskey"]
+		return self.user_id, self.user_private_access_key
 
 	def get_assignment(self, course_id):
 		data = {
@@ -142,7 +144,7 @@ class SyncMyMoodle:
 		resp = self.session.post(f"https://moodle.rwth-aachen.de/webservice/rest/server.php", params=params, data=data)
 		return resp.json()["courses"][0]
 
-	# The main syncing part
+	### The main syncing part
 
 	def sync(self):
 		if not self.session:
@@ -322,7 +324,8 @@ class SyncMyMoodle:
 
 		if os.path.exists(downloadpath):
 			return True
-		url = url.replace("webservice/pluginfile.php","tokenpluginfile.php/ccecbbbb10e0622b41a97086ac9fb054")
+
+		url = url.replace("webservice/pluginfile.php","tokenpluginfile.php/" + self.user_private_access_key)
 
 		with closing(self.session.get(url, stream=True)) as response:
 			print(f"Downloading {downloadpath}")
