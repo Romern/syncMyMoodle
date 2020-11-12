@@ -10,6 +10,8 @@ import base64
 import youtube_dl
 import traceback
 
+import http.client, urllib.parse
+
 from tqdm import tqdm
 
 class SyncMyMoodle:
@@ -75,9 +77,18 @@ class SyncMyMoodle:
 			"passport" :1,
 			"urlscheme": "moodlemobile"
 		}
-		response = self.session.get("https://moodle.rwth-aachen.de/admin/tool/mobile/launch.php", params=params, allow_redirects=False)
+		#response = self.session.head("https://moodle.rwth-aachen.de/admin/tool/mobile/launch.php", params=params, allow_redirects=False)
+		#workaround for macos
+		def getCookies(cookie_jar, domain):
+			cookie_dict = cookie_jar.get_dict(domain=domain)
+			found = ['%s=%s' % (name, value) for (name, value) in cookie_dict.items()]
+			return ';'.join(found)
+		conn = http.client.HTTPSConnection("moodle.rwth-aachen.de")
+		conn.request("GET", "/admin/tool/mobile/launch.php?" + urllib.parse.urlencode(params), headers={"Cookie":  getCookies(self.session.cookies, "moodle.rwth-aachen.de")})
+		response = conn.getresponse()
+
 		# token is in an app schema, which contains the wstoken base64-encoded along with some other token
-		token_base64d = response.headers["Location"].split("token=")[1]
+		token_base64d = response.getheader("Location").split("token=")[1]
 		self.wstoken = base64.b64decode(token_base64d).decode().split(":::")[1]
 		return self.wstoken
 
