@@ -88,7 +88,7 @@ class SyncMyMoodle:
 		response = conn.getresponse()
 
 		# token is in an app schema, which contains the wstoken base64-encoded along with some other token
-		token_base64d = msg.getheader("Location").split("token=")[1]
+		token_base64d = response.getheader("Location").split("token=")[1]
 		self.wstoken = base64.b64decode(token_base64d).decode().split(":::")[1]
 		return self.wstoken
 
