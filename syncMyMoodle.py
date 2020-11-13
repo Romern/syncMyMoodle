@@ -282,9 +282,9 @@ class SyncMyMoodle:
 										c["filepath"] = c["filepath"][:-1]
 									while c["filepath"][0] == "/":
 										c["filepath"] = c["filepath"][1:]
-									filepath = os.path.join(sectionpath, self.sanitize(c["filepath"]))
+									filepath = os.path.join(sectionpath, self.sanitize(module["name"]), self.sanitize(c["filepath"]))
 								else:
-									filepath = sectionpath
+									filepath = os.path.join(sectionpath, self.sanitize(module["name"]))
 								self.download_file(c["fileurl"], filepath,  c["filename"])
 
 							if self.config.get("downloaded_modules") != None and module["contentsinfo"]:
