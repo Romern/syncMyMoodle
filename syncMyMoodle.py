@@ -21,7 +21,7 @@ class SyncMyMoodle:
 	block_size = 1024
 	invalid_chars = '~"#%&*:<>?/\\{|}'
 
-	def __init__(self, config, dryrun=False):
+	def __init__(self, config, downloaded_modules=None, dryrun=False):
 		self.config = config
 		self.session = None
 		self.courses = None
@@ -32,6 +32,7 @@ class SyncMyMoodle:
 		self.sections = dict()
 		self.max_semester = -1
 		self.dryrun = dryrun
+		self.downloaded_modules = downloaded_modules if downloaded_modules else dict()
 
 	# RWTH SSO Login
 
@@ -201,7 +202,7 @@ class SyncMyMoodle:
 							if not module.get("contents"):
 								continue
 
-							if self.config.get("downloaded_modules") != None and self.config.get("downloaded_modules").get(str(module["id"])) and int(self.config.get("downloaded_modules")[str(module["id"])]) >= int(module["contentsinfo"]["lastmodified"]):
+							if self.downloaded_modules != None and self.downloaded_modules.get(str(module["id"])) and int(self.downloaded_modules[str(module["id"])]) >= int(module["contentsinfo"]["lastmodified"]):
 								continue
 
 							for c in module["contents"]:
@@ -225,15 +226,15 @@ class SyncMyMoodle:
 										for vid in engage_videos:
 											self.downloadOpenCastVideos(vid.get("data-framesrc"), course["id"], path)
 
-							if self.config.get("downloaded_modules") != None and module["contentsinfo"]:
-								self.config.get("downloaded_modules")[str(module["id"])] = int(module["contentsinfo"]["lastmodified"])
+							if self.downloaded_modules != None and module["contentsinfo"]:
+								self.downloaded_modules[str(module["id"])] = int(module["contentsinfo"]["lastmodified"])
 
 						## Get Resources in URLs
 						if module["modname"] == "url":
 							if not module.get("contents"):
 								continue
 
-							if self.config.get("downloaded_modules") != None and self.config.get("downloaded_modules").get(str(module["id"])):
+							if self.downloaded_modules != None and self.downloaded_modules.get(str(module["id"])):
 								continue
 
 							failed = False
@@ -265,15 +266,15 @@ class SyncMyMoodle:
 									print(f'Error while downloading url {c["fileurl"]}: {e}')
 
 							if not failed:
-								if self.config.get("downloaded_modules") != None:
-									self.config.get("downloaded_modules")[str(module["id"])] = "downloaded"
+								if self.downloaded_modules != None:
+									self.downloaded_modules[str(module["id"])] = "downloaded"
 
 						## Get Folders
 						if module["modname"] == "folder":
 							if not module.get("contents"):
 								continue
 
-							if self.config.get("downloaded_modules") != None and self.config.get("downloaded_modules").get(str(module["id"])) and int(self.config.get("downloaded_modules")[str(module["id"])]) >= int(module["contentsinfo"]["lastmodified"]):
+							if self.downloaded_modules != None and self.downloaded_modules.get(str(module["id"])) and int(self.downloaded_modules[str(module["id"])]) >= int(module["contentsinfo"]["lastmodified"]):
 								continue
 
 							for c in module["contents"]:
@@ -287,13 +288,13 @@ class SyncMyMoodle:
 									filepath = os.path.join(sectionpath, self.sanitize(module["name"]))
 								self.download_file(c["fileurl"], filepath,  c["filename"])
 
-							if self.config.get("downloaded_modules") != None and module["contentsinfo"]:
-								self.config.get("downloaded_modules")[str(module["id"])] = int(module["contentsinfo"]["lastmodified"])
+							if self.downloaded_modules != None and module["contentsinfo"]:
+								self.downloaded_modules[str(module["id"])] = int(module["contentsinfo"]["lastmodified"])
 
 						## Get embedded videos in pages or labels
 						if module["modname"] in ["page","label"]:
 							if module["modname"] == "page":
-								if self.config.get("downloaded_modules") != None and self.config.get("downloaded_modules").get(str(module["id"])) and int(self.config.get("downloaded_modules")[str(module["id"])]) >= int(module["contentsinfo"]["lastmodified"]):
+								if self.downloaded_modules != None and self.downloaded_modules.get(str(module["id"])) and int(self.downloaded_modules[str(module["id"])]) >= int(module["contentsinfo"]["lastmodified"]):
 									continue
 								response = self.session.get(module["url"], params=self.params)
 								soup = bs(response.text, features="html.parser")
@@ -310,8 +311,8 @@ class SyncMyMoodle:
 							for vid in engage_videos:
 								self.downloadOpenCastVideos(vid.get("data-framesrc"), course["id"], sectionpath)
 
-							if module["modname"] == "page" and self.config.get("downloaded_modules") != None and "contentsinfo" in module:
-								self.config.get("downloaded_modules")[str(module["id"])] = int(module["contentsinfo"]["lastmodified"])
+							if module["modname"] == "page" and self.downloaded_modules != None and "contentsinfo" in module:
+								self.downloaded_modules[str(module["id"])] = int(module["contentsinfo"]["lastmodified"])
 
 #						if module["modname"] not in ["page", "folder", "url", "resource", "assign", "label"]:
 #						print(json.dumps(module, indent=4))
@@ -371,7 +372,7 @@ class SyncMyMoodle:
 			return False
 		episodejson = f'https://engage.streaming.rwth-aachen.de/search/episode.json?id={linkid.groups()[0]}'
 		episodejson = json.loads(self.session.get(episodejson).text)
-		
+
 		tracks = episodejson["search-results"]["result"]["mediapackage"]["media"]["track"]
 		tracks = sorted([(t["url"],t["video"]["resolution"]) for t in tracks if t["mimetype"] == 'video/mp4' and "transport" not in t], key=(lambda x: int(x[1].split("x")[0]) ))
 		# only choose mp4s provided with plain https (no transport key), and use the one with the highest resolution (sorted by width) (could also use bitrate)
@@ -402,9 +403,11 @@ if __name__ == '__main__':
 		print("You need to copy config.json.example to config.json and adjust the settings!")
 		exit(1)
 	config = json.load(open("config.json"))
-	if config.get("downloaded_modules") == None:
-		config["downloaded_modules"] = dict()
-	smm = SyncMyMoodle(config, dryrun=config.get("dryrun"))
+	if not os.path.exists("downloaded_modules.json"):
+		downloaded_modules = dict()
+	else:
+		downloaded_modules = json.load(open("downloaded_modules.json"))
+	smm = SyncMyMoodle(config, downloaded_modules, dryrun=config.get("dryrun"))
 
 	print(f"Logging in...")
 	smm.login()
@@ -413,3 +416,5 @@ if __name__ == '__main__':
 	smm.sync()
 	with open("config.json","w") as file:
 		file.write(json.dumps(smm.config, indent=4))
+	with open("downloaded_modules.json","w") as file:
+		file.write(json.dumps(smm.downloaded_modules, indent=4))
