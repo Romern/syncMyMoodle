@@ -4,5 +4,6 @@
     "user": "",
     "password": "",
     "basedir": "./",
-    "cookie_file": "./session"
+    "cookie_file": "./session",
+    "enable_download_tracker": true
 }

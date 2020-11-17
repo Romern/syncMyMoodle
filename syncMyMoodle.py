@@ -439,7 +439,7 @@ if __name__ == '__main__':
 		print("You need to copy config.json.example to config.json and adjust the settings!")
 		exit(1)
 	config = json.load(open("config.json"))
-	if not os.path.exists("downloaded_modules.json"):
+	if not config.get("enable_download_tracker",True) or not os.path.exists("downloaded_modules.json"):
 		downloaded_modules = dict()
 	else:
 		downloaded_modules = json.load(open("downloaded_modules.json"))
@@ -452,5 +452,6 @@ if __name__ == '__main__':
 	smm.sync()
 	with open("config.json","w") as file:
 		file.write(json.dumps(smm.config, indent=4))
-	with open("downloaded_modules.json","w") as file:
-		file.write(json.dumps(smm.downloaded_modules, indent=4))
+	if config.get("enable_download_tracker",True):
+		with open("downloaded_modules.json","w") as file:
+			file.write(json.dumps(smm.downloaded_modules, indent=4))
