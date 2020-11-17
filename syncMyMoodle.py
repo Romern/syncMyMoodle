@@ -339,14 +339,23 @@ class SyncMyMoodle:
 
 		url = url.replace("webservice/pluginfile.php","tokenpluginfile.php/" + self.user_private_access_key)
 
-		with closing(self.session.get(url, stream=True)) as response:
+		if os.path.exists(downloadpath + ".temp"):
+			resume_size = os.stat(downloadpath + ".temp").st_size
+			header = {'Range':f'bytes= {resume_size}-'}
+		else:
+			resume_size = 0
+			header = dict()
+
+		with closing(self.session.get(url, headers=header, stream=True)) as response:
 			print(f"Downloading {downloadpath}")
 			if self.dryrun:
 				return True
-			total_size_in_bytes= int(response.headers.get('content-length', 0))
+			total_size_in_bytes = int(response.headers.get('content-length', 0)) + resume_size
 			progress_bar = tqdm(total=total_size_in_bytes, unit='iB', unit_scale=True)
+			if resume_size:
+				progress_bar.update(resume_size)
 			os.makedirs(path, exist_ok=True)
-			with open(downloadpath + ".temp","wb") as file:
+			with open(downloadpath + ".temp","ab") as file:
 				for data in response.iter_content(self.block_size):
 					progress_bar.update(len(data))
 					file.write(data)
