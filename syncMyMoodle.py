@@ -156,6 +156,31 @@ class SyncMyMoodle:
 		resp = self.session.post(f"https://moodle.rwth-aachen.de/webservice/rest/server.php", params=params, data=data)
 		return resp.json()["courses"][0]
 
+	def get_assignment_submission_files(self, assignment_id):
+		data = {
+			'assignid': assignment_id,
+			'userid': self.user_id,
+			'moodlewssettingfilter': True,
+			'moodlewssettingfileurl': True,
+			'wsfunction': 'mod_assign_get_submission_status',
+			'wstoken': self.wstoken
+		}
+
+		params = {
+			"moodlewsrestformat": "json",
+			"wsfunction": "mod_assign_get_submission_status"
+		}
+
+		response = self.session.post('https://moodle.rwth-aachen.de/webservice/rest/server.php', params=params, data=data)
+
+		files = response.json().get("lastattempt",{}).get("submission",{}).get("plugins",[])
+		files += response.json().get("lastattempt",{}).get("teamsubmission",{}).get("plugins",[])
+		files += response.json().get("feedback",{}).get("plugins",[])
+
+		files = [f.get("files",[]) for p in files for f in p.get("fileareas",[]) if f["area"] in ["download","submission_files"]]
+		files = [f for folder in files for f in folder]
+		return files
+
 	### The main syncing part
 
 	def sync(self):
@@ -189,7 +214,9 @@ class SyncMyMoodle:
 					try:
 						## Get Assignments
 						if module["modname"] == "assign":
-							ass = [a for a in assignments["assignments"] if a["cmid"] == module["id"]][0]["introattachments"]
+							ass = [a for a in assignments["assignments"] if a["cmid"] == module["id"]][0]
+							assignment_id = ass["id"]
+							ass = ass["introattachments"] + self.get_assignment_submission_files(assignment_id)
 							for c in ass:
 								if c["filepath"] != "/":
 									filepath = os.path.join(sectionpath, self.sanitize(module["name"]), self.sanitize(c["filepath"]))
