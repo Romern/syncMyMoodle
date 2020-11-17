@@ -42,15 +42,15 @@ class SyncMyMoodle:
 			return re.findall("sesskey=([a-zA-Z0-9]*)", session_key)[0]
 
 		self.session = requests.Session()
-		if os.path.exists(os.path.expanduser(self.config["cookie_file"])):
-			with open(os.path.expanduser(self.config["cookie_file"]), 'rb') as f:
+		if os.path.exists(self.config["cookie_file"]):
+			with open(self.config["cookie_file"], 'rb') as f:
 				self.session.cookies.update(pickle.load(f))
 		resp = self.session.get("https://moodle.rwth-aachen.de/")
 		resp = self.session.get("https://moodle.rwth-aachen.de/auth/shibboleth/index.php")
 		if resp.url == "https://moodle.rwth-aachen.de/my/":
 			soup = bs(resp.text, features="html.parser")
 			self.session_key = get_session_key(soup)
-			with open(os.path.expanduser(self.config["cookie_file"]), 'wb') as f:
+			with open(self.config["cookie_file"], 'wb') as f:
 				pickle.dump(self.session.cookies, f)
 			return
 		soup = bs(resp.text, features="html.parser")
@@ -63,7 +63,7 @@ class SyncMyMoodle:
 		data = {"RelayState": soup.find("input",{"name": "RelayState"})["value"], 
 				"SAMLResponse": soup.find("input",{"name": "SAMLResponse"})["value"]}
 		resp = self.session.post("https://moodle.rwth-aachen.de/Shibboleth.sso/SAML2/POST", data=data)
-		with open(os.path.expanduser(self.config["cookie_file"]), 'wb') as f:
+		with open(self.config["cookie_file"], 'wb') as f:
 			soup = bs(resp.text, features="html.parser")
 			self.session_key = get_session_key(soup)
 			pickle.dump(self.session.cookies, f)
@@ -183,7 +183,7 @@ class SyncMyMoodle:
 			for section in self.get_course(course["id"]):
 				sectionname = section["name"]
 				#print(f"[{datetime.now()}] Section {sectionname}")
-				sectionpath = os.path.join(self.config["basedir"],self.sanitize(semestername),self.sanitize(coursename),self.sanitize(sectionname))
+				sectionpath = os.path.join(os.path.expanduser(self.config["basedir"]),self.sanitize(semestername),self.sanitize(coursename),self.sanitize(sectionname))
 
 				for module in section["modules"]:
 					try:
@@ -355,7 +355,7 @@ class SyncMyMoodle:
 			if resume_size:
 				progress_bar.update(resume_size)
 			os.makedirs(path, exist_ok=True)
-			with open(os.path.expanduser(downloadpath + ".temp"),"ab") as file:
+			with open(downloadpath + ".temp","ab") as file:
 				for data in response.iter_content(self.block_size):
 					progress_bar.update(len(data))
 					file.write(data)
