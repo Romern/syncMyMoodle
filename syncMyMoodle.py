@@ -214,7 +214,10 @@ class SyncMyMoodle:
 					try:
 						## Get Assignments
 						if module["modname"] == "assign":
-							ass = [a for a in assignments["assignments"] if a["cmid"] == module["id"]][0]
+							ass = [a for a in assignments["assignments"] if a["cmid"] == module["id"]]
+							if len(ass) == 0:
+								continue
+							ass = ass[0]
 							assignment_id = ass["id"]
 							ass = ass["introattachments"] + self.get_assignment_submission_files(assignment_id)
 							for c in ass:
