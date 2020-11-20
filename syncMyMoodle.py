@@ -273,11 +273,9 @@ class SyncMyMoodle:
 									if "engage.streaming.rwth-aachen.de" in c["fileurl"]:
 										# Maybe its a link to an OpenCast video
 										self.downloadOpenCastVideos(c["fileurl"], course["id"], sectionpath)
-										continue
-									if "youtube.com" in c["fileurl"]:
+									elif "youtube.com" in c["fileurl"]:
 										self.scanAndDownloadYouTube(c["fileurl"], sectionpath)
-										continue
-									if "sciebo.de" in c["fileurl"]:
+									elif "sciebo.de" in c["fileurl"]:
 										response = self.session.get(c["fileurl"])
 										soup = bs(response.text, features="html.parser")
 										url = soup.find("input",{"name": "downloadURL"})
@@ -285,10 +283,11 @@ class SyncMyMoodle:
 										if url and filename:
 											self.download_file(url["value"], sectionpath, filename["value"])
 										continue
-									response = self.session.head(c["fileurl"])
-									if "Content-Type" in response.headers and "text/html" not in response.headers["Content-Type"]:
-										# Don't download html pages
-										self.download_file(c["fileurl"], sectionpath, c["fileurl"].split("/")[-1])
+									else:
+										response = self.session.head(c["fileurl"])
+										if "Content-Type" in response.headers and "text/html" not in response.headers["Content-Type"]:
+											# Don't download html pages
+											self.download_file(c["fileurl"], sectionpath, c["fileurl"].split("/")[-1])
 								except Exception as e:
 									# Maybe the url is down?
 									traceback.print_exc()
@@ -337,9 +336,9 @@ class SyncMyMoodle:
 								self.scanAndDownloadYouTube(l, sectionpath)
 
 							# OpenCast videos
-							engage_videos = soup.select('iframe[data-framesrc*="engage.streaming.rwth-aachen.de"]')
-							for vid in engage_videos:
-								self.downloadOpenCastVideos(vid.get("data-framesrc"), course["id"], sectionpath)
+							opencast_links = re.findall("https://engage.streaming.rwth-aachen.de/play/[a-f0-9\-]+",str(soup))
+							for vid in opencast_links:
+								self.downloadOpenCastVideos(vid, course["id"], sectionpath)
 
 							if module["modname"] == "page" and self.downloaded_modules != None and "contentsinfo" in module:
 								self.downloaded_modules[str(module["id"])] = int(module["contentsinfo"]["lastmodified"])
