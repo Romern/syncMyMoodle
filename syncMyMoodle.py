@@ -351,9 +351,9 @@ class SyncMyMoodle:
 
 	def sanitize(self, path):
 		path = "".join([s for s in path if s not in self.invalid_chars])
-		while path[-1] == " ":
+		while path and path[-1] == " ":
 			path = path[:-1]
-		while path[0] == " ":
+		while path and path[0] == " ":
 			path = path[1:]
 		return path
 
