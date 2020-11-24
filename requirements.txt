@@ -2,3 +2,4 @@ requests
 bs4
 youtube_dl
 tqdm
+wxPython
