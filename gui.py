@@ -41,7 +41,7 @@ class FileTab(wx.Panel):
 		# flags = wx.ALIGN_CENTER_VERTICAL | wx.LEFT | wx.BOTTOM
 
 		sidebarBoxSizer.AddStretchSpacer()
-		sidebarBoxSizer.Add(syncButton, 0, wx.ALIGN_BOTTOM | wx.ALL | wx.EXPAND, 10)
+		sidebarBoxSizer.Add(syncButton, 0, wx.ALL | wx.EXPAND, 10)
 
 		return sidebarBoxSizer
 
@@ -79,8 +79,8 @@ class SettingsTab(wx.Panel):
 		loginBoxSizer.Add(loginStatus, 0, wx.ALIGN_LEFT | flags, 10)
 		loginBoxSizer.AddStretchSpacer()
 		loginBoxSizer.Add(username, 0, wx.ALIGN_LEFT | flags, 10)
-		loginBoxSizer.Add(clearLogin, 0, wx.ALIGN_RIGHT | flags, 10)
-		loginBoxSizer.Add(setLogin, 0, wx.ALIGN_RIGHT | flags | wx.RIGHT, 10)
+		loginBoxSizer.Add(clearLogin, 0, flags, 10)
+		loginBoxSizer.Add(setLogin, 0, flags | wx.RIGHT, 10)
 
 		return loginBoxSizer
 
@@ -92,10 +92,10 @@ class SettingsTab(wx.Panel):
 		downloadPathInput = wx.TextCtrl(downloadBox, wx.ID_ANY, "Download Path")
 		searchDowloadPath = wx.Button(downloadBox, wx.ID_ANY, "Search")
 
-		flags = wx.ALIGN_CENTER_VERTICAL | wx.LEFT | wx.BOTTOM
+		flags = wx.LEFT | wx.BOTTOM
 
 		downloadBoxSizer.Add(downloadPathInput, 1, wx.ALIGN_LEFT | flags | wx.EXPAND, 10)
-		downloadBoxSizer.Add(searchDowloadPath, 0, wx.ALIGN_RIGHT | flags | wx.RIGHT, 10)
+		downloadBoxSizer.Add(searchDowloadPath, 0, flags | wx.RIGHT, 10)
 
 		return downloadBoxSizer
 
@@ -105,7 +105,7 @@ class SettingsTab(wx.Panel):
 
 		enableDownloadTracker = wx.CheckBox(downloadTrackerBox, wx.ID_ANY, "Enable")
 
-		flags = wx.ALIGN_CENTER_VERTICAL | wx.LEFT | wx.BOTTOM
+		flags = wx.LEFT | wx.BOTTOM
 
 		downloadTrackerBoxSizer.Add(enableDownloadTracker, 0, wx.ALIGN_LEFT | flags | wx.EXPAND, 10)
 
