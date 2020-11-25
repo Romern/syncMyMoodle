@@ -10,7 +10,8 @@ import base64
 import youtube_dl
 import traceback
 
-import http.client, urllib.parse
+import http.client
+import urllib.parse
 
 from tqdm import tqdm
 
@@ -181,6 +182,25 @@ class SyncMyMoodle:
 		files = [f for folder in files for f in folder]
 		return files
 
+	def get_folders_by_courses(self, course_id):
+		data = {
+			'courseids[0]': str(course_id),
+			'moodlewssettingfilter': True,
+			'moodlewssettingfileurl': True,
+			'wsfunction': 'mod_folder_get_folders_by_courses',
+			'wstoken': self.wstoken
+		}
+
+		params = {
+			'moodlewsrestformat': 'json',
+			'wsfunction': 'mod_folder_get_folders_by_courses',
+		}
+
+		response = self.session.post('https://moodle.rwth-aachen.de/webservice/rest/server.php', params=params, data=data)
+		folder = response.json()["folders"]
+		return folder
+
+
 	### The main syncing part
 
 	def sync(self):
@@ -205,6 +225,7 @@ class SyncMyMoodle:
 			coursename = course["shortname"]
 			print(f"Syncing {coursename}...")
 			assignments = self.get_assignment(course["id"])
+			folders = self.get_folders_by_courses(course["id"])
 			for section in self.get_course(course["id"]):
 				sectionname = section["name"]
 				#print(f"[{datetime.now()}] Section {sectionname}")
@@ -270,24 +291,7 @@ class SyncMyMoodle:
 							failed = False
 							for c in module["contents"]:
 								try:
-									if "engage.streaming.rwth-aachen.de" in c["fileurl"]:
-										# Maybe its a link to an OpenCast video
-										self.downloadOpenCastVideos(c["fileurl"], course["id"], sectionpath)
-									elif "youtube.com" in c["fileurl"]:
-										self.scanAndDownloadYouTube(c["fileurl"], sectionpath)
-									elif "sciebo.de" in c["fileurl"]:
-										response = self.session.get(c["fileurl"])
-										soup = bs(response.text, features="html.parser")
-										url = soup.find("input",{"name": "downloadURL"})
-										filename = soup.find("input",{"name": "filename"})
-										if url and filename:
-											self.download_file(url["value"], sectionpath, filename["value"])
-										continue
-									else:
-										response = self.session.head(c["fileurl"])
-										if "Content-Type" in response.headers and "text/html" not in response.headers["Content-Type"]:
-											# Don't download html pages
-											self.download_file(c["fileurl"], sectionpath, c["fileurl"].split("/")[-1])
+									self.scanForLinks(c["fileurl"], sectionpath, course["id"], single=True)
 								except Exception as e:
 									# Maybe the url is down?
 									traceback.print_exc()
@@ -305,6 +309,10 @@ class SyncMyMoodle:
 
 							if self.downloaded_modules != None and self.downloaded_modules.get(str(module["id"])) and int(self.downloaded_modules[str(module["id"])]) >= int(module["contentsinfo"]["lastmodified"]):
 								continue
+
+							rel_folder = [f["intro"] for f in folders if f["coursemodule"] == module["id"]]
+							if rel_folder:
+								self.scanForLinks(rel_folder[0], sectionpath, course["id"])
 
 							for c in module["contents"]:
 								if c["filepath"] != "/":
@@ -326,19 +334,11 @@ class SyncMyMoodle:
 								if self.downloaded_modules != None and self.downloaded_modules.get(str(module["id"])) and int(self.downloaded_modules[str(module["id"])]) >= int(module["contentsinfo"]["lastmodified"]):
 									continue
 								response = self.session.get(module["url"], params=self.params)
-								soup = bs(response.text, features="html.parser")
+								soup = response.text
 							else:
-								soup = bs(module["description"], features="html.parser")
+								soup = module.get("description","")
 
-							# Youtube videos
-							links = re.findall("https://www.youtube.com/embed/.{11}", str(soup))
-							for l in links:
-								self.scanAndDownloadYouTube(l, sectionpath)
-
-							# OpenCast videos
-							opencast_links = re.findall("https://engage.streaming.rwth-aachen.de/play/[a-f0-9\-]+",str(soup))
-							for vid in opencast_links:
-								self.downloadOpenCastVideos(vid, course["id"], sectionpath)
+							self.scanForLinks(soup, sectionpath, course["id"])
 
 							if module["modname"] == "page" and self.downloaded_modules != None and "contentsinfo" in module:
 								self.downloaded_modules[str(module["id"])] = int(module["contentsinfo"]["lastmodified"])
@@ -435,6 +435,42 @@ class SyncMyMoodle:
 		with youtube_dl.YoutubeDL(ydl_opts) as ydl:
 			ydl.download([link])
 		return True
+
+	def scanForLinks(self, text, path, course_id, single=False):
+		if single:
+			try:
+				response = self.session.head(text)
+				if "Content-Type" in response.headers and "text/html" not in response.headers["Content-Type"]:
+					# non html links
+					self.download_file(text, path, text.split("/")[-1])
+			except:
+				# Maybe the url is down?
+				traceback.print_exc()
+				print(f'Error while downloading url {text}: {e}')
+
+
+		# Youtube videos
+		youtube_links = re.findall("https://www.youtube.com/embed/.{11}", text)
+		for l in youtube_links:
+			print(l)
+			self.scanAndDownloadYouTube(l, path)
+
+		# OpenCast videos
+		opencast_links = re.findall("https://engage.streaming.rwth-aachen.de/play/[a-f0-9\-]+", text)
+		for vid in opencast_links:
+			print(vid)
+			self.downloadOpenCastVideos(vid, course_id, path)
+
+		#https://rwth-aachen.sciebo.de/s/XXX
+		sciebo_links = re.findall("https://rwth-aachen.sciebo.de/s/[a-f0-9\-]+", text)
+		for vid in sciebo_links:
+			print(vid)
+			response = self.session.get(vid)
+			soup = bs(response.text, features="html.parser")
+			url = soup.find("input",{"name": "downloadURL"})
+			filename = soup.find("input",{"name": "filename"})
+			if url and filename:
+				self.download_file(url["value"], path, filename["value"])
 
 if __name__ == '__main__':
 	if not os.path.exists("config.json"):
