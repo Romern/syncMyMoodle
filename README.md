@@ -35,3 +35,16 @@ Now you just need to run
 And your courses will be synced into the ``basedir`` you specified (default is the current directory). Your cookies will be stored in a session file.  
   
 Downloaded files are tracked in ``downloaded_modules.json`` to speed up syncing, so if you need to redownload some files you might want to delete it or disable it by setting ``enable_download_tracker`` to ``false``.
+
+# How to use GUI
+You need to install the requirements as before:
+```bash
+pip3 install -r requirements.txt
+```
+Now run
+```bash
+./gui.py
+```
+
+Before syncing, you have to edit the Settings. You have to set your RWTH Login and maybe change your Download Directory. Optional you can select the Semester you want to download. Dont forget to hit 'Save Settings' to store the config before you close the Window.
+When you updated your Settings you just have to Press 'SYNC' in the 'Filebrowser'-Tab to start the download. A message will popup if the Process has finished.
