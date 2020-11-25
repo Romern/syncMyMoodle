@@ -454,19 +454,16 @@ class SyncMyMoodle:
 		# Youtube videos
 		youtube_links = re.findall("https://www.youtube.com/embed/.{11}", text)
 		for l in youtube_links:
-			print(l)
 			self.scanAndDownloadYouTube(l, path)
 
 		# OpenCast videos
 		opencast_links = re.findall("https://engage.streaming.rwth-aachen.de/play/[a-f0-9\-]+", text)
 		for vid in opencast_links:
-			print(vid)
 			self.downloadOpenCastVideos(vid, course_id, path)
 
 		#https://rwth-aachen.sciebo.de/s/XXX
 		sciebo_links = re.findall("https://rwth-aachen.sciebo.de/s/[a-f0-9\-]+", text)
 		for vid in sciebo_links:
-			print(vid)
 			response = self.session.get(vid)
 			soup = bs(response.text, features="html.parser")
 			url = soup.find("input",{"name": "downloadURL"})
