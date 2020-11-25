@@ -313,7 +313,7 @@ class SyncMyMoodle:
 
 							rel_folder = [f["intro"] for f in folders if f["coursemodule"] == module["id"]]
 							if rel_folder:
-								self.scanForLinks(rel_folder[0], sectionpath, course["id"])
+								self.scanForLinks(rel_folder[0], os.path.join(sectionpath, self.sanitize(module["name"])), course["id"])
 
 							for c in module["contents"]:
 								if c["filepath"] != "/":
