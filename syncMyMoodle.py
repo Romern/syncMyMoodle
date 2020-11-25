@@ -11,6 +11,7 @@ import youtube_dl
 import traceback
 
 import http.client
+import html
 import urllib.parse
 
 from tqdm import tqdm
@@ -350,6 +351,7 @@ class SyncMyMoodle:
 						print(f"Failed to download the module {module}: {e}")
 
 	def sanitize(self, path):
+		path = html.unescape(path)
 		path = "".join([s for s in path if s not in self.invalid_chars])
 		while path and path[-1] == " ":
 			path = path[:-1]
