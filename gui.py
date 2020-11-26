@@ -3,319 +3,311 @@
 import wx
 import os
 import json
-import syncMyMoodle
+
 
 class LoginDialog(wx.Dialog):
 
 	def __init__(self, parent, config):
 		super(LoginDialog, self).__init__(parent, title="Login")
-		self.config = config
-		self.InitGui()
 
-	def InitGui(self):
+		self.config = config
+		self.username_field = None
+		self.password_field = None
+
+		self.init_gui()
+
+	def init_gui(self):
 		panel = wx.Panel(self)
 
 		sizer = wx.BoxSizer(wx.VERTICAL)
 
-		self.username = wx.TextCtrl(panel, wx.ID_ANY, self.config.get("user"))
-		self.password = wx.TextCtrl(panel, wx.ID_ANY, self.config.get("password"), style=wx.TE_PASSWORD)
-		loginButton = wx.Button(panel, wx.ID_ANY, "Save Login")
+		self.username_field = wx.TextCtrl(panel, wx.ID_ANY, self.config.get("user"))
+		self.password_field = wx.TextCtrl(panel, wx.ID_ANY, self.config.get("password"), style=wx.TE_PASSWORD)
+		login_button = wx.Button(panel, wx.ID_ANY, "Save Login")
 
-		loginButton.Bind(wx.EVT_BUTTON, self.OnClickSaveLogin)
+		login_button.Bind(wx.EVT_BUTTON, self.on_click_save_login)
 
-		sizer.Add(self.username, 0, wx.EXPAND | wx.ALL, 10)
-		sizer.Add(self.password, 0, wx.EXPAND | wx.ALL, 10)
-		sizer.Add(loginButton, 0, wx.EXPAND | wx.ALL, 10)
+		sizer.Add(self.username_field, 0, wx.EXPAND | wx.ALL, 10)
+		sizer.Add(self.password_field, 0, wx.EXPAND | wx.ALL, 10)
+		sizer.Add(login_button, 0, wx.EXPAND | wx.ALL, 10)
 
 		panel.SetSizer(sizer)
 
-	def GetConfig(self):
+	def get_config(self):
 		return self.config
 
-	def OnClickSaveLogin(self, event):
-		self.config.update({"user": self.username.GetValue()})
-		self.config.update({"password": self.password.GetValue()})
+	def on_click_save_login(self, _):
+		self.config.update({"user": self.username_field.GetValue()})
+		self.config.update({"password": self.password_field.GetValue()})
 
 		self.EndModal(wx.ID_OK)
+
 
 class SyncFinishedDialog(wx.MessageDialog):
 	def __init__(self, parent):
 		super(SyncFinishedDialog, self).__init__(parent, "Moodle Sync has finished", "SYNC")
 
+
 class FileTab(wx.Panel):
 	def __init__(self, parent):
 		super(FileTab, self).__init__(parent)
-		self.InitGui()
+		self.init_gui()
 
-	def InitGui(self):
-		fileSizer = wx.BoxSizer(wx.HORIZONTAL)
+	def init_gui(self):
+		file_sizer = wx.BoxSizer(wx.HORIZONTAL)
 
-		browserBoxSizer = self.InitFileBrowser()
-		sidebarBoxSizer = self.InitSidebar()
+		browser_box_sizer = self.init_file_browser()
+		sidebar_box_sizer = self.init_sidebar()
 
 		flags = wx.EXPAND | wx.BOTTOM | wx.LEFT
 
-		fileSizer.Add(browserBoxSizer, 3, flags, 10)
-		fileSizer.Add(sidebarBoxSizer, 1, flags | wx.RIGHT, 10)
+		file_sizer.Add(browser_box_sizer, 3, flags, 10)
+		file_sizer.Add(sidebar_box_sizer, 1, flags | wx.RIGHT, 10)
 
-		self.SetSizer(fileSizer)
+		self.SetSizer(file_sizer)
 
-	def InitFileBrowser(self):
-		browserBox = wx.StaticBox(self, wx.ID_ANY, "")
-		browserBoxSizer = wx.StaticBoxSizer(browserBox, wx.VERTICAL)
+	def init_file_browser(self):
+		browser_box = wx.StaticBox(self, wx.ID_ANY, "")
+		browser_box_sizer = wx.StaticBoxSizer(browser_box, wx.VERTICAL)
 
-		browserStatus = wx.StaticText(browserBox, wx.ID_ANY, "Work in Progress")
-
-		#flags = wx.ALIGN_CENTER_VERTICAL | wx.LEFT | wx.BOTTOM
-
-		browserBoxSizer.AddStretchSpacer()
-		browserBoxSizer.Add(browserStatus, 0, wx.ALL | wx.ALIGN_CENTER, 10)
-		browserBoxSizer.AddStretchSpacer()
-
-		return browserBoxSizer
-
-	def InitSidebar(self):
-		sidebarBox = wx.StaticBox(self, wx.ID_ANY, "")
-		sidebarBoxSizer = wx.StaticBoxSizer(sidebarBox, wx.VERTICAL)
-
-		syncButton = wx.Button(sidebarBox, wx.ID_ANY, "SYNC")
-
-		syncButton.Bind(wx.EVT_BUTTON, self.OnClickSync)
+		browser_status = wx.StaticText(browser_box, wx.ID_ANY, "Work in Progress")
 
 		# flags = wx.ALIGN_CENTER_VERTICAL | wx.LEFT | wx.BOTTOM
 
-		sidebarBoxSizer.AddStretchSpacer()
-		sidebarBoxSizer.Add(syncButton, 0, wx.ALL | wx.EXPAND, 10)
+		browser_box_sizer.AddStretchSpacer()
+		browser_box_sizer.Add(browser_status, 0, wx.ALL | wx.ALIGN_CENTER, 10)
+		browser_box_sizer.AddStretchSpacer()
 
-		return sidebarBoxSizer
+		return browser_box_sizer
 
-	#Just Copied Main of syncMyMoodle
-	def OnClickSync(self,event):
-		if not os.path.exists("config.json"):
-			print("You need to copy config.json.example to config.json and adjust the settings!")
-			exit(1)
-		config = json.load(open("config.json"))
-		if not config.get("enable_download_tracker", True) or not os.path.exists("downloaded_modules.json"):
-			downloaded_modules = dict()
-		else:
-			downloaded_modules = json.load(open("downloaded_modules.json"))
-		smm = syncMyMoodle.SyncMyMoodle(config, downloaded_modules, dryrun=config.get("dryrun"))
+	def init_sidebar(self):
+		sidebar_box = wx.StaticBox(self, wx.ID_ANY, "")
+		sidebar_box_sizer = wx.StaticBoxSizer(sidebar_box, wx.VERTICAL)
 
-		print(f"Logging in...")
-		smm.login()
-		smm.get_moodle_wstoken()
-		smm.get_userid()
-		smm.sync()
-		with open("config.json", "w") as file:
-			file.write(json.dumps(smm.config, indent=4))
-		if config.get("enable_download_tracker", True):
-			with open("downloaded_modules.json", "w") as file:
-				file.write(json.dumps(smm.downloaded_modules, indent=4))
-		syncDialog = SyncFinishedDialog(self)
-		syncDialog.ShowModal()
+		sync_button = wx.Button(sidebar_box, wx.ID_ANY, "SYNC")
+
+		sync_button.Bind(wx.EVT_BUTTON, self.on_click_sync)
+
+		# flags = wx.ALIGN_CENTER_VERTICAL | wx.LEFT | wx.BOTTOM
+
+		sidebar_box_sizer.AddStretchSpacer()
+		sidebar_box_sizer.Add(sync_button, 0, wx.ALL | wx.EXPAND, 10)
+
+		return sidebar_box_sizer
+
+	# Just Copied Main of syncMyMoodle
+	def on_click_sync(self, _):
+		os.system('python3 syncMyMoodle.py')
+		sync_dialog = SyncFinishedDialog(self)
+		sync_dialog.ShowModal()
+
 
 class SettingsTab(wx.Panel):
-	def __init__(self, parent):
+	def __init__(self, parent, config):
 		super(SettingsTab, self).__init__(parent)
 
-		self.loadSettings()
-		self.InitGui()
+		self.config = config
+		self.semesterCheckboxes = []
 
-	def loadSettings(self):
-		if os.path.exists("config.json"):
-			self.config = json.load(open("config.json"))
-		else:
-			if os.path.exists("config.json.example"):
-				self.config = json.load(open("config.json.example"))
+		self.init_gui()
 
-	def saveSettings(self):
+	def save_settings(self):
 		with open("config.json", "w") as file:
 			file.write(json.dumps(self.config, indent=4))
 
-	def InitGui(self):
-		settingSizer = wx.BoxSizer(wx.VERTICAL)
+	def init_gui(self):
+		setting_sizer = wx.BoxSizer(wx.VERTICAL)
 
-		loginBoxSizer = self.InitLoginPanel()
-		downloadBoxSizer = self.InitDownloadPanel()
-		cookieBoxSizer = self.InitCookiePanel()
-		downloadTrackerBoxSizer = self.InitDownloadTrackerPanel()
-		semesterBoxSizer = self.InitSemesterPanel()
-		saveSettings = wx.Button(self, wx.ID_ANY, "Save to Config File")
+		login_box_sizer = self.init_login_panel()
+		download_box_sizer = self.init_download_panel()
+		cookie_box_sizer = self.init_cookie_panel()
+		download_tracker_box_sizer = self.init_download_tracker_panel()
+		semester_box_sizer = self.init_semester_panel()
+		save_settings = wx.Button(self, wx.ID_ANY, "Save to Config File")
 
-		saveSettings.Bind(wx.EVT_BUTTON, self.OnClickSave)
+		save_settings.Bind(wx.EVT_BUTTON, self.on_click_save)
 
-		settingSizer.Add(loginBoxSizer, 0, wx.EXPAND | wx.ALL, 25)
-		settingSizer.Add(downloadBoxSizer, 0, wx.EXPAND | wx.ALL, 25)
-		settingSizer.Add(cookieBoxSizer, 0, wx.EXPAND | wx.ALL, 25)
-		settingSizer.Add(downloadTrackerBoxSizer, 0, wx.EXPAND | wx.ALL, 25)
-		settingSizer.Add(semesterBoxSizer, 0, wx.EXPAND | wx.ALL, 25)
-		settingSizer.Add(saveSettings, 0, wx.EXPAND | wx.ALL, 25)
+		setting_sizer.Add(login_box_sizer, 0, wx.EXPAND | wx.ALL, 25)
+		setting_sizer.Add(download_box_sizer, 0, wx.EXPAND | wx.ALL, 25)
+		setting_sizer.Add(cookie_box_sizer, 0, wx.EXPAND | wx.ALL, 25)
+		setting_sizer.Add(download_tracker_box_sizer, 0, wx.EXPAND | wx.ALL, 25)
+		setting_sizer.Add(semester_box_sizer, 0, wx.EXPAND | wx.ALL, 25)
+		setting_sizer.Add(save_settings, 0, wx.EXPAND | wx.ALL, 25)
 
-		self.SetSizer(settingSizer)
+		self.SetSizer(setting_sizer)
 
-	def InitLoginPanel(self):
-		loginBox = wx.StaticBox(self, wx.ID_ANY, "Login")
-		loginBoxSizer = wx.StaticBoxSizer(loginBox)
+	def init_login_panel(self):
+		login_box = wx.StaticBox(self, wx.ID_ANY, "Login")
+		login_box_sizer = wx.StaticBoxSizer(login_box)
 
-		loginStatus = wx.StaticText(loginBox, wx.ID_ANY, "Status: not available")
-		self.username = wx.StaticText(loginBox, wx.ID_ANY, "Username")
-		self.clearLogin = wx.Button(loginBox, wx.ID_ANY, "Delete")
-		setLogin = wx.Button(loginBox, wx.ID_ANY, "Login")
+		login_status = wx.StaticText(login_box, wx.ID_ANY, "Status: not available")
+		username = wx.StaticText(login_box, wx.ID_ANY, "Username", name="username")
+		clear_login_btn = wx.Button(login_box, wx.ID_ANY, "Delete", name="clear_login_btn")
+		set_login_btn = wx.Button(login_box, wx.ID_ANY, "Login")
 
-		self.username.SetLabel(self.config.get("user"))
-		if(self.config.get("user") == ""):
-			self.clearLogin.Disable()
+		username.SetLabel(self.config.get("user"))
+		if self.config.get("user") == "":
+			clear_login_btn.Disable()
 
-		self.clearLogin.Bind(wx.EVT_BUTTON, self.OnClickDelete)
-		setLogin.Bind(wx.EVT_BUTTON, self.OnClickLogin)
+		clear_login_btn.Bind(wx.EVT_BUTTON, self.on_click_delete)
+		set_login_btn.Bind(wx.EVT_BUTTON, self.on_click_login)
 
 		flags = wx.ALIGN_CENTER_VERTICAL | wx.LEFT | wx.BOTTOM
 
-		loginBoxSizer.Add(loginStatus, 0, wx.ALIGN_LEFT | flags, 10)
-		loginBoxSizer.AddStretchSpacer()
-		loginBoxSizer.Add(self.username, 0, wx.ALIGN_LEFT | flags, 10)
-		loginBoxSizer.Add(self.clearLogin, 0, flags, 10)
-		loginBoxSizer.Add(setLogin, 0, flags | wx.RIGHT, 10)
+		login_box_sizer.Add(login_status, 0, wx.ALIGN_LEFT | flags, 10)
+		login_box_sizer.AddStretchSpacer()
+		login_box_sizer.Add(username, 0, wx.ALIGN_LEFT | flags, 10)
+		login_box_sizer.Add(clear_login_btn, 0, flags, 10)
+		login_box_sizer.Add(set_login_btn, 0, flags | wx.RIGHT, 10)
 
-		return loginBoxSizer
+		return login_box_sizer
 
-	def InitDownloadPanel(self):
-		downloadBox = wx.StaticBox(self, wx.ID_ANY, "Download")
-		downloadBoxSizer = wx.StaticBoxSizer(downloadBox)
+	def init_download_panel(self):
+		return self.init_path_panel("Download", "download_path_input", "basedir", self.on_download_path_change)
 
-		self.downloadPathInput = wx.TextCtrl(downloadBox, wx.ID_ANY)
-		searchDowloadPath = wx.Button(downloadBox, wx.ID_ANY, "Search")
+	def init_cookie_panel(self):
+		return self.init_path_panel("Cookie", "cookie_path_input", "cookie_file", self.on_cookie_path_change)
 
-		self.downloadPathInput.SetValue(self.config.get("basedir"))
-		searchDowloadPath.Disable()
+	def init_path_panel(self, box_name, path_name, input_name, event_handler):
+		box = wx.StaticBox(self, wx.ID_ANY, box_name)
+		box_sizer = wx.StaticBoxSizer(box)
 
-		self.downloadPathInput.Bind(wx.EVT_TEXT, self.OnDownloadPathChange)
+		path_input = wx.TextCtrl(box, wx.ID_ANY, name=path_name)
+		search_path = wx.Button(box, wx.ID_ANY, "Search")
 
-		flags = wx.LEFT | wx.BOTTOM
+		path_input.SetValue(self.config.get(input_name))
+		search_path.Disable()
 
-		downloadBoxSizer.Add(self.downloadPathInput, 1, wx.ALIGN_LEFT | flags | wx.EXPAND, 10)
-		downloadBoxSizer.Add(searchDowloadPath, 0, flags | wx.RIGHT, 10)
-
-		return downloadBoxSizer
-
-	def InitCookiePanel(self):
-		cookieBox = wx.StaticBox(self, wx.ID_ANY, "Cookie")
-		cookieBoxSizer = wx.StaticBoxSizer(cookieBox)
-
-		self.cookiePathInput = wx.TextCtrl(cookieBox, wx.ID_ANY)
-		searchCookiePath = wx.Button(cookieBox, wx.ID_ANY, "Search")
-
-		self.cookiePathInput.SetValue(self.config.get("cookie_file"))
-		searchCookiePath.Disable()
-
-		self.cookiePathInput.Bind(wx.EVT_TEXT, self.OnCookiePathChange)
+		path_input.Bind(wx.EVT_TEXT, event_handler)
 
 		flags = wx.LEFT | wx.BOTTOM
 
-		cookieBoxSizer.Add(self.cookiePathInput, 1, wx.ALIGN_LEFT | flags | wx.EXPAND, 10)
-		cookieBoxSizer.Add(searchCookiePath, 0, flags | wx.RIGHT, 10)
+		box_sizer.Add(path_input, 1, wx.ALIGN_LEFT | flags | wx.EXPAND, 10)
+		box_sizer.Add(search_path, 0, flags | wx.RIGHT, 10)
 
-		return cookieBoxSizer
+		return box_sizer
 
-	def InitDownloadTrackerPanel(self):
-		downloadTrackerBox = wx.StaticBox(self, wx.ID_ANY, "Download Tracker")
-		downloadTrackerBoxSizer = wx.StaticBoxSizer(downloadTrackerBox)
+	def init_download_tracker_panel(self):
+		download_tracker_box = wx.StaticBox(self, wx.ID_ANY, "Download Tracker")
+		download_tracker_box_sizer = wx.StaticBoxSizer(download_tracker_box)
 
-		self.enableDownloadTracker = wx.CheckBox(downloadTrackerBox, wx.ID_ANY, "Enable")
-		self.enableDownloadTracker.SetValue(self.config.get("enable_download_tracker"))
+		enable_download_tracker = wx.CheckBox(download_tracker_box, wx.ID_ANY, "Enable", name="enable_download_tracker")
+		enable_download_tracker.SetValue(self.config.get("enable_download_tracker"))
 
-		self.enableDownloadTracker.Bind(wx.EVT_CHECKBOX, self.OnDonwloadTrackerChanged)
+		enable_download_tracker.Bind(wx.EVT_CHECKBOX, self.on_download_tracker_changed)
 
 		flags = wx.LEFT | wx.BOTTOM
 
-		downloadTrackerBoxSizer.Add(self.enableDownloadTracker, 0, wx.ALIGN_LEFT | flags | wx.EXPAND, 10)
+		download_tracker_box_sizer.Add(enable_download_tracker, 0, wx.ALIGN_LEFT | flags | wx.EXPAND, 10)
 
-		return downloadTrackerBoxSizer
+		return download_tracker_box_sizer
 
-	def InitSemesterPanel(self):
-		semesterBox = wx.StaticBox(self, wx.ID_ANY, "Download Tracker")
-		semesterBoxSizer = wx.StaticBoxSizer(semesterBox, wx.HORIZONTAL)
+	def init_semester_panel(self):
+		semester_box = wx.StaticBox(self, wx.ID_ANY, "Download Tracker")
+		semester_box_sizer = wx.StaticBoxSizer(semester_box, wx.HORIZONTAL)
 
-		self.semesterCheckboxes = []
-
-		self.semesterCheckboxes.append(wx.CheckBox(semesterBox, wx.ID_ANY, "18ws"))
-		self.semesterCheckboxes.append(wx.CheckBox(semesterBox, wx.ID_ANY, "19ss"))
-		self.semesterCheckboxes.append(wx.CheckBox(semesterBox, wx.ID_ANY, "19ws"))
-		self.semesterCheckboxes.append(wx.CheckBox(semesterBox, wx.ID_ANY, "20ss"))
-		self.semesterCheckboxes.append(wx.CheckBox(semesterBox, wx.ID_ANY, "20ws"))
+		self.semesterCheckboxes.append(wx.CheckBox(semester_box, wx.ID_ANY, "18ws"))
+		self.semesterCheckboxes.append(wx.CheckBox(semester_box, wx.ID_ANY, "19ss"))
+		self.semesterCheckboxes.append(wx.CheckBox(semester_box, wx.ID_ANY, "19ws"))
+		self.semesterCheckboxes.append(wx.CheckBox(semester_box, wx.ID_ANY, "20ss"))
+		self.semesterCheckboxes.append(wx.CheckBox(semester_box, wx.ID_ANY, "20ws"))
 
 		for s in self.semesterCheckboxes:
 			s.SetValue(s.GetLabel() in self.config.get("only_sync_semester"))
-			s.Bind(wx.EVT_CHECKBOX, self.OnSemesterChanged)
+			s.Bind(wx.EVT_CHECKBOX, self.on_semester_changed)
 
 		flags = wx.LEFT | wx.BOTTOM
 
-		list = iter(self.semesterCheckboxes)
-		semesterBoxSizer.Add(next(list), 0, wx.ALIGN_LEFT | flags | wx.EXPAND, 10)
-		for s in list:
-			semesterBoxSizer.Add(s, 0, flags | wx.EXPAND, 10)
+		boxes_iter = iter(self.semesterCheckboxes)
+		semester_box_sizer.Add(next(boxes_iter), 0, wx.ALIGN_LEFT | flags | wx.EXPAND, 10)
+		for s in boxes_iter:
+			semester_box_sizer.Add(s, 0, flags | wx.EXPAND, 10)
 
-		return semesterBoxSizer
+		return semester_box_sizer
 
-	def OnClickSave(self, event):
-		self.saveSettings()
+	def on_click_save(self, _):
+		self.save_settings()
 
-	def OnClickDelete(self, event):
+	def on_click_delete(self, _):
 		self.config.update({"user": ""})
 		self.config.update({"password": ""})
-		self.updateGui()
+		self.update_gui()
 
-	def OnClickLogin(self, event):
+	def on_click_login(self, _):
 		login = LoginDialog(self, self.config)
-		if(login.ShowModal() != wx.ID_OK):
-			self.config = login.GetConfig()
+		if login.ShowModal() != wx.ID_OK:
+			self.config = login.get_config()
 		login.Destroy()
-		self.updateGui()
+		self.update_gui()
 
-	def OnDownloadPathChange(self, event):
-		self.config.update({"basedir": self.downloadPathInput.GetValue()})
+	def on_download_path_change(self, _):
+		self.config.update({"basedir": self.get_item_by_name("download_path_input").GetValue()})
 
-	def OnCookiePathChange(self, event):
-		self.config.update({"cookie_file": self.cookiePathInput.GetValue()})
+	def on_cookie_path_change(self, _):
+		self.config.update({"cookie_file": self.get_item_by_name("cookie_path_input").GetValue()})
 
-	def OnDonwloadTrackerChanged(self, event):
-		self.config.update({"enable_download_tracker": self.enableDownloadTracker.GetValue()})
+	def on_download_tracker_changed(self, _):
+		self.config.update({"enable_download_tracker": self.get_item_by_name("enable_download_tracker").GetValue()})
 
-	def OnSemesterChanged(self, event):
+	def on_semester_changed(self, _):
 		semester = []
 		for s in self.semesterCheckboxes:
 			if s.GetValue():
 				semester.append(s.GetLabel())
 		self.config.update({"only_sync_semester": semester})
 
-	def updateGui(self):
-		self.username.SetLabel(self.config.get("user"))
-		self.clearLogin.Enable((self.config.get("user") != ""))
+	def update_gui(self):
+		self.get_item_by_name("username").SetLabel(self.config.get("user"))
+		self.get_item_by_name("clear_login_btn").Enable((self.config.get("user") != ""))
 		self.Fit()
+
+	# Returns the First Element with the given Name
+	def get_item_by_name(self, item_name):
+		def get_by_name(sizer, name):
+			for item in sizer.GetChildren():
+				if item.IsSizer():
+					res = get_by_name(item.GetSizer(), name)
+					if (res is not None) and (res.GetName() == name):
+						return res
+				elif item.IsWindow():
+					if item.GetWindow().GetName() == name:
+						return item.GetWindow()
+			return None
+
+		return get_by_name(self.GetSizer(), item_name)
+
 
 class MainFrame(wx.Frame):
 	def __init__(self):
 		super(MainFrame, self).__init__(None, wx.ID_ANY, "SyncMyMoodle", (30, 30), (800, 800))
-		self.InitGui()
+		self.init_gui()
 
-	def InitGui(self):
-		self.nb = wx.Notebook(self)
-		self.nb.AddPage(FileTab(self.nb), "Filebrowser")
-		self.nb.AddPage(SettingsTab(self.nb), "Settings")
-		return True
+	def init_gui(self):
+		config = None
+		if os.path.exists("config.json"):
+			config = json.load(open("config.json"))
+		else:
+			if os.path.exists("config.json.example"):
+				config = json.load(open("config.json.example"))
+			else:
+				print("You need config.json.example or config.json to use the GUI!")
+				exit(1)
+
+		nb = wx.Notebook(self)
+		nb.AddPage(FileTab(nb), "File Browser")
+		nb.AddPage(SettingsTab(nb, config), "Settings")
+
 
 class SyncMyMoodleApp(wx.App):
 	def __init__(self):
 		super(SyncMyMoodleApp, self).__init__()
-		self.InitGui()
+		frame = MainFrame()
+		frame.Show()
 
-	def InitGui(self):
-		self.frame = MainFrame()
-		self.frame.Show()
-
-	def Show(self):
+	def show(self):
 		self.MainLoop()
+
 
 if __name__ == '__main__':
 	app = SyncMyMoodleApp()
-	app.Show()
+	app.show()
