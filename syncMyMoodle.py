@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 
-import requests, pickle
+import requests
+import pickle
 from bs4 import BeautifulSoup as bs
 import os
 import re
@@ -16,9 +17,10 @@ import urllib.parse
 
 from tqdm import tqdm
 
+
 class SyncMyMoodle:
 	params = {
-		'lang': 'en' #Titles for some pages differ
+		'lang': 'en'  # Titles for some pages differ
 	}
 	block_size = 1024
 	invalid_chars = '~"#%&*:<>?/\\{|}'
@@ -56,32 +58,37 @@ class SyncMyMoodle:
 				pickle.dump(self.session.cookies, f)
 			return
 		soup = bs(resp.text, features="html.parser")
-		if soup.find("input",{"name": "RelayState"}) is None:
-			data = {'j_username': self.config["user"],
-					'j_password': self.config["password"],
-					'_eventId_proceed': ''}
-			resp2 = self.session.post(resp.url,data=data)
+		if soup.find("input", {"name": "RelayState"}) is None:
+			data = {
+				'j_username': self.config["user"],
+				'j_password': self.config["password"],
+				'_eventId_proceed': ''
+			}
+			resp2 = self.session.post(resp.url, data=data)
 			soup = bs(resp2.text, features="html.parser")
-		data = {"RelayState": soup.find("input",{"name": "RelayState"})["value"],
-				"SAMLResponse": soup.find("input",{"name": "SAMLResponse"})["value"]}
+		data = {
+			"RelayState": soup.find("input", {"name": "RelayState"})["value"],
+			"SAMLResponse": soup.find("input", {"name": "SAMLResponse"})["value"]
+		}
 		resp = self.session.post("https://moodle.rwth-aachen.de/Shibboleth.sso/SAML2/POST", data=data)
 		with open(self.config["cookie_file"], 'wb') as f:
 			soup = bs(resp.text, features="html.parser")
 			self.session_key = get_session_key(soup)
 			pickle.dump(self.session.cookies, f)
 
-	### Moodle Web Services API
+	# Moodle Web Services API
 
 	def get_moodle_wstoken(self):
 		if not self.session:
 			raise Exception("You need to login() first.")
 		params = {
 			"service": "moodle_mobile_app",
-			"passport" :1,
+			"passport": 1,
 			"urlscheme": "moodlemobile"
 		}
-		#response = self.session.head("https://moodle.rwth-aachen.de/admin/tool/mobile/launch.php", params=params, allow_redirects=False)
-		#workaround for macos
+		# response = self.session.head("https://moodle.rwth-aachen.de/admin/tool/mobile/launch.php", params=params, allow_redirects=False)
+		# workaround for macos
+
 		def getCookies(cookie_jar, domain):
 			cookie_dict = cookie_jar.get_dict(domain=domain)
 			found = ['%s=%s' % (name, value) for (name, value) in cookie_dict.items()]
@@ -175,11 +182,11 @@ class SyncMyMoodle:
 
 		response = self.session.post('https://moodle.rwth-aachen.de/webservice/rest/server.php', params=params, data=data)
 
-		files = response.json().get("lastattempt",{}).get("submission",{}).get("plugins",[])
-		files += response.json().get("lastattempt",{}).get("teamsubmission",{}).get("plugins",[])
-		files += response.json().get("feedback",{}).get("plugins",[])
+		files = response.json().get("lastattempt", {}).get("submission", {}).get("plugins", [])
+		files += response.json().get("lastattempt", {}).get("teamsubmission", {}).get("plugins", [])
+		files += response.json().get("feedback", {}).get("plugins", [])
 
-		files = [f.get("files",[]) for p in files for f in p.get("fileareas",[]) if f["area"] in ["download","submission_files"]]
+		files = [f.get("files", []) for p in files for f in p.get("fileareas", []) if f["area"] in ["download", "submission_files"]]
 		files = [f for folder in files for f in folder]
 		return files
 
@@ -201,8 +208,7 @@ class SyncMyMoodle:
 		folder = response.json()["folders"]
 		return folder
 
-
-	### The main syncing part
+	# The main syncing part
 
 	def sync(self):
 		if not self.session:
@@ -212,15 +218,15 @@ class SyncMyMoodle:
 		if not self.user_id:
 			raise Exception("You need to get_userid() first.")
 
-		### Syncing all courses
+		# Syncing all courses
 		for course in self.get_all_courses():
 			# Skip not selected courses
-			if len(self.config["selected_courses"])>0 and len([c for c in self.config["selected_courses"] if str(course["id"]) in c])==0:
+			if len(self.config["selected_courses"]) > 0 and len([c for c in self.config["selected_courses"] if str(course["id"]) in c]) == 0:
 				continue
 
 			semestername = course["idnumber"][:4]
 			# Skip not selected semesters
-			if len(self.config["selected_courses"])==0 and self.config["only_sync_semester"] and semestername not in self.config["only_sync_semester"]:
+			if len(self.config["selected_courses"]) == 0 and self.config["only_sync_semester"] and semestername not in self.config["only_sync_semester"]:
 				continue
 
 			coursename = course["shortname"]
@@ -229,12 +235,12 @@ class SyncMyMoodle:
 			folders = self.get_folders_by_courses(course["id"])
 			for section in self.get_course(course["id"]):
 				sectionname = section["name"]
-				#print(f"[{datetime.now()}] Section {sectionname}")
-				sectionpath = os.path.join(os.path.expanduser(self.config["basedir"]),self.sanitize(semestername),self.sanitize(coursename),self.sanitize(sectionname))
+				# print(f"[{datetime.now()}] Section {sectionname}")
+				sectionpath = os.path.join(os.path.expanduser(self.config["basedir"]), self.sanitize(semestername), self.sanitize(coursename), self.sanitize(sectionname))
 
 				for module in section["modules"]:
 					try:
-						## Get Assignments
+						# Get Assignments
 						if module["modname"] == "assign":
 							ass = [a for a in assignments["assignments"] if a["cmid"] == module["id"]]
 							if len(ass) == 0:
@@ -249,18 +255,18 @@ class SyncMyMoodle:
 									filepath = os.path.join(sectionpath, self.sanitize(module["name"]))
 								self.download_file(c["fileurl"], filepath, c["filename"])
 
-						## Get Resources
+						# Get Resources
 						if module["modname"] == "resource":
 							if not module.get("contents"):
 								continue
 
-							if self.downloaded_modules != None and self.downloaded_modules.get(str(module["id"])) and int(self.downloaded_modules[str(module["id"])]) >= int(module["contentsinfo"]["lastmodified"]):
+							if self.downloaded_modules is not None and self.downloaded_modules.get(str(module["id"])) and int(self.downloaded_modules[str(module["id"])]) >= int(module["contentsinfo"]["lastmodified"]):
 								continue
 
 							for c in module["contents"]:
 								path = sectionpath
-								if len(module["contents"])>0:
-									path = os.path.join(path,self.sanitize(module["name"]))
+								if len(module["contents"]) > 0:
+									path = os.path.join(path, self.sanitize(module["name"]))
 								# First check if the file is directly accessible:
 								if self.download_file(c["fileurl"], sectionpath, c["filename"]):
 									continue
@@ -278,15 +284,15 @@ class SyncMyMoodle:
 										for vid in engage_videos:
 											self.downloadOpenCastVideos(vid.get("data-framesrc"), course["id"], path)
 
-							if self.downloaded_modules != None and module["contentsinfo"]:
+							if self.downloaded_modules is not None and module["contentsinfo"]:
 								self.downloaded_modules[str(module["id"])] = int(module["contentsinfo"]["lastmodified"])
 
-						## Get Resources in URLs
+						# Get Resources in URLs
 						if module["modname"] == "url":
 							if not module.get("contents"):
 								continue
 
-							if self.downloaded_modules != None and self.downloaded_modules.get(str(module["id"])):
+							if self.downloaded_modules is not None and self.downloaded_modules.get(str(module["id"])):
 								continue
 
 							failed = False
@@ -300,15 +306,15 @@ class SyncMyMoodle:
 									print(f'Error while downloading url {c["fileurl"]}: {e}')
 
 							if not failed:
-								if self.downloaded_modules != None:
+								if self.downloaded_modules is not None:
 									self.downloaded_modules[str(module["id"])] = "downloaded"
 
-						## Get Folders
+						# Get Folders
 						if module["modname"] == "folder":
 							if not module.get("contents"):
 								continue
 
-							if self.downloaded_modules != None and self.downloaded_modules.get(str(module["id"])) and int(self.downloaded_modules[str(module["id"])]) >= int(module["contentsinfo"]["lastmodified"]):
+							if self.downloaded_modules is not None and self.downloaded_modules.get(str(module["id"])) and int(self.downloaded_modules[str(module["id"])]) >= int(module["contentsinfo"]["lastmodified"]):
 								continue
 
 							rel_folder = [f["intro"] for f in folders if f["coursemodule"] == module["id"]]
@@ -326,26 +332,26 @@ class SyncMyMoodle:
 									filepath = os.path.join(sectionpath, self.sanitize(module["name"]))
 								self.download_file(c["fileurl"], filepath,  c["filename"])
 
-							if self.downloaded_modules != None and module["contentsinfo"]:
+							if self.downloaded_modules is not None and module["contentsinfo"]:
 								self.downloaded_modules[str(module["id"])] = int(module["contentsinfo"]["lastmodified"])
 
-						## Get embedded videos in pages or labels
-						if module["modname"] in ["page","label"]:
+						# Get embedded videos in pages or labels
+						if module["modname"] in ["page", "label"]:
 							if module["modname"] == "page":
-								if self.downloaded_modules != None and self.downloaded_modules.get(str(module["id"])) and int(self.downloaded_modules[str(module["id"])]) >= int(module["contentsinfo"]["lastmodified"]):
+								if self.downloaded_modules is not None and self.downloaded_modules.get(str(module["id"])) and int(self.downloaded_modules[str(module["id"])]) >= int(module["contentsinfo"]["lastmodified"]):
 									continue
 								response = self.session.get(module["url"], params=self.params)
 								soup = response.text
 							else:
-								soup = module.get("description","")
+								soup = module.get("description", "")
 
 							self.scanForLinks(soup, sectionpath, course["id"])
 
-							if module["modname"] == "page" and self.downloaded_modules != None and "contentsinfo" in module:
+							if module["modname"] == "page" and self.downloaded_modules is not None and "contentsinfo" in module:
 								self.downloaded_modules[str(module["id"])] = int(module["contentsinfo"]["lastmodified"])
 
-#						if module["modname"] not in ["page", "folder", "url", "resource", "assign", "label"]:
-#						print(json.dumps(module, indent=4))
+						# if module["modname"] not in ["page", "folder", "url", "resource", "assign", "label"]:
+						# print(json.dumps(module, indent=4))
 					except Exception as e:
 						traceback.print_exc()
 						print(f"Failed to download the module {module}: {e}")
@@ -363,16 +369,16 @@ class SyncMyMoodle:
 
 	def download_file(self, url, path, filename):
 		filename = self.sanitize(filename)
-		downloadpath = os.path.join(path,filename)
+		downloadpath = os.path.join(path, filename)
 
 		if os.path.exists(downloadpath):
 			return True
 
-		url = url.replace("webservice/pluginfile.php","tokenpluginfile.php/" + self.user_private_access_key)
+		url = url.replace("webservice/pluginfile.php", "tokenpluginfile.php/" + self.user_private_access_key)
 
 		if os.path.exists(downloadpath + ".temp"):
 			resume_size = os.stat(downloadpath + ".temp").st_size
-			header = {'Range':f'bytes= {resume_size}-'}
+			header = {'Range': f'bytes= {resume_size}-'}
 		else:
 			resume_size = 0
 			header = dict()
@@ -386,7 +392,7 @@ class SyncMyMoodle:
 			if resume_size:
 				progress_bar.update(resume_size)
 			os.makedirs(path, exist_ok=True)
-			with open(downloadpath + ".temp","ab") as file:
+			with open(downloadpath + ".temp", "ab") as file:
 				for data in response.iter_content(self.block_size):
 					progress_bar.update(len(data))
 					file.write(data)
@@ -398,7 +404,7 @@ class SyncMyMoodle:
 
 	def downloadOpenCastVideos(self, engageLink, courseid, path):
 		# get engage authentication form
-		course_info = [{"index":0,"methodname":"filter_opencast_get_lti_form","args":{"courseid":str(courseid)}}]
+		course_info = [{"index": 0, "methodname": "filter_opencast_get_lti_form", "args": {"courseid": str(courseid)}}]
 		response = self.session.post(f'https://moodle.rwth-aachen.de/lib/ajax/service.php?sesskey={self.session_key}&info=filter_opencast_get_lti_form', data=json.dumps(course_info))
 
 		# submit engage authentication info
@@ -413,7 +419,7 @@ class SyncMyMoodle:
 		episodejson = json.loads(self.session.get(episodejson).text)
 
 		tracks = episodejson["search-results"]["result"]["mediapackage"]["media"]["track"]
-		tracks = sorted([(t["url"],t["video"]["resolution"]) for t in tracks if t["mimetype"] == 'video/mp4' and "transport" not in t], key=(lambda x: int(x[1].split("x")[0]) ))
+		tracks = sorted([(t["url"], t["video"]["resolution"]) for t in tracks if t["mimetype"] == 'video/mp4' and "transport" not in t], key=(lambda x: int(x[1].split("x")[0])))
 		# only choose mp4s provided with plain https (no transport key), and use the one with the highest resolution (sorted by width) (could also use bitrate)
 		finaltrack = tracks[-1]
 		return self.download_file(finaltrack[0], path, finaltrack[0].split("/")[-1])
@@ -422,7 +428,7 @@ class SyncMyMoodle:
 
 	def scanAndDownloadYouTube(self, link, path):
 		if os.path.exists(path):
-			if len([f for f in os.listdir(path) if link[-11:] in f])!=0:
+			if len([f for f in os.listdir(path) if link[-11:] in f]) != 0:
 				return False
 		ydl_opts = {
 			"outtmpl": "{}/%(title)s-%(id)s.%(ext)s".format(path),
@@ -449,33 +455,33 @@ class SyncMyMoodle:
 				traceback.print_exc()
 				print(f'Error while downloading url {text}: {e}')
 
-
 		# Youtube videos
 		youtube_links = re.findall("https://www.youtube.com/embed/.{11}", text)
-		for l in youtube_links:
-			self.scanAndDownloadYouTube(l, path)
+		for link in youtube_links:
+			self.scanAndDownloadYouTube(link, path)
 
 		# OpenCast videos
 		opencast_links = re.findall("https://engage.streaming.rwth-aachen.de/play/[a-f0-9\-]+", text)
 		for vid in opencast_links:
 			self.downloadOpenCastVideos(vid, course_id, path)
 
-		#https://rwth-aachen.sciebo.de/s/XXX
+		# https://rwth-aachen.sciebo.de/s/XXX
 		sciebo_links = re.findall("https://rwth-aachen.sciebo.de/s/[a-f0-9\-]+", text)
 		for vid in sciebo_links:
 			response = self.session.get(vid)
 			soup = bs(response.text, features="html.parser")
-			url = soup.find("input",{"name": "downloadURL"})
-			filename = soup.find("input",{"name": "filename"})
+			url = soup.find("input", {"name": "downloadURL"})
+			filename = soup.find("input", {"name": "filename"})
 			if url and filename:
 				self.download_file(url["value"], path, filename["value"])
+
 
 if __name__ == '__main__':
 	if not os.path.exists("config.json"):
 		print("You need to copy config.json.example to config.json and adjust the settings!")
 		exit(1)
 	config = json.load(open("config.json"))
-	if not config.get("enable_download_tracker",True) or not os.path.exists("downloaded_modules.json"):
+	if not config.get("enable_download_tracker", True) or not os.path.exists("downloaded_modules.json"):
 		downloaded_modules = dict()
 	else:
 		downloaded_modules = json.load(open("downloaded_modules.json"))
@@ -486,8 +492,8 @@ if __name__ == '__main__':
 	smm.get_moodle_wstoken()
 	smm.get_userid()
 	smm.sync()
-	with open("config.json","w") as file:
+	with open("config.json", "w") as file:
 		file.write(json.dumps(smm.config, indent=4))
-	if config.get("enable_download_tracker",True):
-		with open("downloaded_modules.json","w") as file:
+	if config.get("enable_download_tracker", True):
+		with open("downloaded_modules.json", "w") as file:
 			file.write(json.dumps(smm.downloaded_modules, indent=4))
