@@ -62,7 +62,7 @@ class SyncMyMoodle:
 					'_eventId_proceed': ''}
 			resp2 = self.session.post(resp.url,data=data)
 			soup = bs(resp2.text, features="html.parser")
-		data = {"RelayState": soup.find("input",{"name": "RelayState"})["value"], 
+		data = {"RelayState": soup.find("input",{"name": "RelayState"})["value"],
 				"SAMLResponse": soup.find("input",{"name": "SAMLResponse"})["value"]}
 		resp = self.session.post("https://moodle.rwth-aachen.de/Shibboleth.sso/SAML2/POST", data=data)
 		with open(self.config["cookie_file"], 'wb') as f:
@@ -393,7 +393,6 @@ class SyncMyMoodle:
 			progress_bar.close()
 			os.rename(downloadpath + ".temp", downloadpath)
 			return True
-		return False
 
 	# Downloads Opencast videos by using the engage API
 
@@ -445,7 +444,7 @@ class SyncMyMoodle:
 				if "Content-Type" in response.headers and "text/html" not in response.headers["Content-Type"]:
 					# non html links
 					self.download_file(text, path, text.split("/")[-1])
-			except:
+			except Exception as e:
 				# Maybe the url is down?
 				traceback.print_exc()
 				print(f'Error while downloading url {text}: {e}')
