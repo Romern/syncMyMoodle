@@ -12,7 +12,7 @@ from syncMyMoodle import SyncMyMoodle
 class LoginDialog (wx.Dialog):
 
 	def __init__(self, parent):
-		wx.Dialog.__init__(self, parent, wx.ID_ANY, u"Login", wx.DefaultPosition, wx.Size(400, 200), wx.DEFAULT_DIALOG_STYLE)
+		super(LoginDialog, self).__init__(parent, wx.ID_ANY, u"Login", wx.DefaultPosition, wx.Size(400, 200), wx.DEFAULT_DIALOG_STYLE)
 
 		self.SetSizeHints(wx.DefaultSize, wx.DefaultSize)
 
@@ -871,7 +871,7 @@ class MainFrame(wx.Frame):
 
 	def __init__(self, parent):
 		super(MainFrame, self).__init__(
-			self, parent, wx.ID_ANY, u"SyncMyMoodle", wx.DefaultPosition, wx.Size(700, 750),
+			parent, wx.ID_ANY, u"SyncMyMoodle", wx.DefaultPosition, wx.Size(700, 750),
 			wx.DEFAULT_FRAME_STYLE | wx.TAB_TRAVERSAL
 		)
 
