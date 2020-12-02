@@ -335,8 +335,7 @@ class SyncMyMoodle:
 					self.scanAndDownloadYouTube(cur_node)
 					cur_node.is_downloaded = True
 				elif cur_node.type == "Opencast":
-					#self.downloadOpenCastVideos(cur_node)
-					print(cur_node)
+					self.downloadOpenCastVideos(cur_node)
 					cur_node.is_downloaded = True
 				else:
 					self.download_file(cur_node)
