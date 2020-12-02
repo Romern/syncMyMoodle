@@ -10,7 +10,9 @@ import base64
 import youtube_dl
 import traceback
 
-import http.client, urllib.parse
+import http.client
+import html
+import urllib.parse
 
 from tqdm import tqdm
 
@@ -310,7 +312,6 @@ class SyncMyMoodle:
 								self.scanForLinks(module["url"], section_node, course_id, module_title=module["name"], single=True)
 							else:
 								self.scanForLinks(module.get("description",""), section_node, course_id, module_title=module["name"])
-
 					except Exception as e:
 						traceback.print_exc()
 						print(f"Failed to download the module {module}: {e}")
@@ -467,7 +468,6 @@ class SyncMyMoodle:
 		youtube_links = re.findall("https://www.youtube.com/embed/.{11}", text)
 		for l in youtube_links:
 			parent_node.add_child(f"Youtube: {module_title if module_title else l}", l, "Youtube", url=l)
-			#self.scanAndDownloadYouTube(l, path)
 
 		# OpenCast videos
 		opencast_links = re.findall("https://engage.streaming.rwth-aachen.de/play/[a-f0-9\-]+", text)
