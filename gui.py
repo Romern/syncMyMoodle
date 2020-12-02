@@ -81,7 +81,7 @@ class FileTab(wx.Panel):
 
 			self.DeleteAllItems()
 
-			root = self.AddRoot(self.smm.root_node.name)
+			root = self.AddRoot(self.smm.sanitize(self.smm.root_node.name))
 			self.update_node(self.GetSize()[0], wx.WindowDC(self), root, self.smm.root_node, 1)
 
 			self.ExpandAll()
@@ -95,7 +95,7 @@ class FileTab(wx.Panel):
 		def update_node(self, width, dc, tree, node, depth):
 			if node.children is not None:
 				for child_node in node.children:
-					label = self.Ellipsize(child_node.name, dc, wx.ELLIPSIZE_END, width - (depth+1) * self.GetIndent())
+					label = self.Ellipsize(self.smm.sanitize(child_node.name), dc, wx.ELLIPSIZE_END, width - (depth+1) * self.GetIndent())
 					child_tree = self.AppendItem(tree, label)
 					self.update_node(width, dc, child_tree, child_node, depth + 1)
 

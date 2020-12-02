@@ -307,9 +307,9 @@ class SyncMyMoodle:
 						## Get embedded videos in pages or labels
 						if module["modname"] in ["page","label"]:
 							if module["modname"] == "page":
-								self.scanForLinks(module["url"], section_node, course_id, single=True)
+								self.scanForLinks(module["url"], section_node, course_id, module_title=module["name"], single=True)
 							else:
-								self.scanForLinks(module.get("description",""), section_node, course_id)
+								self.scanForLinks(module.get("description",""), section_node, course_id, module_title=module["name"])
 
 					except Exception as e:
 						traceback.print_exc()
@@ -437,7 +437,7 @@ class SyncMyMoodle:
 			ydl.download([link])
 		return True
 
-	def scanForLinks(self, text, parent_node, course_id, single=False):
+	def scanForLinks(self, text, parent_node, course_id, module_title=None, single=False):
 		# A single link is supplied and the contents of it are checked
 		if single:
 			try:
@@ -466,13 +466,13 @@ class SyncMyMoodle:
 		# Youtube videos
 		youtube_links = re.findall("https://www.youtube.com/embed/.{11}", text)
 		for l in youtube_links:
-			parent_node.add_child(f"Youtube: {l}", l, "Youtube", url=l)
+			parent_node.add_child(f"Youtube: {module_title if module_title else l}", l, "Youtube", url=l)
 			#self.scanAndDownloadYouTube(l, path)
 
 		# OpenCast videos
 		opencast_links = re.findall("https://engage.streaming.rwth-aachen.de/play/[a-f0-9\-]+", text)
 		for vid in opencast_links:
-			parent_node.add_child(f"Opencast: {vid}", vid, "Opencast", url=vid, additional_info=course_id)
+			parent_node.add_child(f"Opencast: {module_title if module_title else vid}", vid, "Opencast", url=vid, additional_info=course_id)
 
 		#https://rwth-aachen.sciebo.de/s/XXX
 		sciebo_links = re.findall("https://rwth-aachen.sciebo.de/s/[a-f0-9\-]+", text)
