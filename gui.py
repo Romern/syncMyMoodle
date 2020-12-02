@@ -1,288 +1,914 @@
 #!/usr/bin/env python3
 
 import wx
+from datetime import datetime
 import os
 import json
+from syncMyMoodle import SyncMyMoodle
+
+# Dialogs
 
 
-class LoginDialog(wx.Dialog):
+class LoginDialog (wx.Dialog):
 
-	def __init__(self, parent, config):
-		super(LoginDialog, self).__init__(parent, title="Login")
+	def __init__(self, parent):
+		wx.Dialog.__init__(self, parent, wx.ID_ANY, u"Login", wx.DefaultPosition, wx.Size(400, 200), wx.DEFAULT_DIALOG_STYLE)
 
-		self.config = config
-		self.username_field = None
-		self.password_field = None
-
-		self.init_gui()
-
-	def init_gui(self):
-		panel = wx.Panel(self)
+		self.SetSizeHints(wx.DefaultSize, wx.DefaultSize)
 
 		sizer = wx.BoxSizer(wx.VERTICAL)
 
-		self.username_field = wx.TextCtrl(panel, wx.ID_ANY, self.config.get("user"))
-		self.password_field = wx.TextCtrl(panel, wx.ID_ANY, self.config.get("password"), style=wx.TE_PASSWORD)
-		login_button = wx.Button(panel, wx.ID_ANY, "Save Login")
+		username_sizer = wx.BoxSizer(wx.HORIZONTAL)
 
-		login_button.Bind(wx.EVT_BUTTON, self.on_click_save_login)
+		self.username_text = wx.StaticText(self, wx.ID_ANY, u"Username:", wx.DefaultPosition, wx.DefaultSize, 0)
+		self.username_text.Wrap(-1)
 
-		sizer.Add(self.username_field, 0, wx.EXPAND | wx.ALL, 10)
-		sizer.Add(self.password_field, 0, wx.EXPAND | wx.ALL, 10)
-		sizer.Add(login_button, 0, wx.EXPAND | wx.ALL, 10)
+		username_sizer.Add(self.username_text, 1, wx.ALIGN_CENTER_VERTICAL | wx.ALL, 10)
 
-		panel.SetSizer(sizer)
+		self.username_input = wx.TextCtrl(self, wx.ID_ANY, wx.EmptyString, wx.DefaultPosition, wx.DefaultSize, 0)
+		username_sizer.Add(self.username_input, 3, wx.ALIGN_CENTER_VERTICAL | wx.ALL | wx.EXPAND, 10)
 
-	def get_config(self):
-		return self.config
+		sizer.Add(username_sizer, 1, wx.EXPAND, 5)
 
-	def on_click_save_login(self, _):
-		self.config.update({"user": self.username_field.GetValue()})
-		self.config.update({"password": self.password_field.GetValue()})
+		password_sizer = wx.BoxSizer(wx.HORIZONTAL)
 
-		self.EndModal(wx.ID_OK)
+		self.password_text = wx.StaticText(self, wx.ID_ANY, u"Password:", wx.DefaultPosition, wx.DefaultSize, 0)
+		self.password_text.Wrap(-1)
 
+		password_sizer.Add(self.password_text, 1, wx.ALIGN_CENTER_VERTICAL | wx.ALL, 10)
 
-class SyncFinishedDialog(wx.MessageDialog):
-	def __init__(self, parent):
-		super(SyncFinishedDialog, self).__init__(parent, "Moodle Sync has finished", "SYNC")
+		self.password_input = wx.TextCtrl(self, wx.ID_ANY, wx.EmptyString, wx.DefaultPosition, wx.DefaultSize, wx.TE_PASSWORD)
+		password_sizer.Add(self.password_input, 3, wx.ALIGN_CENTER_VERTICAL | wx.ALL | wx.EXPAND, 10)
+
+		sizer.Add(password_sizer, 1, wx.EXPAND, 5)
+
+		button_sizer = wx.StdDialogButtonSizer()
+		self.button_sizerSave = wx.Button(self, wx.ID_OK)
+		button_sizer.AddButton(self.button_sizerSave)
+		self.button_sizerCancel = wx.Button(self, wx.ID_CANCEL)
+		button_sizer.AddButton(self.button_sizerCancel)
+		button_sizer.Realize()
+
+		sizer.Add(button_sizer, 0, wx.ALIGN_CENTER_HORIZONTAL | wx.ALL, 10)
+
+		self.SetSizer(sizer)
+		self.Layout()
+
+		self.Centre(wx.BOTH)
+
+	def __del__(self):
+		pass
+
+# Main Frame
 
 
 class FileTab(wx.Panel):
-	def __init__(self, parent):
-		super(FileTab, self).__init__(parent)
-		self.init_gui()
+	class TreeView(wx.TreeCtrl):
+		def __init__(self, parent, smm):
+			super(FileTab.TreeView, self).__init__(
+				parent, wx.ID_ANY, wx.DefaultPosition, wx.DefaultSize,
+				wx.TR_HAS_BUTTONS | wx.TR_HIDE_ROOT | wx.TR_MULTIPLE
+			)
 
-	def init_gui(self):
-		file_sizer = wx.BoxSizer(wx.HORIZONTAL)
+			self.smm = smm
 
-		browser_box_sizer = self.init_file_browser()
-		sidebar_box_sizer = self.init_sidebar()
+		def on_resize(self, _):
+			self.update_gui()
 
-		flags = wx.EXPAND | wx.BOTTOM | wx.LEFT
+		def update_gui(self):
+			if self.smm.root_node is None:
+				return
 
-		file_sizer.Add(browser_box_sizer, 3, flags, 10)
-		file_sizer.Add(sidebar_box_sizer, 1, flags | wx.RIGHT, 10)
+			self.DeleteAllItems()
 
-		self.SetSizer(file_sizer)
+			root = self.AddRoot(self.smm.root_node.name)
+			self.update_node(self.GetSize()[0], wx.WindowDC(self), root, self.smm.root_node, 1)
 
-	def init_file_browser(self):
-		browser_box = wx.StaticBox(self, wx.ID_ANY, "")
-		browser_box_sizer = wx.StaticBoxSizer(browser_box, wx.VERTICAL)
+			self.ExpandAll()
 
-		browser_status = wx.StaticText(browser_box, wx.ID_ANY, "Work in Progress")
+			parent = self.GetParent()
+			parent.Layout()
 
-		# flags = wx.ALIGN_CENTER_VERTICAL | wx.LEFT | wx.BOTTOM
+			parent = parent.GetParent()
+			parent.Layout()
 
-		browser_box_sizer.AddStretchSpacer()
-		browser_box_sizer.Add(browser_status, 0, wx.ALL | wx.ALIGN_CENTER, 10)
-		browser_box_sizer.AddStretchSpacer()
+		def update_node(self, width, dc, tree, node, depth):
+			if node.children is not None:
+				for child_node in node.children:
+					label = self.Ellipsize(child_node.name, dc, wx.ELLIPSIZE_END, width - (depth+1) * self.GetIndent())
+					child_tree = self.AppendItem(tree, label)
+					self.update_node(width, dc, child_tree, child_node, depth + 1)
 
-		return browser_box_sizer
+	class DataPanel(wx.Panel):
+		def __init__(self, parent, smm):
+			super(FileTab.DataPanel, self).__init__(
+				parent, wx.ID_ANY, wx.DefaultPosition, wx.DefaultSize, wx.BORDER_SUNKEN | wx.TAB_TRAVERSAL
+			)
 
-	def init_sidebar(self):
-		sidebar_box = wx.StaticBox(self, wx.ID_ANY, "")
-		sidebar_box_sizer = wx.StaticBoxSizer(sidebar_box, wx.VERTICAL)
+			self.smm = smm
 
-		sync_button = wx.Button(sidebar_box, wx.ID_ANY, "SYNC")
+			self.SetFont(
+				wx.Font(9, wx.FONTFAMILY_DEFAULT, wx.FONTSTYLE_NORMAL, wx.FONTWEIGHT_NORMAL, False, wx.EmptyString)
+			)
+			self.SetForegroundColour(wx.SystemSettings.GetColour(wx.SYS_COLOUR_WINDOW))
+			self.SetBackgroundColour(wx.SystemSettings.GetColour(wx.SYS_COLOUR_3DLIGHT))
 
-		sync_button.Bind(wx.EVT_BUTTON, self.on_click_sync)
+			data_panel_sizer = wx.BoxSizer(wx.VERTICAL)
 
-		# flags = wx.ALIGN_CENTER_VERTICAL | wx.LEFT | wx.BOTTOM
+			self.update_button = wx.Button(self, wx.ID_ANY, u"Update", wx.DefaultPosition, wx.DefaultSize, 0)
+			self.update_button.Bind(wx.EVT_BUTTON, self.on_click_update)
+			self.update_button.Enable(False)
 
-		sidebar_box_sizer.AddStretchSpacer()
-		sidebar_box_sizer.Add(sync_button, 0, wx.ALL | wx.EXPAND, 10)
+			data_panel_sizer.Add(self.update_button, 0, wx.ALL | wx.EXPAND, 10)
 
-		return sidebar_box_sizer
+			self.SetSizer(data_panel_sizer)
+			self.Layout()
+			data_panel_sizer.Fit(self)
 
-	# Just Copied Main of syncMyMoodle
-	def on_click_sync(self, _):
-		os.system('python3 syncMyMoodle.py')
-		sync_dialog = SyncFinishedDialog(self)
-		sync_dialog.ShowModal()
+		def on_click_update(self, _):
+			if self.smm.session is None:
+				return
+
+			if self.smm.wstoken is None:
+				self.smm.get_moodle_wstoken()
+			if self.smm.user_id is None:
+				self.smm.get_userid()
+			self.smm.sync()
+
+			wx.MessageDialog(self, "Updated Moodle Data", "Success", wx.OK | wx.ICON_INFORMATION).ShowModal()
+
+			self.GetParent().update_gui()
+
+		def update_gui(self):
+			self.update_button.Enable(self.smm.session is not None)
+
+		def startup(self):
+			if (self.smm.config.get("synchronize_at_start")) and (self.smm.session is not None):
+				print("Updating ...")
+				# Wait for 100ms to ensure Message Dialog is closed
+				wx.CallLater(100, self.on_click_update, None)
+
+	class PresentationPanel(wx.Panel):
+		def __init__(self, parent):
+			super(FileTab.PresentationPanel, self).__init__(
+				parent, wx.ID_ANY, wx.DefaultPosition, wx.DefaultSize, wx.BORDER_SUNKEN | wx.TAB_TRAVERSAL
+			)
+
+			self.SetFont(wx.Font(9, wx.FONTFAMILY_DEFAULT, wx.FONTSTYLE_NORMAL, wx.FONTWEIGHT_NORMAL, False, wx.EmptyString))
+			self.SetBackgroundColour(wx.SystemSettings.GetColour(wx.SYS_COLOUR_3DLIGHT))
+
+			presentation_panel_sizer = wx.BoxSizer(wx.VERTICAL)
+
+			self.show_new_files_button = wx.Button(self, wx.ID_ANY, u"Show new Files", wx.DefaultPosition, wx.DefaultSize, 0)
+			self.show_new_files_button.Bind(wx.EVT_BUTTON, self.on_click_show_new_files)
+			self.show_new_files_button.Enable(False)
+
+			presentation_panel_sizer.Add(self.show_new_files_button, 0, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.TOP, 10)
+
+			self.expand_all_button = wx.Button(self, wx.ID_ANY, u"Expand all", wx.DefaultPosition, wx.DefaultSize, 0)
+			self.expand_all_button.Bind(wx.EVT_BUTTON, self.on_click_expand_all)
+			presentation_panel_sizer.Add(self.expand_all_button, 0, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.TOP, 10)
+
+			self.collapse_all_button = wx.Button(self, wx.ID_ANY, u"Collapse all", wx.DefaultPosition, wx.DefaultSize, 0)
+			self.collapse_all_button.Bind(wx.EVT_BUTTON, self.one_click_collapse_all)
+			presentation_panel_sizer.Add(self.collapse_all_button, 0, wx.BOTTOM | wx.EXPAND | wx.LEFT | wx.RIGHT | wx.TOP, 10)
+
+			self.SetSizer(presentation_panel_sizer)
+			self.Layout()
+			presentation_panel_sizer.Fit(self)
+
+		def on_click_show_new_files(self, event):
+			# TODO: implement show new files
+			event.Skip()
+
+		def on_click_expand_all(self, _):
+			self.GetParent().tree_view.ExpandAll()
+
+		def one_click_collapse_all(self, _):
+			self.GetParent().tree_view.CollapseAll()
+
+	# TODO implemt search Panel
+	class SearchPanel(wx.Panel):
+		def __init__(self, parent):
+			super(FileTab.SearchPanel, self).__init__(
+				parent, wx.ID_ANY, wx.DefaultPosition, wx.DefaultSize, wx.BORDER_SUNKEN | wx.TAB_TRAVERSAL
+			)
+
+			self.SetFont(wx.Font(9, wx.FONTFAMILY_DEFAULT, wx.FONTSTYLE_NORMAL, wx.FONTWEIGHT_NORMAL, False, wx.EmptyString))
+			self.SetBackgroundColour(wx.SystemSettings.GetColour(wx.SYS_COLOUR_3DLIGHT))
+
+			search_panel_sizer = wx.BoxSizer(wx.VERTICAL)
+
+			self.search_input = wx.TextCtrl(self, wx.ID_ANY, wx.EmptyString, wx.DefaultPosition, wx.DefaultSize, 0)
+			self.search_input.Enable(False)
+
+			search_panel_sizer.Add(self.search_input, 0, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.TOP, 10)
+
+			self.search_button = wx.Button(self, wx.ID_ANY, u"Search", wx.DefaultPosition, wx.DefaultSize, 0)
+			self.search_button.Bind(wx.EVT_BUTTON, self.on_click_search)
+			self.search_button.Enable(False)
+
+			search_panel_sizer.Add(self.search_button, 0, wx.BOTTOM | wx.EXPAND | wx.LEFT | wx.RIGHT | wx.TOP, 10)
+
+			self.SetSizer(search_panel_sizer)
+			self.Layout()
+			search_panel_sizer.Fit(self)
+
+		def on_click_search(self, event):
+			event.Skip()
+
+	class SynchronizationPanel(wx.Panel):
+		def __init__(self, parent, smm):
+			super(FileTab.SynchronizationPanel, self).__init__(
+				parent, wx.ID_ANY, wx.DefaultPosition, wx.DefaultSize, wx.BORDER_SUNKEN | wx.TAB_TRAVERSAL
+			)
+
+			self.smm = smm
+
+			self.SetFont(wx.Font(9, wx.FONTFAMILY_DEFAULT, wx.FONTSTYLE_NORMAL, wx.FONTWEIGHT_NORMAL, False, wx.EmptyString))
+			self.SetBackgroundColour(wx.SystemSettings.GetColour(wx.SYS_COLOUR_3DLIGHT))
+
+			synchronization_panel_sizer = wx.BoxSizer(wx.VERTICAL)
+
+			self.add_selection_button = wx.Button(self, wx.ID_ANY, u"Add Selection", wx.DefaultPosition, wx.DefaultSize, 0)
+			self.add_selection_button.Bind(wx.EVT_BUTTON, self.on_click_add_selection)
+			self.add_selection_button.Enable(False)
+
+			synchronization_panel_sizer.Add(self.add_selection_button, 0, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.TOP, 10)
+
+			self.remove_selection_button = wx.Button(
+				self, wx.ID_ANY, u"Remove Selection", wx.DefaultPosition, wx.DefaultSize, 0
+			)
+			self.remove_selection_button.Bind(wx.EVT_BUTTON, self.on_click_remove_selection)
+			self.remove_selection_button.Enable(False)
+
+			synchronization_panel_sizer.Add(self.remove_selection_button, 0, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.TOP, 10)
+
+			self.open_download_folder_button = wx.Button(
+				self, wx.ID_ANY, u"Open Download Folder", wx.DefaultPosition, wx.DefaultSize, 0
+			)
+			self.open_download_folder_button.Bind(wx.EVT_BUTTON, self.on_click_open_download_folder)
+			self.open_download_folder_button.Enable(False)
+
+			synchronization_panel_sizer.Add(self.open_download_folder_button, 0, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.TOP, 10)
+
+			self.download_button = wx.Button(self, wx.ID_ANY, u"Download", wx.DefaultPosition, wx.DefaultSize, 0)
+			self.download_button.SetFont(
+				wx.Font(12, wx.FONTFAMILY_DEFAULT, wx.FONTSTYLE_NORMAL, wx.FONTWEIGHT_NORMAL, False, wx.EmptyString)
+			)
+			self.download_button.Bind(wx.EVT_BUTTON, self.on_click_download)
+			self.download_button.Enable(False)
+
+			synchronization_panel_sizer.Add(self.download_button, 0, wx.BOTTOM | wx.EXPAND | wx.LEFT | wx.RIGHT | wx.TOP, 10)
+
+			self.SetSizer(synchronization_panel_sizer)
+			self.Layout()
+			synchronization_panel_sizer.Fit(self)
+
+		def on_click_add_selection(self, event):
+			event.Skip()
+
+		def on_click_remove_selection(self, event):
+			event.Skip()
+
+		def on_click_open_download_folder(self, event):
+			event.Skip()
+
+		def on_click_download(self, _):
+			if self.smm.root_node is not None:
+				print("Downloading ...")
+				self.smm.download_all_files()
+				wx.MessageDialog(self, "Downloaded Moodle Data", "Success", wx.OK | wx.ICON_INFORMATION).ShowModal()
+
+				if self.smm.config.get("close_after_synchronization"):
+					# Wait for 500ms so that the closing looks smooth
+					wx.CallLater(500, wx.Exit)
+
+		def update_gui(self):
+			self.download_button.Enable(self.smm.root_node is not None)
+
+		def startup(self):
+			if (self.smm.config.get("synchronize_at_start")) and (self.smm.session is not None):
+				# Wait for 100ms to ensure Message Dialog is closed
+				wx.CallLater(100, self.on_click_download, None)
+
+	def __init__(self, parent, smm):
+		super(FileTab, self).__init__(parent, wx.ID_ANY, wx.DefaultPosition, wx.DefaultSize, wx.TAB_TRAVERSAL)
+
+		file_browser_sizer = wx.BoxSizer(wx.HORIZONTAL)
+
+		tree_view_sizer = wx.StaticBoxSizer(wx.StaticBox(self, wx.ID_ANY, wx.EmptyString), wx.VERTICAL)
+		self.tree_view = FileTab.TreeView(tree_view_sizer.GetStaticBox(), smm)
+		tree_view_sizer.Add(self.tree_view, 0, wx.ALL | wx.EXPAND, 5)
+
+		file_browser_sizer.Add(tree_view_sizer, 7, wx.EXPAND | wx.LEFT, 5)
+
+		sidebar_sizer = wx.BoxSizer(wx.VERTICAL)
+
+		# Data Panel
+
+		self.data_text = wx.StaticText(self, wx.ID_ANY, u"Data", wx.DefaultPosition, wx.DefaultSize, 0)
+		self.data_text.Wrap(-1)
+		sidebar_sizer.Add(self.data_text, 0, wx.LEFT | wx.TOP, 10)
+
+		self.data_panel = FileTab.DataPanel(self, smm)
+		sidebar_sizer.Add(self.data_panel, 0, wx.EXPAND | wx.ALL, 5)
+
+		# Presentation Panel
+
+		self.presentation_text = wx.StaticText(self, wx.ID_ANY, u"Presentation", wx.DefaultPosition, wx.DefaultSize, 0)
+		self.presentation_text.Wrap(-1)
+		sidebar_sizer.Add(self.presentation_text, 0, wx.LEFT | wx.TOP, 10)
+
+		self.presentation_panel = FileTab.PresentationPanel(self)
+		sidebar_sizer.Add(self.presentation_panel, 0, wx.EXPAND | wx.ALL, 5)
+
+		# Search Panel
+
+		# self.search_text = wx.StaticText(self, wx.ID_ANY, u"Search", wx.DefaultPosition, wx.DefaultSize, 0)
+		# self.search_text.Wrap(-1)
+		# sidebar_sizer.Add(self.search_text, 0, wx.LEFT | wx.TOP, 10)
+
+		# self.search_panel = FileTab.SearchPanel(self)
+		# sidebar_sizer.Add(self.search_panel, 0, wx.EXPAND | wx.ALL, 5)
+
+		# Synchronization Panel
+
+		sidebar_sizer.Add((0, 0), 1, wx.EXPAND, 5)
+
+		self.synchronization_text = wx.StaticText(self, wx.ID_ANY, u"Synchronization", wx.DefaultPosition, wx.DefaultSize, 0)
+		self.synchronization_text.Wrap(-1)
+		sidebar_sizer.Add(self.synchronization_text, 0, wx.LEFT | wx.TOP, 10)
+
+		self.synchronization_panel = FileTab.SynchronizationPanel(self, smm)
+		sidebar_sizer.Add(self.synchronization_panel, 0, wx.EXPAND | wx.ALL, 5)
+
+		file_browser_sizer.Add(sidebar_sizer, 3, wx.EXPAND | wx.FIXED_MINSIZE | wx.LEFT | wx.RIGHT, 5)
+
+		self.SetSizer(file_browser_sizer)
+		self.Layout()
+		file_browser_sizer.Fit(self)
+
+	def update_gui(self):
+		self.tree_view.update_gui()
+		self.data_panel.update_gui()
+		self.synchronization_panel.update_gui()
+
+	def startup(self):
+		self.data_panel.startup()
+
+		self.update_gui()
+
+		self.synchronization_panel.startup()
 
 
 class SettingsTab(wx.Panel):
-	def __init__(self, parent, config):
-		super(SettingsTab, self).__init__(parent)
+	class LoginPanel(wx.Panel):
+		def __init__(self, parent, smm):
+			super(SettingsTab.LoginPanel, self).__init__(
+				parent, wx.ID_ANY, wx.DefaultPosition, wx.DefaultSize, wx.BORDER_SUNKEN | wx.TAB_TRAVERSAL
+			)
 
-		self.config = config
-		self.semesterCheckboxes = []
+			self.smm = smm
 
-		self.init_gui()
+			self.SetBackgroundColour(wx.SystemSettings.GetColour(wx.SYS_COLOUR_3DLIGHT))
 
-	def save_settings(self):
-		with open("config.json", "w") as file:
-			file.write(json.dumps(self.config, indent=4))
+			login_sizer = wx.BoxSizer(wx.HORIZONTAL)
 
-	def init_gui(self):
-		setting_sizer = wx.BoxSizer(wx.VERTICAL)
+			self.login_status_text = wx.StaticText(
+				self, wx.ID_ANY, u"Status: not logged in", wx.DefaultPosition, wx.DefaultSize, 0
+			)
+			self.login_status_text.Wrap(-1)
+			login_sizer.Add(
+				self.login_status_text, 0, wx.ALIGN_CENTER_VERTICAL | wx.ALIGN_LEFT | wx.BOTTOM | wx.LEFT | wx.TOP, 10
+			)
 
-		login_box_sizer = self.init_login_panel()
-		download_box_sizer = self.init_download_panel()
-		cookie_box_sizer = self.init_cookie_panel()
-		download_tracker_box_sizer = self.init_download_tracker_panel()
-		semester_box_sizer = self.init_semester_panel()
-		save_settings = wx.Button(self, wx.ID_ANY, "Save to Config File")
+			login_sizer.Add((0, 0), 1, wx.EXPAND, 5)
 
-		save_settings.Bind(wx.EVT_BUTTON, self.on_click_save)
+			self.username_text = wx.StaticText(
+				self, wx.ID_ANY, self.smm.config.get("user"), wx.DefaultPosition, wx.DefaultSize, 0
+			)
+			self.username_text.Wrap(-1)
+			login_sizer.Add(self.username_text, 0, wx.ALIGN_CENTER_VERTICAL | wx.BOTTOM | wx.LEFT | wx.TOP, 10)
 
-		setting_sizer.Add(login_box_sizer, 0, wx.EXPAND | wx.ALL, 25)
-		setting_sizer.Add(download_box_sizer, 0, wx.EXPAND | wx.ALL, 25)
-		setting_sizer.Add(cookie_box_sizer, 0, wx.EXPAND | wx.ALL, 25)
-		setting_sizer.Add(download_tracker_box_sizer, 0, wx.EXPAND | wx.ALL, 25)
-		setting_sizer.Add(semester_box_sizer, 0, wx.EXPAND | wx.ALL, 25)
-		setting_sizer.Add(save_settings, 0, wx.EXPAND | wx.ALL, 25)
+			self.delete_button = wx.Button(self, wx.ID_ANY, u"Delete", wx.DefaultPosition, wx.DefaultSize, 0)
+			self.delete_button.Bind(wx.EVT_BUTTON, self.on_click_delete)
+			self.delete_button.Enable(self.smm.config.get("user") != "")
+			login_sizer.Add(
+				self.delete_button, 0, wx.ALIGN_CENTER_VERTICAL | wx.ALIGN_RIGHT | wx.BOTTOM | wx.LEFT | wx.TOP, 10
+			)
 
-		self.SetSizer(setting_sizer)
+			self.login_button = wx.Button(self, wx.ID_ANY, u"Login", wx.DefaultPosition, wx.DefaultSize, 0)
+			self.login_button.Bind(wx.EVT_BUTTON, self.on_click_login)
+			self.login_button.Enable(self.smm.session is None)
+			login_sizer.Add(
+				self.login_button, 0,
+				wx.ALIGN_CENTER_VERTICAL | wx.ALIGN_RIGHT | wx.BOTTOM | wx.LEFT | wx.RIGHT | wx.TOP, 10
+			)
 
-	def init_login_panel(self):
-		login_box = wx.StaticBox(self, wx.ID_ANY, "Login")
-		login_box_sizer = wx.StaticBoxSizer(login_box)
+			self.SetSizer(login_sizer)
+			self.Layout()
+			login_sizer.Fit(self)
 
-		login_status = wx.StaticText(login_box, wx.ID_ANY, "Status: not available")
-		username = wx.StaticText(login_box, wx.ID_ANY, "Username", name="username")
-		clear_login_btn = wx.Button(login_box, wx.ID_ANY, "Delete", name="clear_login_btn")
-		set_login_btn = wx.Button(login_box, wx.ID_ANY, "Login")
+		def on_click_delete(self, _):
+			self.smm.config.update({"user": ""})
+			self.smm.config.update({"password": ""})
+			self.smm.session = None
 
-		username.SetLabel(self.config.get("user"))
-		if self.config.get("user") == "":
-			clear_login_btn.Disable()
+			# Delete Cookie File, to prevent Login from last valid Data
+			if os.path.exists(self.smm.config.get("cookie_file")):
+				os.remove(self.smm.config.get("cookie_file"))
 
-		clear_login_btn.Bind(wx.EVT_BUTTON, self.on_click_delete)
-		set_login_btn.Bind(wx.EVT_BUTTON, self.on_click_login)
+			self.update_gui()
 
-		flags = wx.ALIGN_CENTER_VERTICAL | wx.LEFT | wx.BOTTOM
+		def on_click_login(self, _):
+			if (self.smm.config.get("user") == "") or (self.smm.config.get("password") == ""):
+				login_dialog = LoginDialog(self)
+				if login_dialog.ShowModal() == wx.ID_CANCEL:
+					return
+				self.smm.config.update({"user": login_dialog.username_input.GetValue()})
+				self.smm.config.update({"password": login_dialog.password_input.GetValue()})
+				login_dialog.Destroy()
 
-		login_box_sizer.Add(login_status, 0, wx.ALIGN_LEFT | flags, 10)
-		login_box_sizer.AddStretchSpacer()
-		login_box_sizer.Add(username, 0, wx.ALIGN_LEFT | flags, 10)
-		login_box_sizer.Add(clear_login_btn, 0, flags, 10)
-		login_box_sizer.Add(set_login_btn, 0, flags | wx.RIGHT, 10)
+			try:
+				print("Logging in ....")
+				self.smm.login()
+			except Exception as _:
+				print("Login failed")
+				wx.MessageDialog(self, "Login Failed", "Error", wx.OK | wx.ICON_ERROR).ShowModal()
+				return
 
-		return login_box_sizer
+			wx.MessageDialog(self, "Login successful", "Success", wx.OK | wx.ICON_INFORMATION).ShowModal()
+			self.update_gui()
 
-	def init_download_panel(self):
-		return self.init_path_panel("Download", "download_path_input", "basedir", self.on_download_path_change)
+		def update_gui(self):
+			if self.smm.session is None:
+				self.login_status_text.SetLabel(u"Status: not logged in")
+			else:
+				self.login_status_text.SetLabel(f"Status: logged in as {self.smm.config.get('user')}")
+			self.username_text.SetLabel(self.smm.config.get("user"))
+			self.delete_button.Enable(self.smm.config.get("user") != "")
+			self.login_button.Enable(self.smm.session is None)
 
-	def init_cookie_panel(self):
-		return self.init_path_panel("Cookie", "cookie_path_input", "cookie_file", self.on_cookie_path_change)
+			self.Layout()
+			self.GetSizer().Fit(self)
 
-	def init_path_panel(self, box_name, path_name, input_name, event_handler):
-		box = wx.StaticBox(self, wx.ID_ANY, box_name)
-		box_sizer = wx.StaticBoxSizer(box)
+			parent = self.GetParent()
+			parent.Layout()
+			parent.GetSizer().Fit(parent)
 
-		path_input = wx.TextCtrl(box, wx.ID_ANY, name=path_name)
-		search_path = wx.Button(box, wx.ID_ANY, "Search")
+		def startup(self):
+			if self.smm.config.get("login_at_start"):
+				self.on_click_login(None)
 
-		path_input.SetValue(self.config.get(input_name))
-		search_path.Disable()
+	class DownloadPanel(wx.Panel):
+		def __init__(self, parent, smm):
+			super(SettingsTab.DownloadPanel, self).__init__(
+				parent, wx.ID_ANY, wx.DefaultPosition, wx.DefaultSize, wx.BORDER_SUNKEN | wx.TAB_TRAVERSAL
+			)
 
-		path_input.Bind(wx.EVT_TEXT, event_handler)
+			self.smm = smm
 
-		flags = wx.LEFT | wx.BOTTOM
+			self.SetBackgroundColour(wx.SystemSettings.GetColour(wx.SYS_COLOUR_3DLIGHT))
 
-		box_sizer.Add(path_input, 1, wx.ALIGN_LEFT | flags | wx.EXPAND, 10)
-		box_sizer.Add(search_path, 0, flags | wx.RIGHT, 10)
+			download_sizer = wx.BoxSizer(wx.VERTICAL)
 
-		return box_sizer
+			self.download_dir_picker = wx.DirPickerCtrl(
+				self, wx.ID_ANY, self.smm.config.get("basedir"), u"Select a folder", wx.DefaultPosition,
+				wx.DefaultSize, wx.DIRP_DIR_MUST_EXIST | wx.DIRP_USE_TEXTCTRL
+			)
+			self.download_dir_picker.Bind(wx.EVT_DIRPICKER_CHANGED, self.on_dir_changed_download)
+			download_sizer.Add(self.download_dir_picker, 0, wx.BOTTOM | wx.EXPAND | wx.LEFT | wx.RIGHT | wx.TOP, 10)
 
-	def init_download_tracker_panel(self):
-		download_tracker_box = wx.StaticBox(self, wx.ID_ANY, "Download Tracker")
-		download_tracker_box_sizer = wx.StaticBoxSizer(download_tracker_box)
+			self.SetSizer(download_sizer)
+			self.Layout()
+			download_sizer.Fit(self)
 
-		enable_download_tracker = wx.CheckBox(download_tracker_box, wx.ID_ANY, "Enable", name="enable_download_tracker")
-		enable_download_tracker.SetValue(self.config.get("enable_download_tracker"))
+		def on_dir_changed_download(self, _):
+			self.smm.config.update({"basedir": self.download_dir_picker.GetPath()})
 
-		enable_download_tracker.Bind(wx.EVT_CHECKBOX, self.on_download_tracker_changed)
+	class CookiePanel(wx.Panel):
+		def __init__(self, parent, smm):
+			super(SettingsTab.CookiePanel, self).__init__(
+				parent, wx.ID_ANY, wx.DefaultPosition, wx.DefaultSize, wx.BORDER_SUNKEN | wx.TAB_TRAVERSAL
+			)
 
-		flags = wx.LEFT | wx.BOTTOM
+			self.smm = smm
 
-		download_tracker_box_sizer.Add(enable_download_tracker, 0, wx.ALIGN_LEFT | flags | wx.EXPAND, 10)
+			self.SetBackgroundColour(wx.SystemSettings.GetColour(wx.SYS_COLOUR_3DLIGHT))
 
-		return download_tracker_box_sizer
+			cookie_sizer = wx.BoxSizer(wx.VERTICAL)
 
-	def init_semester_panel(self):
-		semester_box = wx.StaticBox(self, wx.ID_ANY, "Download Tracker")
-		semester_box_sizer = wx.StaticBoxSizer(semester_box, wx.HORIZONTAL)
+			self.cookie_dir_picker = wx.DirPickerCtrl(
+				self, wx.ID_ANY, self.smm.config.get("cookie_file"), u"Select a folder", wx.DefaultPosition,
+				wx.DefaultSize, wx.DIRP_DIR_MUST_EXIST | wx.DIRP_USE_TEXTCTRL
+			)
+			self.cookie_dir_picker.Bind(wx.EVT_DIRPICKER_CHANGED, self.on_dir_changed_cookie)
+			cookie_sizer.Add(self.cookie_dir_picker, 0, wx.BOTTOM | wx.EXPAND | wx.LEFT | wx.RIGHT | wx.TOP, 10)
 
-		self.semesterCheckboxes.append(wx.CheckBox(semester_box, wx.ID_ANY, "18ws"))
-		self.semesterCheckboxes.append(wx.CheckBox(semester_box, wx.ID_ANY, "19ss"))
-		self.semesterCheckboxes.append(wx.CheckBox(semester_box, wx.ID_ANY, "19ws"))
-		self.semesterCheckboxes.append(wx.CheckBox(semester_box, wx.ID_ANY, "20ss"))
-		self.semesterCheckboxes.append(wx.CheckBox(semester_box, wx.ID_ANY, "20ws"))
+			self.SetSizer(cookie_sizer)
+			self.Layout()
+			cookie_sizer.Fit(self)
 
-		for s in self.semesterCheckboxes:
-			s.SetValue(s.GetLabel() in self.config.get("only_sync_semester"))
-			s.Bind(wx.EVT_CHECKBOX, self.on_semester_changed)
+		def on_dir_changed_cookie(self, _):
+			self.smm.config.update({"cookie_file": self.cookie_dir_picker.GetPath()})
 
-		flags = wx.LEFT | wx.BOTTOM
+	class DownloadTrackerPanel(wx.Panel):
+		def __init__(self, parent, smm):
+			super(SettingsTab.DownloadTrackerPanel, self).__init__(
+				parent, wx.ID_ANY, wx.DefaultPosition, wx.DefaultSize, wx.BORDER_SUNKEN | wx.TAB_TRAVERSAL
+			)
 
-		boxes_iter = iter(self.semesterCheckboxes)
-		semester_box_sizer.Add(next(boxes_iter), 0, wx.ALIGN_LEFT | flags | wx.EXPAND, 10)
-		for s in boxes_iter:
-			semester_box_sizer.Add(s, 0, flags | wx.EXPAND, 10)
+			self.smm = smm
 
-		return semester_box_sizer
+			self.SetBackgroundColour(wx.SystemSettings.GetColour(wx.SYS_COLOUR_3DLIGHT))
 
-	def on_click_save(self, _):
-		self.save_settings()
+			download_tracker_sizer = wx.BoxSizer(wx.HORIZONTAL)
 
-	def on_click_delete(self, _):
-		self.config.update({"user": ""})
-		self.config.update({"password": ""})
-		self.update_gui()
+			self.download_tracker_checkbox = wx.CheckBox(
+				self, wx.ID_ANY, u"Enable Download Tracker", wx.DefaultPosition, wx.DefaultSize, 0
+			)
+			self.download_tracker_checkbox.SetValue(self.smm.config.get("enable_download_tracker"))
+			self.download_tracker_checkbox.Bind(wx.EVT_CHECKBOX, self.on_check_download_tracker)
+			download_tracker_sizer.Add(self.download_tracker_checkbox, 0, wx.BOTTOM | wx.LEFT | wx.TOP, 10)
 
-	def on_click_login(self, _):
-		login = LoginDialog(self, self.config)
-		if login.ShowModal() != wx.ID_OK:
-			self.config = login.get_config()
-		login.Destroy()
-		self.update_gui()
+			self.SetSizer(download_tracker_sizer)
+			self.Layout()
+			download_tracker_sizer.Fit(self)
 
-	def on_download_path_change(self, _):
-		self.config.update({"basedir": self.get_item_by_name("download_path_input").GetValue()})
+		def on_check_download_tracker(self, _):
+			self.smm.config.update({"enable_download_tracker": self.download_tracker_checkbox.GetValue()})
 
-	def on_cookie_path_change(self, _):
-		self.config.update({"cookie_file": self.get_item_by_name("cookie_path_input").GetValue()})
+	class AutomationPanel(wx.Panel):
+		def __init__(self, parent, smm):
+			super(SettingsTab.AutomationPanel, self).__init__(
+				parent, wx.ID_ANY, wx.DefaultPosition, wx.DefaultSize, wx.BORDER_SUNKEN | wx.TAB_TRAVERSAL
+			)
 
-	def on_download_tracker_changed(self, _):
-		self.config.update({"enable_download_tracker": self.get_item_by_name("enable_download_tracker").GetValue()})
+			self.smm = smm
 
-	def on_semester_changed(self, _):
-		semester = []
-		for s in self.semesterCheckboxes:
-			if s.GetValue():
-				semester.append(s.GetLabel())
-		self.config.update({"only_sync_semester": semester})
+			self.SetBackgroundColour(wx.SystemSettings.GetColour(wx.SYS_COLOUR_3DLIGHT))
 
-	def update_gui(self):
-		self.get_item_by_name("username").SetLabel(self.config.get("user"))
-		self.get_item_by_name("clear_login_btn").Enable((self.config.get("user") != ""))
-		self.Fit()
+			automation_sizer = wx.GridSizer(0, 2, 0, 0)
 
-	# Returns the First Element with the given Name
-	def get_item_by_name(self, item_name):
-		def get_by_name(sizer, name):
-			for item in sizer.GetChildren():
-				if item.IsSizer():
-					res = get_by_name(item.GetSizer(), name)
-					if (res is not None) and (res.GetName() == name):
-						return res
-				elif item.IsWindow():
-					if item.GetWindow().GetName() == name:
-						return item.GetWindow()
-			return None
+			self.automation_login_checkbox = wx.CheckBox(
+				self, wx.ID_ANY, u"Login at Start", wx.DefaultPosition, wx.DefaultSize, 0
+			)
+			self.automation_login_checkbox.Bind(wx.EVT_CHECKBOX, self.on_check_automation_login)
+			self.automation_login_checkbox.Enable(
+				(self.smm.config.get("user") != "") and (self.smm.config.get("password") != "")
+			)
+			self.automation_login_checkbox.SetValue(self.smm.config.get("login_at_start"))
 
-		return get_by_name(self.GetSizer(), item_name)
+			automation_sizer.Add(self.automation_login_checkbox, 0, wx.ALL, 5)
+
+			self.automation_synchronize_checkbox = wx.CheckBox(
+				self, wx.ID_ANY, u"Synchronize at Start", wx.DefaultPosition, wx.DefaultSize, 0
+			)
+			self.automation_synchronize_checkbox.Bind(wx.EVT_CHECKBOX, self.on_check_automation_synchronize)
+			self.automation_synchronize_checkbox.Enable(self.automation_login_checkbox.GetValue())
+			self.automation_synchronize_checkbox.SetValue(self.smm.config.get("synchronize_at_start"))
+
+			automation_sizer.Add(self.automation_synchronize_checkbox, 0, wx.ALL, 5)
+
+			automation_sizer.Add((0, 0), 1, wx.EXPAND, 5)
+
+			self.automation_close_checkbox = wx.CheckBox(
+				self, wx.ID_ANY, u"Close after Synchronization", wx.DefaultPosition, wx.DefaultSize, 0
+			)
+			self.automation_close_checkbox.Bind(wx.EVT_CHECKBOX, self.on_check_automation_close)
+			self.automation_close_checkbox.SetValue(self.smm.config.get("close_after_synchronization"))
+
+			automation_sizer.Add(self.automation_close_checkbox, 0, wx.ALL, 5)
+
+			self.SetSizer(automation_sizer)
+			self.Layout()
+			automation_sizer.Fit(self)
+
+		def on_check_automation_login(self, _):
+			self.smm.config.update({"login_at_start": self.automation_login_checkbox.GetValue()})
+			if not self.smm.config.get("login_at_start"):
+				self.smm.config.update({"synchronize_at_start": False})
+
+				self.automation_synchronize_checkbox.Enable(False)
+				self.automation_synchronize_checkbox.SetValue(False)
+			else:
+				self.automation_synchronize_checkbox.Enable(True)
+
+		def on_check_automation_synchronize(self, _):
+			self.smm.config.update({"synchronize_at_start": self.automation_synchronize_checkbox.GetValue()})
+
+		def on_check_automation_close(self, _):
+			self.smm.config.update({"close_after_synchronization": self.automation_close_checkbox.GetValue()})
+
+	# TODO: implement MiscellaneousPanel
+	class MiscellaneousPanel(wx.Panel):
+		def __init__(self, parent, smm):
+			super(SettingsTab.MiscellaneousPanel, self).__init__(
+				parent, wx.ID_ANY, wx.DefaultPosition, wx.DefaultSize, wx.BORDER_SUNKEN | wx.TAB_TRAVERSAL
+			)
+
+			self.smm = smm
+
+			self.SetBackgroundColour(wx.SystemSettings.GetColour(wx.SYS_COLOUR_3DLIGHT))
+
+			miscellaneous_sizer = wx.GridSizer(0, 2, 0, 0)
+
+			self.overwrite_files_checkbox = wx.CheckBox(
+				self, wx.ID_ANY, u"Overwrite Files", wx.DefaultPosition, wx.DefaultSize, 0
+			)
+			self.overwrite_files_checkbox.Bind(wx.EVT_CHECKBOX, self.on_check_overwrite_files)
+			self.overwrite_files_checkbox.Enable(False)
+			miscellaneous_sizer.Add(self.overwrite_files_checkbox, 0, wx.ALIGN_CENTER_VERTICAL | wx.ALL, 5)
+
+			language_sizer = wx.BoxSizer(wx.HORIZONTAL)
+
+			language_text = wx.StaticText(self, wx.ID_ANY, u"Language:", wx.DefaultPosition, wx.DefaultSize, 0)
+			language_text.Wrap(-1)
+
+			language_sizer.Add(language_text, 0, wx.ALIGN_CENTER_VERTICAL | wx.ALL, 5)
+
+			language_sizer.Add((0, 0), 1, wx.EXPAND, 5)
+
+			language_choice_choices = [u"Systemlanguage", u"Deutsch", u"English"]
+			self.language_choice = wx.Choice(
+				self, wx.ID_ANY, wx.DefaultPosition, wx.DefaultSize, language_choice_choices, 0
+			)
+			self.language_choice.Bind(wx.EVT_CHOICE, self.on_choice_language)
+			self.language_choice.SetSelection(2)
+			self.language_choice.Enable(False)
+
+			language_sizer.Add(self.language_choice, 0, wx.ALIGN_CENTER_VERTICAL | wx.ALL, 5)
+
+			miscellaneous_sizer.Add(language_sizer, 1, wx.EXPAND, 5)
+
+			self.SetSizer(miscellaneous_sizer)
+			self.Layout()
+			miscellaneous_sizer.Fit(self)
+
+		def on_check_overwrite_files(self, event):
+			event.Skip()
+
+		def on_choice_language(self, event):
+			event.Skip()
+
+	def __init__(self, parent, smm):
+		super(SettingsTab, self).__init__(parent, wx.ID_ANY, wx.DefaultPosition, wx.DefaultSize, wx.TAB_TRAVERSAL)
+
+		self.smm = smm
+
+		settings_sizer = wx.BoxSizer(wx.VERTICAL)
+
+		# Login Box
+
+		login_text = wx.StaticText(self, wx.ID_ANY, u"Login", wx.DefaultPosition, wx.DefaultSize, 0)
+		login_text.Wrap(-1)
+		settings_sizer.Add(login_text, 0, wx.LEFT | wx.TOP, 10)
+
+		self.login_panel = SettingsTab.LoginPanel(self, self.smm)
+		settings_sizer.Add(self.login_panel, 0, wx.EXPAND | wx.ALL, 10)
+
+		# Download Box
+
+		download_text = wx.StaticText(self, wx.ID_ANY, u"Download", wx.DefaultPosition, wx.DefaultSize, 0)
+		download_text.Wrap(-1)
+		settings_sizer.Add(download_text, 0, wx.LEFT | wx.TOP, 10)
+
+		download_panel = SettingsTab.DownloadPanel(self, self.smm)
+		settings_sizer.Add(download_panel, 0, wx.EXPAND | wx.ALL, 10)
+
+		# Cookie Box
+
+		cookie_text = wx.StaticText(self, wx.ID_ANY, u"Cookie", wx.DefaultPosition, wx.DefaultSize, 0)
+		cookie_text.Wrap(-1)
+		settings_sizer.Add(cookie_text, 0, wx.LEFT | wx.TOP, 10)
+
+		cookie_panel = SettingsTab.CookiePanel(self, self.smm)
+		settings_sizer.Add(cookie_panel, 0, wx.EXPAND | wx.ALL, 10)
+
+		# Download Tracker Box
+
+		download_tracker_text = wx.StaticText(self, wx.ID_ANY, u"Download Tracker", wx.DefaultPosition, wx.DefaultSize, 0)
+		download_tracker_text.Wrap(-1)
+		settings_sizer.Add(download_tracker_text, 0, wx.LEFT | wx.TOP, 10)
+
+		download_tracker_panel = SettingsTab.DownloadTrackerPanel(self, self.smm)
+		settings_sizer.Add(download_tracker_panel, 0, wx.ALL | wx.EXPAND, 10)
+
+		# Automation Box
+
+		automation_text = wx.StaticText(self, wx.ID_ANY, u"Automation", wx.DefaultPosition, wx.DefaultSize, 0)
+		automation_text.Wrap(-1)
+		settings_sizer.Add(automation_text, 0, wx.LEFT | wx.TOP, 10)
+
+		automation_panel = SettingsTab.AutomationPanel(self, self.smm)
+		settings_sizer.Add(automation_panel, 0, wx.EXPAND | wx.ALL, 10)
+
+		# Miscellaneous Box
+
+		# miscellaneous_text = wx.StaticText(self, wx.ID_ANY, u"Miscellaneous", wx.DefaultPosition, wx.DefaultSize, 0)
+		# miscellaneous_text.Wrap(-1)
+		# settings_sizer.Add(miscellaneous_text, 0, wx.LEFT | wx.TOP, 10)
+
+		# miscellaneous_panel = SettingsTab.MiscellaneousPanel(self, self.smm)
+		# settings_sizer.Add(miscellaneous_panel, 0, wx.EXPAND | wx.ALL, 10)
+
+		self.about_button = wx.Button(self, wx.ID_ANY, u"About Sync-my-Moodle", wx.DefaultPosition, wx.DefaultSize, 0)
+		self.about_button.Bind(wx.EVT_BUTTON, self.on_click_about)
+		settings_sizer.Add(self.about_button, 0, wx.ALL | wx.EXPAND, 10)
+
+		self.SetSizer(settings_sizer)
+		self.Layout()
+		settings_sizer.Fit(self)
+
+	def on_click_about(self, event):
+		event.Skip()
+
+	def startup(self):
+		self.login_panel.startup()
+
+
+class LogTab(wx.Panel):
+	class LogScrollPanel(wx.ScrolledWindow):
+		def __init__(self, parent):
+			super(LogTab.LogScrollPanel, self).__init__(
+				parent, wx.ID_ANY, wx.DefaultPosition, wx.DefaultSize, wx.BORDER_SIMPLE | wx.HSCROLL | wx.VSCROLL
+			)
+
+			self.debug_mode = False
+
+			self.SetScrollRate(5, 5)
+			log_panel_sizer = wx.BoxSizer(wx.VERTICAL)
+
+			self.SetSizer(log_panel_sizer)
+			self.Layout()
+			log_panel_sizer.Fit(self)
+
+		def add_log(self, log_type, message):
+			if log_type == "DEBUG" and not self.debug_mode:
+				return
+
+			sizer = self.GetSizer()
+
+			time = datetime.now().strftime('%H:%M:%S.%f')[:-3]
+			log_message_text = wx.StaticText(
+				self, wx.ID_ANY, f"{log_type}\t{time}   {message}", wx.DefaultPosition, wx.DefaultSize, 0
+			)
+			log_message_text.Wrap(-1)
+
+			if log_type == "ERROR":
+				log_message_text.SetForegroundColour(wx.Colour(233, 32, 39))
+			elif log_type == "DEBUG":
+				log_message_text.SetForegroundColour(wx.SystemSettings.GetColour(wx.SYS_COLOUR_GRAYTEXT))
+
+			sizer.Add(log_message_text, 0, wx.ALL | wx.EXPAND, 5)
+
+			self.Layout()
+			sizer.Fit(self)
+
+			parent = self.GetParent()
+			parent.Layout()
+			parent.GetSizer().Fit(parent)
+
+		def set_log_mode(self, debug_mode):
+			self.debug_mode = debug_mode
+
+		def get_complete_log(self):
+			log = ""
+			for item in self.GetChildren():
+				log += item.GetLabel() + "\n"
+			return log
+
+	def __init__(self, parent):
+		super(LogTab, self).__init__(parent, wx.ID_ANY, wx.DefaultPosition, wx.DefaultSize, wx.TAB_TRAVERSAL)
+
+		log_sizer = wx.BoxSizer(wx.HORIZONTAL)
+
+		self.log_scroll_panel = LogTab.LogScrollPanel(self)
+		log_sizer.Add(self.log_scroll_panel, 5, wx.EXPAND | wx.ALL, 10)
+
+		log_sidebar_sizer = wx.BoxSizer(wx.VERTICAL)
+
+		log_sidebar_sizer.Add((0, 0), 1, wx.EXPAND, 5)
+
+		self.log_choice_text = wx.StaticText(self, wx.ID_ANY, u"Log Mode:", wx.DefaultPosition, wx.DefaultSize, 0)
+		self.log_choice_text.Wrap(-1)
+		log_sidebar_sizer.Add(self.log_choice_text, 0, wx.LEFT | wx.RIGHT | wx.TOP, 10)
+
+		log_choice_choices = [u"Standard", u"Extended"]
+		self.log_choice = wx.Choice(self, wx.ID_ANY, wx.DefaultPosition, wx.DefaultSize, log_choice_choices, 0)
+		self.log_choice.SetSelection(0)
+		self.log_choice.Bind(wx.EVT_CHOICE, self.on_choice_log_mode)
+		log_sidebar_sizer.Add(self.log_choice, 0, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.TOP, 10)
+
+		copy_log_button = wx.Button(self, wx.ID_ANY, u"Copy", wx.DefaultPosition, wx.DefaultSize, 0)
+		copy_log_button.Bind(wx.EVT_BUTTON, self.on_click_log_copy)
+		log_sidebar_sizer.Add(copy_log_button, 0, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.TOP, 10)
+
+		save_log_button = wx.Button(self, wx.ID_ANY, u"Save", wx.DefaultPosition, wx.DefaultSize, 0)
+		save_log_button.Bind(wx.EVT_BUTTON, self.on_click_log_save)
+		save_log_button.Disable()
+		log_sidebar_sizer.Add(save_log_button, 0, wx.BOTTOM | wx.EXPAND | wx.LEFT | wx.RIGHT | wx.TOP, 10)
+
+		log_sizer.Add(log_sidebar_sizer, 1, wx.EXPAND, 5)
+
+		self.SetSizer(log_sizer)
+		self.Layout()
+		log_sizer.Fit(self)
+
+		self.log_scroll_panel.add_log("INFO", "Log is currently not implemented")
+
+	def on_choice_log_mode(self, _):
+		selected = self.log_choice.GetSelection()
+		self.log_scroll_panel.set_log_mode(selected == 1)
+		self.log_scroll_panel.add_log("INFO", f"Set Log Mode to {self.log_choice.GetString(selected)}")
+
+	def on_click_log_copy(self, _):
+		if wx.TheClipboard.Open():
+			wx.TheClipboard.AddData(wx.TextDataObject(self.log_scroll_panel.get_complete_log()))
+			wx.TheClipboard.Close()
+
+	# Demo Log
+	def on_click_log_save(self, event):
+		# TODO Save Log
+		event.Skip()
+
+
+class ManualTab(wx.Panel):
+	def __init__(self, parent):
+		super(ManualTab, self).__init__(parent, wx.ID_ANY, wx.DefaultPosition, wx.DefaultSize, wx.TAB_TRAVERSAL)
+		manual_sizer = wx.BoxSizer(wx.VERTICAL)
+
+		self.SetSizer(manual_sizer)
+		self.Layout()
+		manual_sizer.Fit(self)
+
+	def add_text(self, text, weight):
+		text = wx.StaticText(self, wx.ID_ANY, text, wx.DefaultPosition, wx.DefaultSize, 0)
+		text.SetFont(
+			wx.Font(
+				wx.NORMAL_FONT.GetPointSize(), wx.FONTFAMILY_DEFAULT, wx.FONTSTYLE_NORMAL, weight, False, wx.EmptyString
+			)
+		)
+
+		text.Wrap(self.GetParent().GetSize()[0])
+
+		self.GetSizer().Add(text, 0, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.TOP, 10)
+
+	def startup(self):
+		# TODO Add Manual
+		self.add_text(u"Welcome to Sync-my-Moodle!", wx.FONTWEIGHT_BOLD)
+		self.add_text(
+			u"In this tab is a short manual, how to use Sync-my-Moodle, but it is currently not implemented!",
+			wx.FONTWEIGHT_NORMAL
+		)
+
+		self.Layout()
+		self.GetSizer().Fit(self)
 
 
 class MainFrame(wx.Frame):
-	def __init__(self):
-		super(MainFrame, self).__init__(None, wx.ID_ANY, "SyncMyMoodle", (30, 30), (800, 800))
-		self.init_gui()
 
-	def init_gui(self):
+	def __init__(self, parent):
+		super(MainFrame, self).__init__(
+			self, parent, wx.ID_ANY, u"SyncMyMoodle", wx.DefaultPosition, wx.Size(700, 750),
+			wx.DEFAULT_FRAME_STYLE | wx.TAB_TRAVERSAL
+		)
+
+		self.SetSizeHints(wx.Size(700, 750), wx.DefaultSize)
+
+		config = self.load_config()
+		self.smm = SyncMyMoodle(config)
+
+		main_sizer = wx.BoxSizer(wx.VERTICAL)
+
+		notebook = wx.Notebook(self, wx.ID_ANY, wx.DefaultPosition, wx.DefaultSize, 0)
+
+		self.file_browser_tab = FileTab(notebook, self.smm)
+		notebook.AddPage(self.file_browser_tab, u"File Browser", True)
+
+		self.settings_tab = SettingsTab(notebook, self.smm)
+		notebook.AddPage(self.settings_tab, u"Settings", False)
+
+		log_tab = LogTab(notebook)
+		notebook.AddPage(log_tab, u"Log", False)
+
+		self.manual_tab = ManualTab(notebook)
+		notebook.AddPage(self.manual_tab, u"Manual", False)
+
+		notebook.Bind(wx.EVT_NOTEBOOK_PAGE_CHANGED, self.on_tab_changed)
+
+		main_sizer.Add(notebook, 1, wx.EXPAND | wx.ALL, 5)
+
+		self.SetSizer(main_sizer)
+		self.Layout()
+
+		self.Centre(wx.BOTH)
+
+	def __del__(self):
+		self.save_config(self.smm.config)
+
+	def load_config(self):
 		config = None
 		if os.path.exists("config.json"):
 			config = json.load(open("config.json"))
@@ -292,22 +918,31 @@ class MainFrame(wx.Frame):
 			else:
 				print("You need config.json.example or config.json to use the GUI!")
 				exit(1)
+		return config
 
-		nb = wx.Notebook(self)
-		nb.AddPage(FileTab(nb), "File Browser")
-		nb.AddPage(SettingsTab(nb, config), "Settings")
+	def save_config(self, config):
+		with open("config.json", "w") as file:
+			file.write(json.dumps(config, indent=4))
+
+	def on_tab_changed(self, event):
+		if event.GetSelection() == 0:
+			self.file_browser_tab.update_gui()
+
+	def startup(self):
+		self.manual_tab.startup()
+		self.settings_tab.startup()
+		self.file_browser_tab.startup()
 
 
 class SyncMyMoodleApp(wx.App):
 	def __init__(self):
 		super(SyncMyMoodleApp, self).__init__()
-		frame = MainFrame()
+		frame = MainFrame(None)
 		frame.Show()
-
-	def show(self):
-		self.MainLoop()
+		# Wait 100ms before running startup function to ensure Window is visible
+		wx.CallLater(100, frame.startup)
 
 
 if __name__ == '__main__':
 	app = SyncMyMoodleApp()
-	app.show()
+	app.MainLoop()

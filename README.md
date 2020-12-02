@@ -1,11 +1,11 @@
 # syncMyMoodle
-Synchronization client for RWTH Moodle  
-Downloads the following materials:  
-* Assignment files, submissions and feedback  
-* Resource files  
-* Urls: OpenCast, Youtube and Sciebo videos/files, and all other non HTML files  
-* Folders  
-* Pages and Labels: Embedded Opencast and Youtube Videos  
+Synchronization client for RWTH Moodle
+Downloads the following materials:
+* Assignment files, submissions and feedback
+* Resource files
+* Urls: OpenCast, Youtube and Sciebo videos/files, and all other non HTML files
+* Folders
+* Pages and Labels: Embedded Opencast and Youtube Videos
 
 # How to use
 Intially you need to install the requirements (bs4, requests, tqdm and youtube-dl):
@@ -32,8 +32,8 @@ Now you just need to run
 ./syncMyMoodle.py
 ```
 
-And your courses will be synced into the ``basedir`` you specified (default is the current directory). Your cookies will be stored in a session file.  
-  
+And your courses will be synced into the ``basedir`` you specified (default is the current directory). Your cookies will be stored in a session file.
+
 Downloaded files are tracked in ``downloaded_modules.json`` to speed up syncing, so if you need to redownload some files you might want to delete it or disable it by setting ``enable_download_tracker`` to ``false``.
 
 # How to use GUI
@@ -46,5 +46,7 @@ Now run
 ./gui.py
 ```
 
-Before syncing, you have to edit the Settings. You have to set your RWTH Login and maybe change your Download Directory. Optional you can select the Semester you want to download. Dont forget to hit 'Save Settings' to store the config before you close the Window.
-When you updated your Settings you just have to Press 'SYNC' in the 'Filebrowser'-Tab to start the download. A message will popup if the Process has finished.
+Before syncing, you have to edit the Settings. You have to set your RWTH Login and maybe change your Download Directory. To choose the Semester you have to edit the ``config.json`` manually.
+When you are logged in you have to press ``Update`` in the File Browser Tab and then ``Download`` to Download the Files.
+
+Choosing which Files you want to download, is currently not implemented yet.
