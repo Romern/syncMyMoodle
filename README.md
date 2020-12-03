@@ -23,7 +23,7 @@ Copy ``config.json.example`` to ``config.json`` and adjust the settings:
     "password": "", //Your RWTH SSO password
     "basedir": "./", //The base directory where all files will be synced to
     "cookie_file": "./session", //The location of the cookie file,
-    "enable_download_tracker": true, //Enable the download tracker, if enabled files won't be checked on a subsequent sync
+    "enable_download_tracker": true, //Enable the download tracker, if enabled files won't be checked on a subsequent sync (not used currently)
     "login_at_start": false, //Login automatically when starting the GUI
     "synchronize_at_start": false, //Synchronize automatically when starting the GUI
     "close_after_synchronization": false //Close automatically after synchronizing when starting the GUI
@@ -36,8 +36,6 @@ Now you just need to run
 ```
 
 And your courses will be synced into the ``basedir`` you specified (default is the current directory). Your cookies will be stored in a session file.
-
-Downloaded files are tracked in ``downloaded_modules.json`` to speed up syncing, so if you need to redownload some files you might want to delete it or disable it by setting ``enable_download_tracker`` to ``false``.
 
 # How to use GUI
 
