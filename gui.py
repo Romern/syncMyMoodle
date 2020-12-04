@@ -835,19 +835,26 @@ class LogTab(wx.Panel):
 
 
 class ManualTab(wx.Panel):
-	def __init__(self, parent):
+	def __init__(self, parent, manual):
 		super(ManualTab, self).__init__(parent, wx.ID_ANY, wx.DefaultPosition, wx.DefaultSize, wx.TAB_TRAVERSAL)
+
+		self.manual = manual
+
 		manual_sizer = wx.BoxSizer(wx.VERTICAL)
 
 		self.SetSizer(manual_sizer)
 		self.Layout()
 		manual_sizer.Fit(self)
 
-	def add_text(self, text, weight):
+	def add_text(self, text, bold, italic, underlined):
 		text = wx.StaticText(self, wx.ID_ANY, text, wx.DefaultPosition, wx.DefaultSize, 0)
+
+		style = wx.FONTSTYLE_ITALIC if italic else wx.FONTSTYLE_NORMAL
+		weight = wx.FONTWEIGHT_BOLD if bold else wx.FONTWEIGHT_NORMAL
+
 		text.SetFont(
 			wx.Font(
-				wx.NORMAL_FONT.GetPointSize(), wx.FONTFAMILY_DEFAULT, wx.FONTSTYLE_NORMAL, weight, False, wx.EmptyString
+				wx.NORMAL_FONT.GetPointSize(), wx.FONTFAMILY_DEFAULT, style, weight, underlined, wx.EmptyString
 			)
 		)
 
@@ -856,12 +863,8 @@ class ManualTab(wx.Panel):
 		self.GetSizer().Add(text, 0, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.TOP, 10)
 
 	def startup(self):
-		# TODO Add Manual
-		self.add_text(u"Welcome to Sync-my-Moodle!", wx.FONTWEIGHT_BOLD)
-		self.add_text(
-			u"In this tab is a short manual, how to use Sync-my-Moodle, but it is currently not implemented!",
-			wx.FONTWEIGHT_NORMAL
-		)
+		for text in self.manual:
+			self.add_text(text.get("text"), text.get("bold"), text.get("italic"), text.get("underlined"))
 
 		self.Layout()
 		self.GetSizer().Fit(self)
@@ -893,7 +896,8 @@ class MainFrame(wx.Frame):
 		log_tab = LogTab(notebook)
 		notebook.AddPage(log_tab, u"Log", False)
 
-		self.manual_tab = ManualTab(notebook)
+		manual = self.load_manual()
+		self.manual_tab = ManualTab(notebook, manual)
 		notebook.AddPage(self.manual_tab, u"Manual", False)
 
 		notebook.Bind(wx.EVT_NOTEBOOK_PAGE_CHANGED, self.on_tab_changed)
@@ -923,6 +927,13 @@ class MainFrame(wx.Frame):
 	def save_config(self, config):
 		with open("config.json", "w") as file:
 			file.write(json.dumps(config, indent=4))
+
+	def load_manual(self):
+		manual = json.loads("[]")
+		if os.path.exists("manual.json"):
+			manual = json.load(open("manual.json"))
+			pass
+		return manual
 
 	def on_tab_changed(self, event):
 		if event.GetSelection() == 0:
