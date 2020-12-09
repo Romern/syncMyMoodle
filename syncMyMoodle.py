@@ -497,3 +497,4 @@ if __name__ == '__main__':
 	print(f"Syncing file tree...")
 	smm.sync()
 	print(f"Downloading files...")
+	smm.download_all_files()
