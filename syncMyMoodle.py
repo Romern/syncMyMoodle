@@ -330,22 +330,26 @@ class SyncMyMoodle:
 
 	def _download_all_files(self, cur_node):
 		if len(cur_node.children) == 0:
-			if cur_node.url and not cur_node.is_downloaded:
-				if cur_node.type == "Youtube":
-					self.scanAndDownloadYouTube(cur_node)
-					cur_node.is_downloaded = True
-				elif cur_node.type == "Opencast":
-					self.downloadOpenCastVideos(cur_node)
-					cur_node.is_downloaded = True
-				else:
-					self.download_file(cur_node)
-					cur_node.is_downloaded = True
-			return
+			try:
+				if cur_node.url and not cur_node.is_downloaded:
+					if cur_node.type == "Youtube":
+						self.scanAndDownloadYouTube(cur_node)
+						cur_node.is_downloaded = True
+					elif cur_node.type == "Opencast":
+						self.downloadOpenCastVideos(cur_node)
+						cur_node.is_downloaded = True
+					else:
+						self.download_file(cur_node)
+						cur_node.is_downloaded = True
+				return
+			except Exception as e:
+				traceback.print_exc()
+				print(f"Failed to download the module {cur_node}: {e}")
 
 		for child in cur_node.children:
 			self._download_all_files(child)
 
-	def get_sanitized_node_path(self, node):		
+	def get_sanitized_node_path(self, node):
 		path_temp = [os.path.expanduser(self.config["basedir"])] + [self.sanitize(p) for p in node.get_path()]
 		return os.path.join(*path_temp)
 
