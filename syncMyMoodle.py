@@ -459,7 +459,9 @@ class SyncMyMoodle:
 					if videojs:
 						videojs = videojs.select_one("source")
 						if videojs and videojs.get("src"):
-							parent_node.add_child(videojs["src"].split("/")[-1], None, "Embedded videojs", url=videojs["src"])
+							parsed = urllib.parse.urlparse(response.url)
+							link = urllib.parse.urljoin(f'{parsed.scheme}://{parsed.netloc}/{parsed.path}', videojs["src"])
+							parent_node.add_child(videojs["src"].split("/")[-1], None, "Embedded videojs", url=link)
 					# further inspect the response for other links
 					text = response.text
 			except Exception as e:
