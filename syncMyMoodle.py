@@ -9,7 +9,7 @@ import json
 import base64
 import youtube_dl
 import traceback
-
+from argparse import ArgumentParser
 import http.client
 import html
 import urllib.parse
@@ -490,10 +490,30 @@ class SyncMyMoodle:
 				parent_node.add_child(filename["value"], url["value"], "Sciebo file", url=url["value"])
 
 if __name__ == '__main__':
-	if not os.path.exists("config.json"):
-		print("You need to copy config.json.example to config.json and adjust the settings!")
+	parser = ArgumentParser(description="Synchronization client for RWTH Moodle. All optional arguments override those in config.json.")
+	parser.add_argument('--user', default=None, help="Your RWTH SSO username")
+	parser.add_argument('--password', default=None, help="Your RWTH SSO password")
+	parser.add_argument('--config', default="config.json", help="The path to the config file")
+	parser.add_argument('--cookiefile', default=None, help="The location of the cookie file")
+	parser.add_argument('--courses', default=None, help="Only these courses will be synced (comma seperated links) (if empty, all courses will be synced)")
+	parser.add_argument('--semester', default=None, help="Only these semesters will be synced, of the form 20ws (comma seperated) (only used if [courses] is empty, if empty all semesters will be synced)")
+	parser.add_argument('--basedir', default=None, help="The base directory where all files will be synced to")
+	args = parser.parse_args()
+
+	if os.path.exists(args.config):
+		config = json.load(open(args.config))
+
+	config["user"] = args.user or config.get("user")
+	config["password"] = args.password or config.get("password")
+	config["cookie_file"] = args.cookiefile or config.get("cookie_file") or "./session"
+	config["selected_courses"] = args.courses.split(",") if args.courses else config.get("selected_courses") or []
+	config["only_sync_semester"] = args.semester.split(",") if args.semester else config.get("only_sync_semester") or []
+	config["basedir"] = args.basedir or config.get("basedir") or "./"
+
+	if "user" not in config or "password" not in config:
+		print("You need to specify your username and password in the config file or as an argument!")
 		exit(1)
-	config = json.load(open("config.json"))
+
 	smm = SyncMyMoodle(config)
 
 	print(f"Logging in...")
