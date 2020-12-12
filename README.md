@@ -8,7 +8,7 @@ Downloads the following materials:
 * Folders
 * Pages and Labels: Embedded Opencast and Youtube Videos
 
-# How to use
+# Setup
 Intially you need to install the requirements:
 ```bash
 pip3 install -r requirements.txt
@@ -21,28 +21,22 @@ Copy ``config.json.example`` to ``config.json`` and adjust the settings:
     "selected_courses": [], //Only these courses will be synced, of the form "https://moodle.rwth-aachen.de/course/view.php?id=XXXXX" (if empty, all courses will be synced)
     "only_sync_semester": [], //Only these semesters will be synced, of the form 20ws (only used if selected_courses is empty, if empty all semesters will be synced)
     "user": "", //Your RWTH SSO username
-    "password": "", //Your RWTH SSO password
+    "password": "", //Your RWTH SSO password (not needed if you use secret service)
     "basedir": "./", //The base directory where all files will be synced to
     "cookie_file": "./session", //The location of the cookie file,
     "login_at_start": false, //Login automatically when starting the GUI
     "synchronize_at_start": false, //Synchronize automatically when starting the GUI
-    "close_after_synchronization": false //Close automatically after synchronizing when starting the GUI
+    "close_after_synchronization": false, //Close automatically after synchronizing when starting the GUI
+    "use_secret_service": false //Use the secret service integration (requires the secretstorage pip module)
 }
-```
-
-
-
-Now you just need to run
-```bash
-./syncMyMoodle.py
 ```
 
 And your courses will be synced into the ``basedir`` you specified (default is the current directory). Your cookies will be stored in a session file.
 
-# How to use GUI
+# GUI usage
 <p float="left">
-	<img src="https://user-images.githubusercontent.com/8593000/100927817-ae381c00-34e5-11eb-9ee8-9a1042b05760.png" width="50%" />
-	<img src="https://user-images.githubusercontent.com/8593000/100927819-af694900-34e5-11eb-9219-3ba0ded57ad4.png" width="50%" />
+	<img src="https://user-images.githubusercontent.com/8593000/100927817-ae381c00-34e5-11eb-9ee8-9a1042b05760.png" width="49%" />
+	<img src="https://user-images.githubusercontent.com/8593000/100927819-af694900-34e5-11eb-9219-3ba0ded57ad4.png" width="49%" />
 </p>
 
 You need to install the requirements as before:
@@ -59,7 +53,11 @@ When you are logged in you have to press ``Update`` in the File Browser Tab and 
 
 Choosing which Files you want to download, is currently not implemented yet.
 
-# CLI
+# CLI usage
+Run
+```bash
+./syncMyMoodle.py
+```
 You can override the fields in the config file by using command line arguments:
 
 ```
@@ -81,7 +79,7 @@ optional arguments:
 ```
 
 # FreeDesktop.org Secret Service integration
-If you have a FreeDesktop.org Secret Service integration compatible keyring installed, you can save you RWTH SSO credentials in it.
+If you have a FreeDesktop.org Secret Service integration compatible keyring installed, you can save your RWTH SSO credentials in it.
 You need to have the python package ``secretstorage`` installed:
 ```bash
 pip3 install secretstorage

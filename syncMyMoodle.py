@@ -517,8 +517,9 @@ if __name__ == '__main__':
 	config["selected_courses"] = args.courses.split(",") if args.courses else config.get("selected_courses") or []
 	config["only_sync_semester"] = args.semester.split(",") if args.semester else config.get("only_sync_semester") or []
 	config["basedir"] = args.basedir or config.get("basedir") or "./"
+	config["use_secret_service"] = (args.secretservice if has_secretstorage else None) or config.get("use_secret_service")
 
-	if has_secretstorage and args.secretservice:
+	if has_secretstorage and config["use_secret_service"]:
 		if not args.user and not config.get("user"):
 			print("You need to provide your username in the config file or through --user!")
 			exit(1)
