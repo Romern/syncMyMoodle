@@ -9,12 +9,12 @@ import json
 import base64
 import youtube_dl
 import traceback
-from argparse import ArgumentParser
 import http.client
 import html
 import urllib.parse
-
 from tqdm import tqdm
+from argparse import ArgumentParser
+import getpass
 
 class Node:
 	def __init__(self, name, id, type, parent, url=None, additional_info=None, is_downloaded=False):
@@ -490,7 +490,15 @@ class SyncMyMoodle:
 				parent_node.add_child(filename["value"], url["value"], "Sciebo file", url=url["value"])
 
 if __name__ == '__main__':
+	try:
+		import secretstorage
+		has_secretstorage = True
+	except:
+		has_secretstorage = False
+
 	parser = ArgumentParser(description="Synchronization client for RWTH Moodle. All optional arguments override those in config.json.")
+	if has_secretstorage:
+		parser.add_argument('--secretservice',action='store_true', help="Use FreeDesktop.org Secret Service as storage/retrival for username/passwords.")
 	parser.add_argument('--user', default=None, help="Your RWTH SSO username")
 	parser.add_argument('--password', default=None, help="Your RWTH SSO password")
 	parser.add_argument('--config', default="config.json", help="The path to the config file")
@@ -510,7 +518,29 @@ if __name__ == '__main__':
 	config["only_sync_semester"] = args.semester.split(",") if args.semester else config.get("only_sync_semester") or []
 	config["basedir"] = args.basedir or config.get("basedir") or "./"
 
-	if "user" not in config or "password" not in config:
+	if has_secretstorage and args.secretservice:
+		if not args.user and not config.get("user"):
+			print("You need to provide your username in the config file or through --user!")
+			exit(1)
+		if config.get("password"):
+			print("You need to remove your password from your config file!")
+			exit(1)
+
+		connection = secretstorage.dbus_init()
+		collection = secretstorage.get_default_collection(connection)
+		attributes = {"application": "syncMyMoodle", "username": config["user"]}
+		results = list(collection.search_items(attributes))
+		if len(results) == 0:
+			if args.password:
+				password = args.password
+			else:
+				password = getpass.getpass("Password:")
+			item = collection.create_item(f'{config["user"]}@rwth-aachen.de', attributes, password)
+		else:
+			item = results[0]
+		config["password"] = item.get_secret().decode("utf-8")
+
+	if not config.get("user") or not config.get("password"):
 		print("You need to specify your username and password in the config file or as an argument!")
 		exit(1)
 
