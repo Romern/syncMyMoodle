@@ -161,6 +161,9 @@ class SyncMyMoodle:
 			"wsfunction": "core_webservice_get_site_info"
 		}
 		resp = self.session.post(f"https://moodle.rwth-aachen.de/webservice/rest/server.php", params=params, data=data)
+		if not resp.json().get("userid") or not resp.json()["userprivateaccesskey"]:
+			print(f"Error while getting userid and access key: {json.dumps(resp.json(), indent=4)}")
+			exit(1)
 		self.user_id = resp.json()["userid"]
 		self.user_private_access_key = resp.json()["userprivateaccesskey"]
 		return self.user_id, self.user_private_access_key
