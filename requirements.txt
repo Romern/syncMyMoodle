@@ -1,5 +1,5 @@
 requests
-bs4
+beautifulsoup4
 youtube_dl
 tqdm
-wxPython
+wxPython<4.1.0

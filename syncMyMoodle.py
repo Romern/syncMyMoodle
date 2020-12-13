@@ -9,12 +9,12 @@ import json
 import base64
 import youtube_dl
 import traceback
-
 import http.client
 import html
 import urllib.parse
-
 from tqdm import tqdm
+from argparse import ArgumentParser
+import getpass
 
 class Node:
 	def __init__(self, name, id, type, parent, url=None, additional_info=None, is_downloaded=False):
@@ -330,22 +330,26 @@ class SyncMyMoodle:
 
 	def _download_all_files(self, cur_node):
 		if len(cur_node.children) == 0:
-			if cur_node.url and not cur_node.is_downloaded:
-				if cur_node.type == "Youtube":
-					self.scanAndDownloadYouTube(cur_node)
-					cur_node.is_downloaded = True
-				elif cur_node.type == "Opencast":
-					self.downloadOpenCastVideos(cur_node)
-					cur_node.is_downloaded = True
-				else:
-					self.download_file(cur_node)
-					cur_node.is_downloaded = True
-			return
+			try:
+				if cur_node.url and not cur_node.is_downloaded:
+					if cur_node.type == "Youtube":
+						self.scanAndDownloadYouTube(cur_node)
+						cur_node.is_downloaded = True
+					elif cur_node.type == "Opencast":
+						self.downloadOpenCastVideos(cur_node)
+						cur_node.is_downloaded = True
+					else:
+						self.download_file(cur_node)
+						cur_node.is_downloaded = True
+				return
+			except Exception as e:
+				traceback.print_exc()
+				print(f"Failed to download the module {cur_node}: {e}")
 
 		for child in cur_node.children:
 			self._download_all_files(child)
 
-	def get_sanitized_node_path(self, node):		
+	def get_sanitized_node_path(self, node):
 		path_temp = [os.path.expanduser(self.config["basedir"])] + [self.sanitize(p) for p in node.get_path()]
 		return os.path.join(*path_temp)
 
@@ -455,7 +459,9 @@ class SyncMyMoodle:
 					if videojs:
 						videojs = videojs.select_one("source")
 						if videojs and videojs.get("src"):
-							parent_node.add_child(videojs["src"].split("/")[-1], None, "Embedded videojs", url=videojs["src"])
+							parsed = urllib.parse.urlparse(response.url)
+							link = urllib.parse.urljoin(f'{parsed.scheme}://{parsed.netloc}/{parsed.path}', videojs["src"])
+							parent_node.add_child(videojs["src"].split("/")[-1], None, "Embedded videojs", url=link)
 					# further inspect the response for other links
 					text = response.text
 			except Exception as e:
@@ -484,10 +490,61 @@ class SyncMyMoodle:
 				parent_node.add_child(filename["value"], url["value"], "Sciebo file", url=url["value"])
 
 if __name__ == '__main__':
-	if not os.path.exists("config.json"):
-		print("You need to copy config.json.example to config.json and adjust the settings!")
+	try:
+		import secretstorage
+		has_secretstorage = True
+	except:
+		has_secretstorage = False
+
+	parser = ArgumentParser(description="Synchronization client for RWTH Moodle. All optional arguments override those in config.json.")
+	if has_secretstorage:
+		parser.add_argument('--secretservice',action='store_true', help="Use FreeDesktop.org Secret Service as storage/retrival for username/passwords.")
+	parser.add_argument('--user', default=None, help="Your RWTH SSO username")
+	parser.add_argument('--password', default=None, help="Your RWTH SSO password")
+	parser.add_argument('--config', default="config.json", help="The path to the config file")
+	parser.add_argument('--cookiefile', default=None, help="The location of the cookie file")
+	parser.add_argument('--courses', default=None, help="Only these courses will be synced (comma seperated links) (if empty, all courses will be synced)")
+	parser.add_argument('--semester', default=None, help="Only these semesters will be synced, of the form 20ws (comma seperated) (only used if [courses] is empty, if empty all semesters will be synced)")
+	parser.add_argument('--basedir', default=None, help="The base directory where all files will be synced to")
+	args = parser.parse_args()
+
+	if os.path.exists(args.config):
+		config = json.load(open(args.config))
+
+	config["user"] = args.user or config.get("user")
+	config["password"] = args.password or config.get("password")
+	config["cookie_file"] = args.cookiefile or config.get("cookie_file") or "./session"
+	config["selected_courses"] = args.courses.split(",") if args.courses else config.get("selected_courses") or []
+	config["only_sync_semester"] = args.semester.split(",") if args.semester else config.get("only_sync_semester") or []
+	config["basedir"] = args.basedir or config.get("basedir") or "./"
+	config["use_secret_service"] = (args.secretservice if has_secretstorage else None) or config.get("use_secret_service")
+
+	if has_secretstorage and config["use_secret_service"]:
+		if not args.user and not config.get("user"):
+			print("You need to provide your username in the config file or through --user!")
+			exit(1)
+		if config.get("password"):
+			print("You need to remove your password from your config file!")
+			exit(1)
+
+		connection = secretstorage.dbus_init()
+		collection = secretstorage.get_default_collection(connection)
+		attributes = {"application": "syncMyMoodle", "username": config["user"]}
+		results = list(collection.search_items(attributes))
+		if len(results) == 0:
+			if args.password:
+				password = args.password
+			else:
+				password = getpass.getpass("Password:")
+			item = collection.create_item(f'{config["user"]}@rwth-aachen.de', attributes, password)
+		else:
+			item = results[0]
+		config["password"] = item.get_secret().decode("utf-8")
+
+	if not config.get("user") or not config.get("password"):
+		print("You need to specify your username and password in the config file or as an argument!")
 		exit(1)
-	config = json.load(open("config.json"))
+
 	smm = SyncMyMoodle(config)
 
 	print(f"Logging in...")
@@ -497,3 +554,4 @@ if __name__ == '__main__':
 	print(f"Syncing file tree...")
 	smm.sync()
 	print(f"Downloading files...")
+	smm.download_all_files()
