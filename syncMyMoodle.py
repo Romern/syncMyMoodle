@@ -179,7 +179,7 @@ class SyncMyMoodle:
 			"wsfunction": "mod_assign_get_assignments"
 		}
 		resp = self.session.post(f"https://moodle.rwth-aachen.de/webservice/rest/server.php", params=params, data=data)
-		return resp.json()["courses"][0]
+		return resp.json()["courses"][0] if len(resp.json()["courses"])>0 else None
 
 	def get_assignment_submission_files(self, assignment_id):
 		data = {
@@ -261,13 +261,18 @@ class SyncMyMoodle:
 			assignments = self.get_assignment(course_id)
 			folders = self.get_folders_by_courses(course_id)
 			for section in self.get_course(course_id):
+				if isinstance(section, str):
+					print(f"Error syncing section in {course_name}: {section}")
+					continue
 				section_node = course_node.add_child(section["name"], section["id"], "Section")
 
 				for module in section["modules"]:
 					try:
 						## Get Assignments
 						if module["modname"] == "assign":
-							ass = [a for a in assignments["assignments"] if a["cmid"] == module["id"]]
+							if assignments == None:
+								continue
+							ass = [a for a in assignments.get("assignments") if a["cmid"] == module["id"]]
 							if len(ass) == 0:
 								continue
 							ass = ass[0]
