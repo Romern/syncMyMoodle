@@ -697,12 +697,12 @@ class SettingsTab(wx.Panel):
 
 		# Download Tracker Box
 
-		download_tracker_text = wx.StaticText(self, wx.ID_ANY, u"Download Tracker", wx.DefaultPosition, wx.DefaultSize, 0)
-		download_tracker_text.Wrap(-1)
-		settings_sizer.Add(download_tracker_text, 0, wx.LEFT | wx.TOP, 10)
+		# download_tracker_text = wx.StaticText(self, wx.ID_ANY, u"Download Tracker", wx.DefaultPosition, wx.DefaultSize, 0)
+		# download_tracker_text.Wrap(-1)
+		# settings_sizer.Add(download_tracker_text, 0, wx.LEFT | wx.TOP, 10)
 
-		download_tracker_panel = SettingsTab.DownloadTrackerPanel(self, self.smm)
-		settings_sizer.Add(download_tracker_panel, 0, wx.ALL | wx.EXPAND, 10)
+		# download_tracker_panel = SettingsTab.DownloadTrackerPanel(self, self.smm)
+		# settings_sizer.Add(download_tracker_panel, 0, wx.ALL | wx.EXPAND, 10)
 
 		# Automation Box
 
