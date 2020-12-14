@@ -12,7 +12,9 @@ from syncMyMoodle import SyncMyMoodle
 class LoginDialog (wx.Dialog):
 
 	def __init__(self, parent):
-		super(LoginDialog, self).__init__(parent, wx.ID_ANY, u"Login", wx.DefaultPosition, wx.Size(400, 200), wx.DEFAULT_DIALOG_STYLE)
+		super(LoginDialog, self).__init__(
+			parent, wx.ID_ANY, u"Login", wx.DefaultPosition, wx.Size(400, 200), wx.DEFAULT_DIALOG_STYLE
+		)
 
 		self.SetSizeHints(wx.DefaultSize, wx.DefaultSize)
 
@@ -64,13 +66,14 @@ class LoginDialog (wx.Dialog):
 
 class FileTab(wx.Panel):
 	class TreeView(wx.TreeCtrl):
-		def __init__(self, parent, smm):
+		def __init__(self, parent, smm, sizer):
 			super(FileTab.TreeView, self).__init__(
 				parent, wx.ID_ANY, wx.DefaultPosition, wx.DefaultSize,
 				wx.TR_HAS_BUTTONS | wx.TR_HIDE_ROOT | wx.TR_MULTIPLE
 			)
 
 			self.smm = smm
+			self.sizer = sizer
 
 		def on_resize(self, _):
 			self.update_gui()
@@ -86,17 +89,12 @@ class FileTab(wx.Panel):
 
 			self.ExpandAll()
 
-			parent = self.GetParent()
-			parent.Layout()
-
-			parent = parent.GetParent()
-			parent.Layout()
+			# self.Layout()
 
 		def update_node(self, width, dc, tree, node, depth):
 			if node.children is not None:
 				for child_node in node.children:
-					label = self.Ellipsize(self.smm.sanitize(child_node.name), dc, wx.ELLIPSIZE_END, width - (depth+1) * self.GetIndent())
-					child_tree = self.AppendItem(tree, label)
+					child_tree = self.AppendItem(tree, self.smm.sanitize(child_node.name))
 					self.update_node(width, dc, child_tree, child_node, depth + 1)
 
 	class DataPanel(wx.Panel):
@@ -297,53 +295,57 @@ class FileTab(wx.Panel):
 
 		file_browser_sizer = wx.BoxSizer(wx.HORIZONTAL)
 
-		tree_view_sizer = wx.StaticBoxSizer(wx.StaticBox(self, wx.ID_ANY, wx.EmptyString), wx.VERTICAL)
-		self.tree_view = FileTab.TreeView(tree_view_sizer.GetStaticBox(), smm)
-		tree_view_sizer.Add(self.tree_view, 0, wx.ALL | wx.EXPAND, 5)
+		static_box = wx.StaticBox(self, wx.ID_ANY, wx.EmptyString)
+		tree_view_sizer = wx.StaticBoxSizer(static_box, wx.VERTICAL)
+		self.tree_view = FileTab.TreeView(static_box, smm, tree_view_sizer)
+
+		tree_view_sizer.Add(self.tree_view, 1, wx.ALL | wx.EXPAND, 5)
 
 		file_browser_sizer.Add(tree_view_sizer, 7, wx.EXPAND | wx.LEFT, 5)
 
-		sidebar_sizer = wx.BoxSizer(wx.VERTICAL)
+		self.sidebar_sizer = wx.BoxSizer(wx.VERTICAL)
 
 		# Data Panel
 
 		self.data_text = wx.StaticText(self, wx.ID_ANY, u"Data", wx.DefaultPosition, wx.DefaultSize, 0)
 		self.data_text.Wrap(-1)
-		sidebar_sizer.Add(self.data_text, 0, wx.LEFT | wx.TOP, 10)
+		self.sidebar_sizer.Add(self.data_text, 0, wx.LEFT | wx.TOP, 10)
 
 		self.data_panel = FileTab.DataPanel(self, smm)
-		sidebar_sizer.Add(self.data_panel, 0, wx.EXPAND | wx.ALL, 5)
+		self.sidebar_sizer.Add(self.data_panel, 0, wx.EXPAND | wx.ALL, 5)
 
 		# Presentation Panel
 
 		self.presentation_text = wx.StaticText(self, wx.ID_ANY, u"Presentation", wx.DefaultPosition, wx.DefaultSize, 0)
 		self.presentation_text.Wrap(-1)
-		sidebar_sizer.Add(self.presentation_text, 0, wx.LEFT | wx.TOP, 10)
+		self.sidebar_sizer.Add(self.presentation_text, 0, wx.LEFT | wx.TOP, 10)
 
 		self.presentation_panel = FileTab.PresentationPanel(self)
-		sidebar_sizer.Add(self.presentation_panel, 0, wx.EXPAND | wx.ALL, 5)
+		self.sidebar_sizer.Add(self.presentation_panel, 0, wx.EXPAND | wx.ALL, 5)
 
 		# Search Panel
 
 		# self.search_text = wx.StaticText(self, wx.ID_ANY, u"Search", wx.DefaultPosition, wx.DefaultSize, 0)
 		# self.search_text.Wrap(-1)
-		# sidebar_sizer.Add(self.search_text, 0, wx.LEFT | wx.TOP, 10)
+		# self.sidebar_sizer.Add(self.search_text, 0, wx.LEFT | wx.TOP, 10)
 
 		# self.search_panel = FileTab.SearchPanel(self)
-		# sidebar_sizer.Add(self.search_panel, 0, wx.EXPAND | wx.ALL, 5)
+		# self.sidebar_sizer.Add(self.search_panel, 0, wx.EXPAND | wx.ALL, 5)
 
 		# Synchronization Panel
 
-		sidebar_sizer.Add((0, 0), 1, wx.EXPAND, 5)
+		self.sidebar_sizer.Add((0, 0), 1, wx.EXPAND, 5)
 
 		self.synchronization_text = wx.StaticText(self, wx.ID_ANY, u"Synchronization", wx.DefaultPosition, wx.DefaultSize, 0)
 		self.synchronization_text.Wrap(-1)
-		sidebar_sizer.Add(self.synchronization_text, 0, wx.LEFT | wx.TOP, 10)
+		self.sidebar_sizer.Add(self.synchronization_text, 0, wx.LEFT | wx.TOP, 10)
 
 		self.synchronization_panel = FileTab.SynchronizationPanel(self, smm)
-		sidebar_sizer.Add(self.synchronization_panel, 0, wx.EXPAND | wx.ALL, 5)
+		self.sidebar_sizer.Add(self.synchronization_panel, 0, wx.EXPAND | wx.ALL, 5)
 
-		file_browser_sizer.Add(sidebar_sizer, 3, wx.EXPAND | wx.FIXED_MINSIZE | wx.LEFT | wx.RIGHT, 5)
+		file_browser_sizer.Add(self.sidebar_sizer, 3, wx.EXPAND | wx.LEFT | wx.RIGHT, 5)
+
+		self.Bind(wx.EVT_SIZE, self.resize)
 
 		self.SetSizer(file_browser_sizer)
 		self.Layout()
@@ -360,6 +362,18 @@ class FileTab(wx.Panel):
 		self.update_gui()
 
 		self.synchronization_panel.startup()
+
+	def resize(self, event):
+		self.Unbind(wx.EVT_SIZE)
+
+		width = event.GetSize().GetWidth()
+		height = event.GetSize().GetHeight()
+		min_width = self.sidebar_sizer.GetMinSize().GetWidth()
+		self.tree_view.SetMaxSize((width-min_width, height))
+
+		self.Layout()
+
+		self.Bind(wx.EVT_SIZE, self.resize)
 
 
 class SettingsTab(wx.Panel):
@@ -383,7 +397,7 @@ class SettingsTab(wx.Panel):
 				self.login_status_text, 0, wx.ALIGN_CENTER_VERTICAL | wx.ALIGN_LEFT | wx.BOTTOM | wx.LEFT | wx.TOP, 10
 			)
 
-			login_sizer.Add((0, 0), 1, wx.EXPAND, 5)
+			login_sizer.AddStretchSpacer()
 
 			self.username_text = wx.StaticText(
 				self, wx.ID_ANY, self.smm.config.get("user"), wx.DefaultPosition, wx.DefaultSize, 0
@@ -395,7 +409,7 @@ class SettingsTab(wx.Panel):
 			self.delete_button.Bind(wx.EVT_BUTTON, self.on_click_delete)
 			self.delete_button.Enable(self.smm.config.get("user") != "")
 			login_sizer.Add(
-				self.delete_button, 0, wx.ALIGN_CENTER_VERTICAL | wx.ALIGN_RIGHT | wx.BOTTOM | wx.LEFT | wx.TOP, 10
+				self.delete_button, 0, wx.ALIGN_CENTER_VERTICAL | wx.BOTTOM | wx.LEFT | wx.TOP, 10
 			)
 
 			self.login_button = wx.Button(self, wx.ID_ANY, u"Login", wx.DefaultPosition, wx.DefaultSize, 0)
@@ -403,7 +417,7 @@ class SettingsTab(wx.Panel):
 			self.login_button.Enable(self.smm.session is None)
 			login_sizer.Add(
 				self.login_button, 0,
-				wx.ALIGN_CENTER_VERTICAL | wx.ALIGN_RIGHT | wx.BOTTOM | wx.LEFT | wx.RIGHT | wx.TOP, 10
+				wx.ALIGN_CENTER_VERTICAL | wx.BOTTOM | wx.LEFT | wx.RIGHT | wx.TOP, 10
 			)
 
 			self.SetSizer(login_sizer)
@@ -451,11 +465,6 @@ class SettingsTab(wx.Panel):
 			self.login_button.Enable(self.smm.session is None)
 
 			self.Layout()
-			self.GetSizer().Fit(self)
-
-			parent = self.GetParent()
-			parent.Layout()
-			parent.GetSizer().Fit(parent)
 
 		def startup(self):
 			if self.smm.config.get("login_at_start"):
@@ -688,12 +697,12 @@ class SettingsTab(wx.Panel):
 
 		# Download Tracker Box
 
-		download_tracker_text = wx.StaticText(self, wx.ID_ANY, u"Download Tracker", wx.DefaultPosition, wx.DefaultSize, 0)
-		download_tracker_text.Wrap(-1)
-		settings_sizer.Add(download_tracker_text, 0, wx.LEFT | wx.TOP, 10)
+		# download_tracker_text = wx.StaticText(self, wx.ID_ANY, u"Download Tracker", wx.DefaultPosition, wx.DefaultSize, 0)
+		# download_tracker_text.Wrap(-1)
+		# settings_sizer.Add(download_tracker_text, 0, wx.LEFT | wx.TOP, 10)
 
-		download_tracker_panel = SettingsTab.DownloadTrackerPanel(self, self.smm)
-		settings_sizer.Add(download_tracker_panel, 0, wx.ALL | wx.EXPAND, 10)
+		# download_tracker_panel = SettingsTab.DownloadTrackerPanel(self, self.smm)
+		# settings_sizer.Add(download_tracker_panel, 0, wx.ALL | wx.EXPAND, 10)
 
 		# Automation Box
 
@@ -835,33 +844,36 @@ class LogTab(wx.Panel):
 
 
 class ManualTab(wx.Panel):
-	def __init__(self, parent):
+	def __init__(self, parent, manual):
 		super(ManualTab, self).__init__(parent, wx.ID_ANY, wx.DefaultPosition, wx.DefaultSize, wx.TAB_TRAVERSAL)
+
+		self.manual = manual
+
 		manual_sizer = wx.BoxSizer(wx.VERTICAL)
 
 		self.SetSizer(manual_sizer)
 		self.Layout()
 		manual_sizer.Fit(self)
 
-	def add_text(self, text, weight):
+	def add_text(self, text, bold, italic, underlined):
 		text = wx.StaticText(self, wx.ID_ANY, text, wx.DefaultPosition, wx.DefaultSize, 0)
+
+		style = wx.FONTSTYLE_ITALIC if italic else wx.FONTSTYLE_NORMAL
+		weight = wx.FONTWEIGHT_BOLD if bold else wx.FONTWEIGHT_NORMAL
+
 		text.SetFont(
 			wx.Font(
-				wx.NORMAL_FONT.GetPointSize(), wx.FONTFAMILY_DEFAULT, wx.FONTSTYLE_NORMAL, weight, False, wx.EmptyString
+				wx.NORMAL_FONT.GetPointSize(), wx.FONTFAMILY_DEFAULT, style, weight, underlined, wx.EmptyString
 			)
 		)
 
-		text.Wrap(self.GetParent().GetSize()[0])
+		text.Wrap(self.GetParent().GetSize().GetWidth())
 
 		self.GetSizer().Add(text, 0, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.TOP, 10)
 
 	def startup(self):
-		# TODO Add Manual
-		self.add_text(u"Welcome to Sync-my-Moodle!", wx.FONTWEIGHT_BOLD)
-		self.add_text(
-			u"In this tab is a short manual, how to use Sync-my-Moodle, but it is currently not implemented!",
-			wx.FONTWEIGHT_NORMAL
-		)
+		for text in self.manual:
+			self.add_text(text.get("text"), text.get("bold"), text.get("italic"), text.get("underlined"))
 
 		self.Layout()
 		self.GetSizer().Fit(self)
@@ -893,7 +905,8 @@ class MainFrame(wx.Frame):
 		log_tab = LogTab(notebook)
 		notebook.AddPage(log_tab, u"Log", False)
 
-		self.manual_tab = ManualTab(notebook)
+		manual = self.load_manual()
+		self.manual_tab = ManualTab(notebook, manual)
 		notebook.AddPage(self.manual_tab, u"Manual", False)
 
 		notebook.Bind(wx.EVT_NOTEBOOK_PAGE_CHANGED, self.on_tab_changed)
@@ -923,6 +936,13 @@ class MainFrame(wx.Frame):
 	def save_config(self, config):
 		with open("config.json", "w") as file:
 			file.write(json.dumps(config, indent=4))
+
+	def load_manual(self):
+		manual = json.loads("[]")
+		if os.path.exists("manual.json"):
+			manual = json.load(open("manual.json"))
+			pass
+		return manual
 
 	def on_tab_changed(self, event):
 		if event.GetSelection() == 0:

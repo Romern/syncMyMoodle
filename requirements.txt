@@ -2,4 +2,4 @@ requests
 beautifulsoup4
 youtube_dl
 tqdm
-wxPython<4.1.0
+wxPython

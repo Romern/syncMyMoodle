@@ -1,0 +1,26 @@
+[
+  {
+    "bold": true,
+    "italic": false,
+    "underlined": false,
+    "text": "Welcome to Sync-my-Moodle!"
+  },
+  {
+    "bold": false,
+    "italic": false,
+    "underlined": false,
+    "text": "In this tab is a short manual, how to use Sync-my-Moodle, but it is currently not implemented!"
+  },
+  {
+    "bold": false,
+    "italic": false,
+    "underlined": true,
+    "text": "Edit the Manual"
+  },
+  {
+    "bold": false,
+    "italic": false,
+    "underlined": false,
+    "text": "The manual can be edited in the manual.json File"
+  }
+]
