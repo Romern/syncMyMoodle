@@ -1,5 +1,6 @@
 {
     "selected_courses": [],
+    "skip_courses": [],
     "only_sync_semester": [],
     "user": "",
     "password": "",
@@ -8,5 +9,6 @@
     "login_at_start": false,
     "synchronize_at_start": false,
     "close_after_synchronization": false,
-    "use_secret_service": false
+    "use_secret_service": false,
+    "no_links": false
 }

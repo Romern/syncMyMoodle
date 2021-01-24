@@ -9,7 +9,7 @@ Downloads the following materials:
 * Pages and Labels: Embedded Opencast and Youtube Videos
 
 # Setup
-Intially you need to install the requirements:
+Initially you need to install the requirements:
 ```bash
 pip3 install -r requirements.txt
 ```
@@ -19,6 +19,7 @@ Copy ``config.json.example`` to ``config.json`` and adjust the settings:
 ```js
 {
     "selected_courses": [], //Only these courses will be synced, of the form "https://moodle.rwth-aachen.de/course/view.php?id=XXXXX" (if empty, all courses will be synced)
+    "skip_courses": [], //Skip these courses
     "only_sync_semester": [], //Only these semesters will be synced, of the form 20ws (only used if selected_courses is empty, if empty all semesters will be synced)
     "user": "", //Your RWTH SSO username
     "password": "", //Your RWTH SSO password (not needed if you use secret service)
@@ -27,7 +28,8 @@ Copy ``config.json.example`` to ``config.json`` and adjust the settings:
     "login_at_start": false, //Login automatically when starting the GUI
     "synchronize_at_start": false, //Synchronize automatically when starting the GUI
     "close_after_synchronization": false, //Close automatically after synchronizing when starting the GUI
-    "use_secret_service": false //Use the secret service integration (requires the secretstorage pip module)
+    "use_secret_service": false, //Use the secret service integration (requires the secretstorage pip module)
+    "no_links": false //Skip links embedded in pages. This would disable OpenCast links for example
 }
 ```
 
@@ -39,11 +41,7 @@ And your courses will be synced into the ``basedir`` you specified (default is t
 	<img src="https://user-images.githubusercontent.com/8593000/100927819-af694900-34e5-11eb-9219-3ba0ded57ad4.png" width="49%" />
 </p>
 
-You need to install the requirements as before:
-```bash
-pip3 install -r requirements.txt
-```
-Now run
+Run
 ```bash
 ./gui.py
 ```
@@ -61,7 +59,9 @@ Run
 You can override the fields in the config file by using command line arguments:
 
 ```
-usage: syncMyMoodle.py [-h] [--secretservice] [--user USER] [--password PASSWORD] [--config CONFIG] [--cookiefile COOKIEFILE] [--courses COURSES] [--semester SEMESTER] [--basedir BASEDIR]
+usage: syncMyMoodle.py [-h] [--secretservice] [--user USER] [--password PASSWORD] [--config CONFIG]
+                       [--cookiefile COOKIEFILE] [--courses COURSES] [--skipcourses SKIPCOURSES]
+                       [--semester SEMESTER] [--basedir BASEDIR] [--nolinks]
 
 Synchronization client for RWTH Moodle. All optional arguments override those in config.json.
 
@@ -73,9 +73,14 @@ optional arguments:
   --config CONFIG       The path to the config file
   --cookiefile COOKIEFILE
                         The location of the cookie file
-  --courses COURSES     Only these courses will be synced (comma seperated links) (if empty, all courses will be synced)
-  --semester SEMESTER   Only these semesters will be synced, of the form 20ws (comma seperated) (only used if [courses] is empty, if empty all semesters will be synced)
+  --courses COURSES     Only these courses will be synced (comma seperated links) (if empty, all courses will be
+                        synced)
+  --skipcourses SKIPCOURSES
+                        These courses will NOT be synced (comma seperated links)
+  --semester SEMESTER   Only these semesters will be synced, of the form 20ws (comma seperated) (only used if
+                        [courses] is empty, if empty all semesters will be synced)
   --basedir BASEDIR     The base directory where all files will be synced to
+  --nolinks             Wether to not inspect links embedded in pages
 ```
 
 # FreeDesktop.org Secret Service integration

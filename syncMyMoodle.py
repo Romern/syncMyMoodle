@@ -67,15 +67,15 @@ class SyncMyMoodle:
 			return re.findall("sesskey=([a-zA-Z0-9]*)", session_key)[0]
 
 		self.session = requests.Session()
-		if os.path.exists(self.config["cookie_file"]):
-			with open(self.config["cookie_file"], 'rb') as f:
+		if os.path.exists(self.config.get("cookie_file", "./session")):
+			with open(self.config.get("cookie_file", "./session"), 'rb') as f:
 				self.session.cookies.update(pickle.load(f))
 		resp = self.session.get("https://moodle.rwth-aachen.de/")
 		resp = self.session.get("https://moodle.rwth-aachen.de/auth/shibboleth/index.php")
 		if resp.url == "https://moodle.rwth-aachen.de/my/":
 			soup = bs(resp.text, features="html.parser")
 			self.session_key = get_session_key(soup)
-			with open(self.config["cookie_file"], 'wb') as f:
+			with open(self.config.get("cookie_file", "./session"), 'wb') as f:
 				pickle.dump(self.session.cookies, f)
 			return
 		soup = bs(resp.text, features="html.parser")
@@ -88,7 +88,7 @@ class SyncMyMoodle:
 		data = {"RelayState": soup.find("input",{"name": "RelayState"})["value"], 
 				"SAMLResponse": soup.find("input",{"name": "SAMLResponse"})["value"]}
 		resp = self.session.post("https://moodle.rwth-aachen.de/Shibboleth.sso/SAML2/POST", data=data)
-		with open(self.config["cookie_file"], 'wb') as f:
+		with open(self.config.get("cookie_file", "./session"), 'wb') as f:
 			soup = bs(resp.text, features="html.parser")
 			self.session_key = get_session_key(soup)
 			pickle.dump(self.session.cookies, f)
@@ -243,13 +243,16 @@ class SyncMyMoodle:
 			course_name = course["shortname"]
 			course_id = course["id"]
 
+			if len([c for c in self.config.get("skip_courses",[]) if str(course_id) in c])>0:
+				continue
+
 			# Skip not selected courses
-			if len(self.config["selected_courses"])>0 and len([c for c in self.config["selected_courses"] if str(course["id"]) in c])==0:
+			if len(self.config.get("selected_courses",[]))>0 and len([c for c in self.config.get("selected_courses",[]) if str(course["id"]) in c])==0:
 				continue
 
 			semestername = course["idnumber"][:4]
 			# Skip not selected semesters
-			if len(self.config["selected_courses"])==0 and self.config["only_sync_semester"] and semestername not in self.config["only_sync_semester"]:
+			if len(self.config.get("selected_courses",[]))==0 and self.config.get("only_sync_semester",[]) and semestername not in self.config.get("only_sync_semester",[]):
 				continue
 
 			semester_node = [s for s in self.root_node.children if s.name==semestername]
@@ -358,7 +361,7 @@ class SyncMyMoodle:
 			self._download_all_files(child)
 
 	def get_sanitized_node_path(self, node):
-		path_temp = [os.path.expanduser(self.config["basedir"])] + [self.sanitize(p) for p in node.get_path()]
+		path_temp = [os.path.expanduser(self.config.get("basedir","./"))] + [self.sanitize(p) for p in node.get_path()]
 		return os.path.join(*path_temp)
 
 	def sanitize(self, path):
@@ -460,7 +463,7 @@ class SyncMyMoodle:
 					parent_node.add_child(filename, None, "Linked file", url=text)
 					# instantly return as it was a direct link
 					return
-				else:
+				elif not self.config.get("nolinks"):
 					response = self.session.get(text)
 					tempsoup = bs(response.text, features="html.parser")
 					videojs = tempsoup.select_one(".video-js")
@@ -477,15 +480,18 @@ class SyncMyMoodle:
 				traceback.print_exc()
 				print(f'Error while downloading url {text}: {e}')
 
+		if self.config.get("nolinks"):
+			return
+
 		# Youtube videos
 		youtube_links = re.findall("https://www.youtube.com/embed/.{11}", text)
 		for l in youtube_links:
-			parent_node.add_child(f"Youtube: {module_title if module_title else l}", l, "Youtube", url=l)
+			parent_node.add_child(f"Youtube: {module_title or l}", l, "Youtube", url=l)
 
 		# OpenCast videos
 		opencast_links = re.findall("https://engage.streaming.rwth-aachen.de/play/[a-f0-9\-]+", text)
 		for vid in opencast_links:
-			parent_node.add_child(f"Opencast: {module_title if module_title else vid}", vid, "Opencast", url=vid, additional_info=course_id)
+			parent_node.add_child(f"Opencast: {module_title or vid}", vid, "Opencast", url=vid, additional_info=course_id)
 
 		#https://rwth-aachen.sciebo.de/s/XXX
 		sciebo_links = re.findall("https://rwth-aachen.sciebo.de/s/[a-f0-9\-]+", text)
@@ -512,8 +518,10 @@ if __name__ == '__main__':
 	parser.add_argument('--config', default="config.json", help="The path to the config file")
 	parser.add_argument('--cookiefile', default=None, help="The location of the cookie file")
 	parser.add_argument('--courses', default=None, help="Only these courses will be synced (comma seperated links) (if empty, all courses will be synced)")
+	parser.add_argument('--skipcourses', default=None, help="These courses will NOT be synced (comma seperated links)")
 	parser.add_argument('--semester', default=None, help="Only these semesters will be synced, of the form 20ws (comma seperated) (only used if [courses] is empty, if empty all semesters will be synced)")
 	parser.add_argument('--basedir', default=None, help="The base directory where all files will be synced to")
+	parser.add_argument('--nolinks', action='store_true', help="Wether to not inspect links embedded in pages")
 	args = parser.parse_args()
 
 	if os.path.exists(args.config):
@@ -521,13 +529,15 @@ if __name__ == '__main__':
 
 	config["user"] = args.user or config.get("user")
 	config["password"] = args.password or config.get("password")
-	config["cookie_file"] = args.cookiefile or config.get("cookie_file") or "./session"
-	config["selected_courses"] = args.courses.split(",") if args.courses else config.get("selected_courses") or []
-	config["only_sync_semester"] = args.semester.split(",") if args.semester else config.get("only_sync_semester") or []
-	config["basedir"] = args.basedir or config.get("basedir") or "./"
+	config["cookie_file"] = args.cookiefile or config.get("cookie_file","./session")
+	config["selected_courses"] = args.courses.split(",") if args.courses else config.get("selected_courses",[])
+	config["only_sync_semester"] = args.semester.split(",") if args.semester else config.get("only_sync_semester",[])
+	config["basedir"] = args.basedir or config.get("basedir","./")
 	config["use_secret_service"] = (args.secretservice if has_secretstorage else None) or config.get("use_secret_service")
+	config["skip_courses"] = args.skipcourses.split(",") if args.skipcourses else config.get("skip_courses",[])
+	config["nolinks"] = args.nolinks or config.get("no_links")
 
-	if has_secretstorage and config["use_secret_service"]:
+	if has_secretstorage and config.get("use_secret_service"):
 		if not args.user and not config.get("user"):
 			print("You need to provide your username in the config file or through --user!")
 			exit(1)
