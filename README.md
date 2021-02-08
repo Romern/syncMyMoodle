@@ -25,31 +25,12 @@ Copy ``config.json.example`` to ``config.json`` and adjust the settings:
     "password": "", //Your RWTH SSO password (not needed if you use secret service)
     "basedir": "./", //The base directory where all files will be synced to
     "cookie_file": "./session", //The location of the cookie file,
-    "login_at_start": false, //Login automatically when starting the GUI
-    "synchronize_at_start": false, //Synchronize automatically when starting the GUI
-    "close_after_synchronization": false, //Close automatically after synchronizing when starting the GUI
     "use_secret_service": false, //Use the secret service integration (requires the secretstorage pip module)
     "no_links": false //Skip links embedded in pages. This would disable OpenCast links for example
 }
 ```
 
 And your courses will be synced into the ``basedir`` you specified (default is the current directory). Your cookies will be stored in a session file.
-
-# GUI usage
-<p float="left">
-	<img src="https://user-images.githubusercontent.com/8593000/100927817-ae381c00-34e5-11eb-9ee8-9a1042b05760.png" width="49%" />
-	<img src="https://user-images.githubusercontent.com/8593000/100927819-af694900-34e5-11eb-9219-3ba0ded57ad4.png" width="49%" />
-</p>
-
-Run
-```bash
-./gui.py
-```
-
-Before syncing, you have to edit the Settings. You have to set your RWTH Login and maybe change your Download Directory. To choose the Semester you have to edit the ``config.json`` manually.
-When you are logged in you have to press ``Update`` in the File Browser Tab and then ``Download`` to Download the Files.
-
-Choosing which Files you want to download, is currently not implemented yet.
 
 # CLI usage
 Run
