@@ -294,9 +294,12 @@ class SyncMyMoodle:
 									file_node = assignment_node.add_child(c["filename"], c["fileurl"], "Assignment File", url=c["fileurl"])
 
 						## Get Resources or URLs
-						if module["modname"] in ["resource", "url"]:
+						if module["modname"] in ["resource", "url", "book"]:
 							for c in module.get("contents",[]):
-								self.scanForLinks(c["fileurl"], section_node, course_id, single=True)
+								if c["fileurl"]:
+									if module["modname"] == "book":
+										c["fileurl"] = c["fileurl"].replace("webservice/pluginfile.php","tokenpluginfile.php/" + self.user_private_access_key)
+									self.scanForLinks(c["fileurl"], section_node, course_id, single=True)
 
 						## Get Folders
 						if module["modname"] == "folder":
@@ -479,7 +482,6 @@ class SyncMyMoodle:
 				# Maybe the url is down?
 				traceback.print_exc()
 				print(f'Error while downloading url {text}: {e}')
-
 		if self.config.get("nolinks"):
 			return
 
@@ -489,12 +491,12 @@ class SyncMyMoodle:
 			parent_node.add_child(f"Youtube: {module_title or l}", l, "Youtube", url=l)
 
 		# OpenCast videos
-		opencast_links = re.findall("https://engage.streaming.rwth-aachen.de/play/[a-f0-9\-]+", text)
+		opencast_links = re.findall("https://engage.streaming.rwth-aachen.de/play/[a-zA-Z0-9\-]+", text)
 		for vid in opencast_links:
 			parent_node.add_child(f"Opencast: {module_title or vid}", vid, "Opencast", url=vid, additional_info=course_id)
 
 		#https://rwth-aachen.sciebo.de/s/XXX
-		sciebo_links = re.findall("https://rwth-aachen.sciebo.de/s/[a-f0-9\-]+", text)
+		sciebo_links = re.findall("https://rwth-aachen.sciebo.de/s/[a-zA-Z0-9\-]+", text)
 		for vid in sciebo_links:
 			response = self.session.get(vid)
 			soup = bs(response.text, features="html.parser")
