@@ -9,7 +9,7 @@ Downloads the following materials:
 * Pages and Labels: Embedded Opencast and Youtube Videos
 
 # Setup
-Initially you need to install the requirements:
+Initially you need to install the requirements (**Python version >=3.6 is needed.**):
 ```bash
 pip3 install -r requirements.txt
 ```
