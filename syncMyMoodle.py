@@ -275,7 +275,7 @@ class SyncMyMoodle:
 				for module in section["modules"]:
 					try:
 						## Get Assignments
-						if module["modname"] == "assign":
+						if module["modname"] == "assign" and config.get("used_modules",{}).get("assign",{}):
 							if assignments == None:
 								continue
 							ass = [a for a in assignments.get("assignments") if a["cmid"] == module["id"]]
@@ -295,6 +295,8 @@ class SyncMyMoodle:
 
 						## Get Resources or URLs
 						if module["modname"] in ["resource", "url", "book"]:
+							if module["modname"] == "resource" and not config.get("used_modules",{}).get("resource",{}):
+								continue
 							for c in module.get("contents",[]):
 								if c["fileurl"]:
 									if module["modname"] == "book":
@@ -302,7 +304,7 @@ class SyncMyMoodle:
 									self.scanForLinks(c["fileurl"], section_node, course_id, single=True)
 
 						## Get Folders
-						if module["modname"] == "folder":
+						if module["modname"] == "folder" and config.get("used_modules",{}).get("folder",{}):
 							folder_node = section_node.add_child(module["name"], module["id"], "Folder")
 
 							# Scan intro for links
@@ -321,7 +323,7 @@ class SyncMyMoodle:
 									file_node = folder_node.add_child(c["filename"], c["fileurl"], "Folder File", url=c["fileurl"])
 
 						## Get embedded videos in pages or labels
-						if module["modname"] in ["page","label"]:
+						if module["modname"] in ["page","label"] and config.get("used_modules",{}).get("url",{}):
 							if module["modname"] == "page":
 								self.scanForLinks(module["url"], section_node, course_id, module_title=module["name"], single=True)
 							else:
@@ -383,6 +385,9 @@ class SyncMyMoodle:
 		downloadpathparent = self.get_sanitized_node_path(node.parent)
 
 		if os.path.exists(downloadpath):
+			return True
+
+		if len(node.name.split("."))>0 and node.name.split(".")[-1] in config.get("exclude_filetypes",[]):
 			return True
 
 		url = node.url.replace("webservice/pluginfile.php","tokenpluginfile.php/" + self.user_private_access_key)
@@ -486,24 +491,27 @@ class SyncMyMoodle:
 			return
 
 		# Youtube videos
-		youtube_links = re.findall("https://www.youtube.com/embed/.{11}", text)
-		for l in youtube_links:
-			parent_node.add_child(f"Youtube: {module_title or l}", l, "Youtube", url=l)
+		if config.get("used_modules",{}).get("url",{}).get("youtube",{}):
+			youtube_links = re.findall("https://www.youtube.com/embed/.{11}", text)
+			for l in youtube_links:
+				parent_node.add_child(f"Youtube: {module_title or l}", l, "Youtube", url=l)
 
 		# OpenCast videos
-		opencast_links = re.findall("https://engage.streaming.rwth-aachen.de/play/[a-zA-Z0-9\-]+", text)
-		for vid in opencast_links:
-			parent_node.add_child(f"Opencast: {module_title or vid}", vid, "Opencast", url=vid, additional_info=course_id)
+		if config.get("used_modules",{}).get("url",{}).get("opencast",{}):
+			opencast_links = re.findall("https://engage.streaming.rwth-aachen.de/play/[a-zA-Z0-9\-]+", text)
+			for vid in opencast_links:
+				parent_node.add_child(f"Opencast: {module_title or vid}", vid, "Opencast", url=vid, additional_info=course_id)
 
 		#https://rwth-aachen.sciebo.de/s/XXX
-		sciebo_links = re.findall("https://rwth-aachen.sciebo.de/s/[a-zA-Z0-9\-]+", text)
-		for vid in sciebo_links:
-			response = self.session.get(vid)
-			soup = bs(response.text, features="html.parser")
-			url = soup.find("input",{"name": "downloadURL"})
-			filename = soup.find("input",{"name": "filename"})
-			if url and filename:
-				parent_node.add_child(filename["value"], url["value"], "Sciebo file", url=url["value"])
+		if config.get("used_modules",{}).get("url",{}).get("sciebo",{}):
+			sciebo_links = re.findall("https://rwth-aachen.sciebo.de/s/[a-zA-Z0-9\-]+", text)
+			for vid in sciebo_links:
+				response = self.session.get(vid)
+				soup = bs(response.text, features="html.parser")
+				url = soup.find("input",{"name": "downloadURL"})
+				filename = soup.find("input",{"name": "filename"})
+				if url and filename:
+					parent_node.add_child(filename["value"], url["value"], "Sciebo file", url=url["value"])
 
 if __name__ == '__main__':
 	try:
@@ -524,6 +532,7 @@ if __name__ == '__main__':
 	parser.add_argument('--semester', default=None, help="Only these semesters will be synced, of the form 20ws (comma seperated) (only used if [courses] is empty, if empty all semesters will be synced)")
 	parser.add_argument('--basedir', default=None, help="The base directory where all files will be synced to")
 	parser.add_argument('--nolinks', action='store_true', help="Wether to not inspect links embedded in pages")
+	parser.add_argument('--excludefiletypes', default=None, help="Exclude downloading files from urls with these extensions (comma seperated types, e.g. \"mp4,mkv\")")
 	args = parser.parse_args()
 
 	if os.path.exists(args.config):
@@ -538,6 +547,8 @@ if __name__ == '__main__':
 	config["use_secret_service"] = (args.secretservice if has_secretstorage else None) or config.get("use_secret_service")
 	config["skip_courses"] = args.skipcourses.split(",") if args.skipcourses else config.get("skip_courses",[])
 	config["nolinks"] = args.nolinks or config.get("no_links")
+	config["used_modules"] = config.get("used_modules")
+	config["exclude_filetypes"] = args.excludefiletypes.split(",") if args.excludefiletypes else config.get("exclude_filetypes")
 
 	if has_secretstorage and config.get("use_secret_service"):
 		if not args.user and not config.get("user"):

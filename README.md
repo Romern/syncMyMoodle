@@ -26,7 +26,18 @@ Copy ``config.json.example`` to ``config.json`` and adjust the settings:
     "basedir": "./", //The base directory where all files will be synced to
     "cookie_file": "./session", //The location of the cookie file,
     "use_secret_service": false, //Use the secret service integration (requires the secretstorage pip module)
-    "no_links": false //Skip links embedded in pages. This would disable OpenCast links for example
+    "no_links": false, //Skip links embedded in pages. This would disable OpenCast links for example
+    "used_modules": { //Disable downloading certain modules
+        "assign": true, //Assignments
+        "resource": true, //Resources
+        "url": {
+            "youtube": true, //Youtube Links/Embeds
+            "opencast": true, //Opencast Links/Embeds
+            "sciebo": true //Sciebo Links/Embeds
+        },
+        "folder": true, //Folders
+    },
+    "exclude_filetypes": [] //Exclude specific filetypes, e.g. ["mp4","mkv"] do disable downloading most videos
 }
 ```
 

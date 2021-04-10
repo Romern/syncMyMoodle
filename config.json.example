@@ -6,9 +6,17 @@
     "password": "",
     "basedir": "./",
     "cookie_file": "./session",
-    "login_at_start": false,
-    "synchronize_at_start": false,
-    "close_after_synchronization": false,
     "use_secret_service": false,
-    "no_links": false
+    "no_links": false,
+    "used_modules": {
+        "assign": true,
+        "resource": true,
+        "url": {
+            "youtube": true,
+            "opencast": true,
+            "sciebo": true
+        },
+        "folder": true
+    },
+    "exclude_filetypes": []
 }
