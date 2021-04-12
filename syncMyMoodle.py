@@ -557,7 +557,7 @@ if __name__ == '__main__':
         },
         "folder": True
     }
-	config["exclude_filetypes"] = args.excludefiletypes.split(",") if args.excludefiletypes else config.get("exclude_filetypes")
+	config["exclude_filetypes"] = args.excludefiletypes.split(",") if args.excludefiletypes else config.get("exclude_filetypes",[])
 
 	if has_secretstorage and config.get("use_secret_service"):
 		if not args.user and not config.get("user"):
