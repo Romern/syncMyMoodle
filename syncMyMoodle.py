@@ -547,7 +547,16 @@ if __name__ == '__main__':
 	config["use_secret_service"] = (args.secretservice if has_secretstorage else None) or config.get("use_secret_service")
 	config["skip_courses"] = args.skipcourses.split(",") if args.skipcourses else config.get("skip_courses",[])
 	config["nolinks"] = args.nolinks or config.get("no_links")
-	config["used_modules"] = config.get("used_modules")
+	config["used_modules"] = config.get("used_modules") or {
+        "assign": True,
+        "resource": True,
+        "url": {
+            "youtube": True,
+            "opencast": True,
+            "sciebo": True
+        },
+        "folder": True
+    }
 	config["exclude_filetypes"] = args.excludefiletypes.split(",") if args.excludefiletypes else config.get("exclude_filetypes")
 
 	if has_secretstorage and config.get("use_secret_service"):
