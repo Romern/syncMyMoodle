@@ -307,12 +307,12 @@ class SyncMyMoodle:
 									file_node = assignment_node.add_child(c["filename"], c["fileurl"], "Assignment File", url=c["fileurl"])
 
 						## Get Resources or URLs
-						if module["modname"] in ["resource", "url", "book"]:
+						if module["modname"] in ["resource", "url", "book", "page"]:
 							if module["modname"] == "resource" and not config.get("used_modules",{}).get("resource",{}):
 								continue
 							for c in module.get("contents",[]):
 								if c["fileurl"]:
-									if module["modname"] == "book":
+									if module["modname"] in ["book","page"]:
 										c["fileurl"] = c["fileurl"].replace("webservice/pluginfile.php","tokenpluginfile.php/" + self.user_private_access_key)
 									self.scanForLinks(c["fileurl"], section_node, course_id, single=True)
 
