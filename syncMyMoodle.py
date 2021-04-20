@@ -266,12 +266,25 @@ class SyncMyMoodle:
 			print(f"Syncing {course_name}...")
 			assignments = self.get_assignment(course_id)
 			folders = self.get_folders_by_courses(course_id)
+
+			if config.get("verbose"):
+				print("-----------------------")
+				print("------{semestername} - {course_name}------")
+				print("------COURSE-DATA------")
+				print(json.dumps(course))
+				print("------ASSIGNMENT-DATA------")
+				print(json.dumps(assignments))
+				print("------FOLDER-DATA------")
+				print(json.dumps(folders))
+
 			for section in self.get_course(course_id):
 				if isinstance(section, str):
 					print(f"Error syncing section in {course_name}: {section}")
 					continue
+				if config.get("verbose"):
+					print("------SECTION-DATA------")
+					print(json.dumps(section))
 				section_node = course_node.add_child(section["name"], section["id"], "Section")
-
 				for module in section["modules"]:
 					try:
 						## Get Assignments
@@ -533,6 +546,7 @@ if __name__ == '__main__':
 	parser.add_argument('--basedir', default=None, help="The base directory where all files will be synced to")
 	parser.add_argument('--nolinks', action='store_true', help="Wether to not inspect links embedded in pages")
 	parser.add_argument('--excludefiletypes', default=None, help="Exclude downloading files from urls with these extensions (comma seperated types, e.g. \"mp4,mkv\")")
+	parser.add_argument('--verbose', action='store_true', help="Verbose output for debugging.")
 	args = parser.parse_args()
 
 	if os.path.exists(args.config):
@@ -558,6 +572,7 @@ if __name__ == '__main__':
         "folder": True
     }
 	config["exclude_filetypes"] = args.excludefiletypes.split(",") if args.excludefiletypes else config.get("exclude_filetypes",[])
+	config["verbose"] = args.verbose
 
 	if has_secretstorage and config.get("use_secret_service"):
 		if not args.user and not config.get("user"):
