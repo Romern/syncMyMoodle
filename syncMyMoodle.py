@@ -201,6 +201,10 @@ class SyncMyMoodle:
 
 		response = self.session.post('https://moodle.rwth-aachen.de/webservice/rest/server.php', params=params, data=data)
 
+		if config.get("verbose"):
+			print("------ASSIGNMENT-{assignment_id}-DATA------")
+			print(response.text)
+
 		files = response.json().get("lastattempt",{}).get("submission",{}).get("plugins",[])
 		files += response.json().get("lastattempt",{}).get("teamsubmission",{}).get("plugins",[])
 		files += response.json().get("feedback",{}).get("plugins",[])
