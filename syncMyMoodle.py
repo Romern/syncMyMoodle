@@ -209,7 +209,7 @@ class SyncMyMoodle:
 		files += response.json().get("lastattempt",{}).get("teamsubmission",{}).get("plugins",[])
 		files += response.json().get("feedback",{}).get("plugins",[])
 
-		files = [f.get("files",[]) for p in files for f in p.get("fileareas",[]) if f["area"] in ["download","submission_files"]]
+		files = [f.get("files",[]) for p in files for f in p.get("fileareas",[]) if f["area"] in ["download","submission_files","feedback_files"]]
 		files = [f for folder in files for f in folder]
 		return files
 
