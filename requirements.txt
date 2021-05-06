@@ -1,4 +1,4 @@
 requests
 beautifulsoup4
-youtube_dl
+youtube_dl>=2021.4.26
 tqdm
