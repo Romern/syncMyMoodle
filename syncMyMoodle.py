@@ -16,6 +16,18 @@ from tqdm import tqdm
 from argparse import ArgumentParser
 import getpass
 
+import pkg_resources
+from pkg_resources import DistributionNotFound, VersionConflict
+
+dependencies = open('requirements.txt', 'r')
+# Check if dependencies unmet
+try:
+	pkg_resources.require(dependencies)
+except (DistributionNotFound, VersionConflict) as e:
+	print(f"Requirements error in: {e}")
+	print("Please rerun 'pip install -r requirements.txt' to meet all requirements.")
+	quit()
+
 class Node:
 	def __init__(self, name, id, type, parent, url=None, additional_info=None, is_downloaded=False):
 		self.name = name
