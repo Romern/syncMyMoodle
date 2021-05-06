@@ -363,21 +363,30 @@ class SyncMyMoodle:
 
 	def _download_all_files(self, cur_node):
 		if len(cur_node.children) == 0:
-			try:
-				if cur_node.url and not cur_node.is_downloaded:
-					if cur_node.type == "Youtube":
+			if cur_node.url and not cur_node.is_downloaded:
+				if cur_node.type == "Youtube":
+					try:
 						self.scanAndDownloadYouTube(cur_node)
 						cur_node.is_downloaded = True
-					elif cur_node.type == "Opencast":
+					except Exception as e:
+						traceback.print_exc()
+						print(f"Failed to download the module {cur_node}: {e}")
+						print("This could be caused by an out of date youtube-dl version. Try upgrading youtube-dl through pip or your package manager.")
+				elif cur_node.type == "Opencast":
+					try:
 						self.downloadOpenCastVideos(cur_node)
 						cur_node.is_downloaded = True
-					else:
+					except Exception as e:
+						traceback.print_exc()
+						print(f"Failed to download the module {cur_node}: {e}")
+				else:
+					try:
 						self.download_file(cur_node)
 						cur_node.is_downloaded = True
-				return
-			except Exception as e:
-				traceback.print_exc()
-				print(f"Failed to download the module {cur_node}: {e}")
+					except Exception as e:
+						traceback.print_exc()
+						print(f"Failed to download the module {cur_node}: {e}")
+			return
 
 		for child in cur_node.children:
 			self._download_all_files(child)
