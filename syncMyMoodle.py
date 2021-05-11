@@ -499,11 +499,12 @@ class SyncMyMoodle:
 		# A single link is supplied and the contents of it are checked
 		if single:
 			try:
+				text = text.replace("webservice/pluginfile.php","tokenpluginfile.php/" + self.user_private_access_key)
 				response = self.session.head(text)
 				if "Content-Type" in response.headers and "text/html" not in response.headers["Content-Type"]:
 					# non html links, assume the filename is in the path
 					filename = urllib.parse.urlsplit(text).path.split("/")[-1]
-					parent_node.add_child(filename, None, "Linked file", url=text)
+					parent_node.add_child(filename, None, f'Linked file [{response.headers["Content-Type"]}]', url=text)
 					# instantly return as it was a direct link
 					return
 				elif not self.config.get("nolinks"):
