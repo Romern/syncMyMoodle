@@ -502,6 +502,11 @@ class SyncMyMoodle:
 				text = text.replace("webservice/pluginfile.php","tokenpluginfile.php/" + self.user_private_access_key)
 				response = self.session.head(text)
 				if "Content-Type" in response.headers and "text/html" not in response.headers["Content-Type"]:
+					# maybe a link to a youtube playlist, see #40
+					if "www.youtube.com/playlist" in text:
+						parent_node.add_child(f"Youtube: {module_title or text}", text, "Youtube", url=text)
+						return
+
 					# non html links, assume the filename is in the path
 					filename = urllib.parse.urlsplit(text).path.split("/")[-1]
 					parent_node.add_child(filename, None, f'Linked file [{response.headers["Content-Type"]}]', url=text)
