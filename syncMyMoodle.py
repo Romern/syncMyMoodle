@@ -345,6 +345,15 @@ class SyncMyMoodle:
 								self.scanForLinks(module["url"], section_node, course_id, module_title=module["name"], single=True)
 							else:
 								self.scanForLinks(module.get("description",""), section_node, course_id, module_title=module["name"])
+
+						## New OpenCast integration
+						if module["modname"] == "lti" and config.get("used_modules",{}).get("url",{}).get("opencast",{}):
+							info_url = f'https://moodle.rwth-aachen.de/mod/lti/launch.php?id={module["id"]}&triggerview=0'
+							info_res = bs(self.session.get(info_url).text,features="html.parser")
+							# FIXME: For now we assume that all lti modules will lead to an opencast video
+							engage_id = info_res.find("input",{"name": "custom_id"}).get("value")
+							name = info_res.find("input",{"name": "resource_link_title"}).get("value")
+							section_node.add_child(f"Opencast: {engage_id}", name, "Opencast", url=f"https://engage.streaming.rwth-aachen.de/play/{engage_id}", additional_info=course_id)
 					except Exception as e:
 						traceback.print_exc()
 						print(f"Failed to download the module {module}: {e}")
