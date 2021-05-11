@@ -527,7 +527,7 @@ class SyncMyMoodle:
 
 		# Youtube videos
 		if config.get("used_modules",{}).get("url",{}).get("youtube",{}):
-			if single and "youtube.com" in text and "youtu.be" in text:
+			if single and "youtube.com" in text or "youtu.be" in text:
 				youtube_links = [text]
 			else:
 				youtube_links = re.findall("https://www.youtube.com/embed/.{11}", text)
