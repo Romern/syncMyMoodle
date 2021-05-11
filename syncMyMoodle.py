@@ -517,7 +517,7 @@ class SyncMyMoodle:
 							link = urllib.parse.urljoin(f'{parsed.scheme}://{parsed.netloc}/{parsed.path}', videojs["src"])
 							parent_node.add_child(videojs["src"].split("/")[-1], None, "Embedded videojs", url=link)
 					# further inspect the response for other links
-					text = response.text
+					self.scanForLinks(response.text, parent_node, course_id, module_title=module_title, single=False)
 			except Exception as e:
 				# Maybe the url is down?
 				traceback.print_exc()
@@ -527,7 +527,10 @@ class SyncMyMoodle:
 
 		# Youtube videos
 		if config.get("used_modules",{}).get("url",{}).get("youtube",{}):
-			youtube_links = re.findall("https://www.youtube.com/embed/.{11}", text)
+			if single and "youtube.com" in text and "youtu.be" in text:
+				youtube_links = [text]
+			else:
+				youtube_links = re.findall("https://www.youtube.com/embed/.{11}", text)
 			for l in youtube_links:
 				parent_node.add_child(f"Youtube: {module_title or l}", l, "Youtube", url=l)
 
