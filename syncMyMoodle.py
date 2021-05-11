@@ -435,7 +435,7 @@ class SyncMyMoodle:
 			header = dict()
 
 		with closing(self.session.get(url, headers=header, stream=True)) as response:
-			print(f"Downloading {downloadpath}")
+			print(f"Downloading {downloadpath} [{node.type}]")
 			total_size_in_bytes = int(response.headers.get('content-length', 0)) + resume_size
 			progress_bar = tqdm(total=total_size_in_bytes, unit='iB', unit_scale=True)
 			if resume_size:
