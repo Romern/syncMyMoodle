@@ -501,7 +501,10 @@ class SyncMyMoodle:
 			try:
 				text = text.replace("webservice/pluginfile.php","tokenpluginfile.php/" + self.user_private_access_key)
 				response = self.session.head(text)
-				if "Content-Type" in response.headers and "text/html" not in response.headers["Content-Type"]:
+				if "youtube.com" in text or "youtu.be" in text:
+					# workaround for youtube providing bad headers when using HEAD
+					pass
+				elif "Content-Type" in response.headers and "text/html" not in response.headers["Content-Type"]:
 					# non html links, assume the filename is in the path
 					filename = urllib.parse.urlsplit(text).path.split("/")[-1]
 					parent_node.add_child(filename, None, f'Linked file [{response.headers["Content-Type"]}]', url=text)
