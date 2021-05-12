@@ -85,6 +85,12 @@ class SyncMyMoodle:
 					'_eventId_proceed': ''}
 			resp2 = self.session.post(resp.url,data=data)
 			soup = bs(resp2.text, features="html.parser")
+		if soup.find("input",{"name": "RelayState"}) is None:
+			print(f"Failed to login! Maybe your login-info was wrong or the RWTH-Servers have difficulties, see https://maintenance.rz.rwth-aachen.de/ticket/status/messages . For more info use the --verbose argument.")
+			if config.get("verbose"):
+				print("-------Login-Error-Soup--------")
+				print(soup)
+			exit(1)
 		data = {"RelayState": soup.find("input",{"name": "RelayState"})["value"], 
 				"SAMLResponse": soup.find("input",{"name": "SAMLResponse"})["value"]}
 		resp = self.session.post("https://moodle.rwth-aachen.de/Shibboleth.sso/SAML2/POST", data=data)
