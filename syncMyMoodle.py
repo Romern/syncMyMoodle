@@ -87,7 +87,7 @@ class SyncMyMoodle:
 			soup = bs(resp2.text, features="html.parser")
 		if soup.find("input",{"name": "RelayState"}) is None:
 			print(f"Failed to login! Maybe your login-info was wrong or the RWTH-Servers have difficulties, see https://maintenance.rz.rwth-aachen.de/ticket/status/messages . For more info use the --verbose argument.")
-			if config.get("verbose"):
+			if self.config.get("verbose"):
 				print("-------Login-Error-Soup--------")
 				print(soup)
 			exit(1)
@@ -207,7 +207,7 @@ class SyncMyMoodle:
 
 		response = self.session.post('https://moodle.rwth-aachen.de/webservice/rest/server.php', params=params, data=data)
 
-		if config.get("verbose"):
+		if self.config.get("verbose"):
 			print("------ASSIGNMENT-{assignment_id}-DATA------")
 			print(response.text)
 
@@ -277,7 +277,7 @@ class SyncMyMoodle:
 			assignments = self.get_assignment(course_id)
 			folders = self.get_folders_by_courses(course_id)
 
-			if config.get("verbose"):
+			if self.config.get("verbose"):
 				print("-----------------------")
 				print("------{semestername} - {course_name}------")
 				print("------COURSE-DATA------")
@@ -291,14 +291,14 @@ class SyncMyMoodle:
 				if isinstance(section, str):
 					print(f"Error syncing section in {course_name}: {section}")
 					continue
-				if config.get("verbose"):
+				if self.config.get("verbose"):
 					print("------SECTION-DATA------")
 					print(json.dumps(section))
 				section_node = course_node.add_child(section["name"], section["id"], "Section")
 				for module in section["modules"]:
 					try:
 						## Get Assignments
-						if module["modname"] == "assign" and config.get("used_modules",{}).get("assign",{}):
+						if module["modname"] == "assign" and self.config.get("used_modules",{}).get("assign",{}):
 							if assignments == None:
 								continue
 							ass = [a for a in assignments.get("assignments") if a["cmid"] == module["id"]]
@@ -318,7 +318,7 @@ class SyncMyMoodle:
 
 						## Get Resources or URLs
 						if module["modname"] in ["resource", "url", "book", "page"]:
-							if module["modname"] == "resource" and not config.get("used_modules",{}).get("resource",{}):
+							if module["modname"] == "resource" and not self.config.get("used_modules",{}).get("resource",{}):
 								continue
 							for c in module.get("contents",[]):
 								if c["fileurl"]:
@@ -327,7 +327,7 @@ class SyncMyMoodle:
 									self.scanForLinks(c["fileurl"], section_node, course_id, single=True)
 
 						## Get Folders
-						if module["modname"] == "folder" and config.get("used_modules",{}).get("folder",{}):
+						if module["modname"] == "folder" and self.config.get("used_modules",{}).get("folder",{}):
 							folder_node = section_node.add_child(module["name"], module["id"], "Folder")
 
 							# Scan intro for links
@@ -346,14 +346,14 @@ class SyncMyMoodle:
 									file_node = folder_node.add_child(c["filename"], c["fileurl"], "Folder File", url=c["fileurl"])
 
 						## Get embedded videos in pages or labels
-						if module["modname"] in ["page","label"] and config.get("used_modules",{}).get("url",{}):
+						if module["modname"] in ["page","label"] and self.config.get("used_modules",{}).get("url",{}):
 							if module["modname"] == "page":
 								self.scanForLinks(module["url"], section_node, course_id, module_title=module["name"], single=True)
 							else:
 								self.scanForLinks(module.get("description",""), section_node, course_id, module_title=module["name"])
 
 						## New OpenCast integration
-						if module["modname"] == "lti" and config.get("used_modules",{}).get("url",{}).get("opencast",{}):
+						if module["modname"] == "lti" and self.config.get("used_modules",{}).get("url",{}).get("opencast",{}):
 							info_url = f'https://moodle.rwth-aachen.de/mod/lti/launch.php?id={module["id"]}&triggerview=0'
 							info_res = bs(self.session.get(info_url).text,features="html.parser")
 							# FIXME: For now we assume that all lti modules will lead to an opencast video
@@ -361,7 +361,7 @@ class SyncMyMoodle:
 							name = info_res.find("input",{"name": "resource_link_title"})
 							if not engage_id:
 								print("Failed to find custom_id on lti page.")
-								if config.get("verbose"):
+								if self.config.get("verbose"):
 									print("------LTI-ERROR-HTML------")
 									print(f"url: {info_url}")
 									print(info_res)
@@ -437,7 +437,7 @@ class SyncMyMoodle:
 		if os.path.exists(downloadpath):
 			return True
 
-		if len(node.name.split("."))>0 and node.name.split(".")[-1] in config.get("exclude_filetypes",[]):
+		if len(node.name.split("."))>0 and node.name.split(".")[-1] in self.config.get("exclude_filetypes",[]):
 			return True
 
 		url = node.url.replace("webservice/pluginfile.php","tokenpluginfile.php/" + self.user_private_access_key)
@@ -545,7 +545,7 @@ class SyncMyMoodle:
 			return
 
 		# Youtube videos
-		if config.get("used_modules",{}).get("url",{}).get("youtube",{}):
+		if self.config.get("used_modules",{}).get("url",{}).get("youtube",{}):
 			if single and "youtube.com" in text or "youtu.be" in text:
 				youtube_links = [text]
 			else:
@@ -554,13 +554,13 @@ class SyncMyMoodle:
 				parent_node.add_child(f"Youtube: {module_title or l}", l, "Youtube", url=l)
 
 		# OpenCast videos
-		if config.get("used_modules",{}).get("url",{}).get("opencast",{}):
+		if self.config.get("used_modules",{}).get("url",{}).get("opencast",{}):
 			opencast_links = re.findall("https://engage.streaming.rwth-aachen.de/play/[a-zA-Z0-9\-]+", text)
 			for vid in opencast_links:
 				parent_node.add_child(f"Opencast: {module_title or vid}", vid, "Opencast", url=vid, additional_info=course_id)
 
 		#https://rwth-aachen.sciebo.de/s/XXX
-		if config.get("used_modules",{}).get("url",{}).get("sciebo",{}):
+		if self.config.get("used_modules",{}).get("url",{}).get("sciebo",{}):
 			sciebo_links = re.findall("https://rwth-aachen.sciebo.de/s/[a-zA-Z0-9\-]+", text)
 			for vid in sciebo_links:
 				response = self.session.get(vid)
