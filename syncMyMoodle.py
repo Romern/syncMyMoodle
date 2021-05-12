@@ -473,7 +473,15 @@ class SyncMyMoodle:
 		response = self.session.post(f'https://moodle.rwth-aachen.de/lib/ajax/service.php?sesskey={self.session_key}&info=filter_opencast_get_lti_form', data=json.dumps(course_info))
 
 		# submit engage authentication info
-		engageDataSoup = bs(response.json()[0]["data"], features="html.parser")
+		try:
+			engageDataSoup = bs(response.json()[0]["data"], features="html.parser")
+		except Exception as e:
+			print("Failed to parse Opencast response!")
+			if self.config.get("verbose"):
+				print("------Opencast-Error------")
+				print(response.text)
+			raise e
+
 		engageData = dict([(i["name"], i["value"]) for i in engageDataSoup.findAll("input")])
 		response = self.session.post('https://engage.streaming.rwth-aachen.de/lti', data=engageData)
 
