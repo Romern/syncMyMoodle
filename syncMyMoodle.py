@@ -351,9 +351,18 @@ class SyncMyMoodle:
 							info_url = f'https://moodle.rwth-aachen.de/mod/lti/launch.php?id={module["id"]}&triggerview=0'
 							info_res = bs(self.session.get(info_url).text,features="html.parser")
 							# FIXME: For now we assume that all lti modules will lead to an opencast video
-							engage_id = info_res.find("input",{"name": "custom_id"}).get("value")
-							name = info_res.find("input",{"name": "resource_link_title"}).get("value")
-							section_node.add_child(f"Opencast: {engage_id}", name, "Opencast", url=f"https://engage.streaming.rwth-aachen.de/play/{engage_id}", additional_info=course_id)
+							engage_id = info_res.find("input",{"name": "custom_id"})
+							name = info_res.find("input",{"name": "resource_link_title"})
+							if not engage_id:
+								print("Failed to find custom_id on lti page.")
+								if config.get("verbose"):
+									print("------LTI-ERROR-HTML------")
+									print(f"url: {info_url}")
+									print(info_res)
+							else:
+								engage_id = engage_id.get("value")
+								name = name.get("value")
+								section_node.add_child(f"Opencast: {engage_id}", name, "Opencast", url=f"https://engage.streaming.rwth-aachen.de/play/{engage_id}", additional_info=course_id)
 					except Exception as e:
 						traceback.print_exc()
 						print(f"Failed to download the module {module}: {e}")
