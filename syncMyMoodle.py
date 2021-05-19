@@ -646,6 +646,8 @@ if __name__ == '__main__':
 			item = collection.create_item(f'{config["user"]}@rwth-aachen.de', attributes, password)
 		else:
 			item = results[0]
+		if item.is_locked():
+			item.unlock()
 		config["password"] = item.get_secret().decode("utf-8")
 
 	if not config.get("user") or not config.get("password"):
