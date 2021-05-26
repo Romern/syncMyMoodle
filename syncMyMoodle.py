@@ -317,7 +317,7 @@ class SyncMyMoodle:
 									file_node = assignment_node.add_child(c["filename"], c["fileurl"], "Assignment File", url=c["fileurl"])
 
 						## Get Resources or URLs
-						if module["modname"] in ["resource", "url", "book", "page"]:
+						if module["modname"] in ["resource", "url", "book", "page", "pdfannotator"]:
 							if module["modname"] == "resource" and not self.config.get("used_modules",{}).get("resource",{}):
 								continue
 							for c in module.get("contents",[]):
