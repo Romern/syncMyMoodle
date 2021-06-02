@@ -15,34 +15,34 @@ import urllib.parse
 from tqdm import tqdm
 from argparse import ArgumentParser
 import getpass
-
+import pdfkit
 
 class Node:
-    def __init__(self, name, id, type, parent, url=None, additional_info=None, is_downloaded=False):
-        self.name = name
-        self.id = id
-        self.url = url
-        self.type = type
-        self.parent = parent
-        self.children = []
-        self.additional_info = additional_info # Currently only used for course_id in opencast
-        self.is_downloaded = is_downloaded # Can also be used to exclude files from being downloaded
+	def __init__(self, name, id, type, parent, url=None, additional_info=None, is_downloaded=False):
+		self.name = name
+		self.id = id
+		self.url = url
+		self.type = type
+		self.parent = parent
+		self.children = []
+		self.additional_info = additional_info # Currently only used for course_id in opencast
+		self.is_downloaded = is_downloaded # Can also be used to exclude files from being downloaded
 
-    def __repr__(self):
-        return f'Node(name={self.name}, id={self.id}, url={self.url}, type={self.type})'
+	def __repr__(self):
+		return f'Node(name={self.name}, id={self.id}, url={self.url}, type={self.type})'
 
-    def add_child(self, name, id, type, url=None, additional_info=None):
-        temp = Node(name, id, type, self, url=url, additional_info=additional_info)
-        self.children.append(temp)
-        return temp
+	def add_child(self, name, id, type, url=None, additional_info=None):
+		temp = Node(name, id, type, self, url=url, additional_info=additional_info)
+		self.children.append(temp)
+		return temp
 
-    def get_path(self):
-        ret = []
-        cur = self
-        while cur != None:
-            ret.insert(0, cur.name)
-            cur = cur.parent
-        return ret
+	def get_path(self):
+		ret = []
+		cur = self
+		while cur != None:
+			ret.insert(0, cur.name)
+			cur = cur.parent
+		return ret
 
 class SyncMyMoodle:
 	params = {
@@ -352,7 +352,6 @@ class SyncMyMoodle:
 								self.scanForLinks(module["url"], section_node, course_id, module_title=module["name"], single=True)
 							else:
 								self.scanForLinks(module.get("description",""), section_node, course_id, module_title=module["name"])
-
 						## New OpenCast integration
 						if module["modname"] == "lti" and self.config.get("used_modules",{}).get("url",{}).get("opencast",{}):
 							info_url = f'https://moodle.rwth-aachen.de/mod/lti/launch.php?id={module["id"]}&triggerview=0'
@@ -370,6 +369,20 @@ class SyncMyMoodle:
 								engage_id = engage_id.get("value")
 								name = name.get("value")
 								section_node.add_child(f"Opencast: {engage_id}", name, "Opencast", url=f"https://engage.streaming.rwth-aachen.de/play/{engage_id}", additional_info=course_id)
+
+						if module["modname"] == "quiz":
+							info_url = f'https://moodle.rwth-aachen.de/mod/quiz/view.php?id={module["id"]}'
+							info_res = bs(self.session.get(info_url).text,features="html.parser")
+							# print(info_res)
+							attempts = info_res.findAll("a",{"title": "Überprüfung der eigenen Antworten dieses Versuchs"})
+							attempt_cnt = 0
+							for attempt in attempts:
+								attempt_cnt += 1
+								review_url = attempt.get("href")
+								quiz_res = bs(self.session.get(review_url).text,features="html.parser")
+								name = quiz_res.find("title").get_text().replace(": Überprüfung des Testversuchs", "") + ", Versuch " + str(attempt_cnt)
+								section_node.add_child(name, "quiz", "Quiz", url=review_url)
+
 					except Exception as e:
 						traceback.print_exc()
 						print(f"Failed to download the module {module}: {e}")
@@ -400,6 +413,13 @@ class SyncMyMoodle:
 				elif cur_node.type == "Opencast":
 					try:
 						self.downloadOpenCastVideos(cur_node)
+						cur_node.is_downloaded = True
+					except Exception as e:
+						traceback.print_exc()
+						print(f"Failed to download the module {cur_node}: {e}")
+				elif cur_node.type == "Quiz":
+					try:
+						self.downloadQuiz(cur_node)
 						cur_node.is_downloaded = True
 					except Exception as e:
 						traceback.print_exc()
@@ -519,6 +539,13 @@ class SyncMyMoodle:
 			ydl.download([link])
 		return True
 
+	def downloadQuiz(self, node):
+		path = self.get_sanitized_node_path(node.parent)
+		link = node.url
+		quiz_res = bs(self.session.get(link).text,features="html.parser");
+		pdfkit.from_url(self.session.get(link).text, "lol.pdf")
+		return True
+
 	def scanForLinks(self, text, parent_node, course_id, module_title=None, single=False):
 		# A single link is supplied and the contents of it are checked
 		if single:
@@ -580,41 +607,41 @@ class SyncMyMoodle:
 					parent_node.add_child(filename["value"], url["value"], "Sciebo file", url=url["value"])
 
 if __name__ == '__main__':
-    try:
-        import secretstorage
-        has_secretstorage = True
-    except:
-        has_secretstorage = False
+	try:
+		import secretstorage
+		has_secretstorage = True
+	except:
+		has_secretstorage = False
 
-    parser = ArgumentParser(description="Synchronization client for RWTH Moodle. All optional arguments override those in config.json.")
-    if has_secretstorage:
-        parser.add_argument('--secretservice',action='store_true', help="Use FreeDesktop.org Secret Service as storage/retrival for username/passwords.")
-    parser.add_argument('--user', default=None, help="Your RWTH SSO username")
-    parser.add_argument('--password', default=None, help="Your RWTH SSO password")
-    parser.add_argument('--config', default="config.json", help="The path to the config file")
-    parser.add_argument('--cookiefile', default=None, help="The location of the cookie file")
-    parser.add_argument('--courses', default=None, help="Only these courses will be synced (comma seperated links) (if empty, all courses will be synced)")
-    parser.add_argument('--skipcourses', default=None, help="These courses will NOT be synced (comma seperated links)")
-    parser.add_argument('--semester', default=None, help="Only these semesters will be synced, of the form 20ws (comma seperated) (only used if [courses] is empty, if empty all semesters will be synced)")
-    parser.add_argument('--basedir', default=None, help="The base directory where all files will be synced to")
-    parser.add_argument('--nolinks', action='store_true', help="Wether to not inspect links embedded in pages")
-    parser.add_argument('--excludefiletypes', default=None, help="Exclude downloading files from urls with these extensions (comma seperated types, e.g. \"mp4,mkv\")")
-    parser.add_argument('--verbose', action='store_true', help="Verbose output for debugging.")
-    args = parser.parse_args()
+	parser = ArgumentParser(description="Synchronization client for RWTH Moodle. All optional arguments override those in config.json.")
+	if has_secretstorage:
+		parser.add_argument('--secretservice',action='store_true', help="Use FreeDesktop.org Secret Service as storage/retrival for username/passwords.")
+	parser.add_argument('--user', default=None, help="Your RWTH SSO username")
+	parser.add_argument('--password', default=None, help="Your RWTH SSO password")
+	parser.add_argument('--config', default="config.json", help="The path to the config file")
+	parser.add_argument('--cookiefile', default=None, help="The location of the cookie file")
+	parser.add_argument('--courses', default=None, help="Only these courses will be synced (comma seperated links) (if empty, all courses will be synced)")
+	parser.add_argument('--skipcourses', default=None, help="These courses will NOT be synced (comma seperated links)")
+	parser.add_argument('--semester', default=None, help="Only these semesters will be synced, of the form 20ws (comma seperated) (only used if [courses] is empty, if empty all semesters will be synced)")
+	parser.add_argument('--basedir', default=None, help="The base directory where all files will be synced to")
+	parser.add_argument('--nolinks', action='store_true', help="Wether to not inspect links embedded in pages")
+	parser.add_argument('--excludefiletypes', default=None, help="Exclude downloading files from urls with these extensions (comma seperated types, e.g. \"mp4,mkv\")")
+	parser.add_argument('--verbose', action='store_true', help="Verbose output for debugging.")
+	args = parser.parse_args()
 
-    if os.path.exists(args.config):
-        config = json.load(open(args.config))
+	if os.path.exists(args.config):
+		config = json.load(open(args.config))
 
-    config["user"] = args.user or config.get("user")
-    config["password"] = args.password or config.get("password")
-    config["cookie_file"] = args.cookiefile or config.get("cookie_file","./session")
-    config["selected_courses"] = args.courses.split(",") if args.courses else config.get("selected_courses", [])
-    config["only_sync_semester"] = args.semester.split(",") if args.semester else config.get("only_sync_semester", [])
-    config["basedir"] = args.basedir or config.get("basedir","./")
-    config["use_secret_service"] = (args.secretservice if has_secretstorage else None) or config.get("use_secret_service")
-    config["skip_courses"] = args.skipcourses.split(",") if args.skipcourses else config.get("skip_courses", [])
-    config["nolinks"] = args.nolinks or config.get("no_links")
-    config["used_modules"] = config.get("used_modules") or {
+	config["user"] = args.user or config.get("user")
+	config["password"] = args.password or config.get("password")
+	config["cookie_file"] = args.cookiefile or config.get("cookie_file","./session")
+	config["selected_courses"] = args.courses.split(",") if args.courses else config.get("selected_courses",[])
+	config["only_sync_semester"] = args.semester.split(",") if args.semester else config.get("only_sync_semester",[])
+	config["basedir"] = args.basedir or config.get("basedir","./")
+	config["use_secret_service"] = (args.secretservice if has_secretstorage else None) or config.get("use_secret_service")
+	config["skip_courses"] = args.skipcourses.split(",") if args.skipcourses else config.get("skip_courses",[])
+	config["nolinks"] = args.nolinks or config.get("no_links")
+	config["used_modules"] = config.get("used_modules") or {
         "assign": True,
         "resource": True,
         "url": {
@@ -624,44 +651,44 @@ if __name__ == '__main__':
         },
         "folder": True
     }
-    config["exclude_filetypes"] = args.excludefiletypes.split(",") if args.excludefiletypes else config.get("exclude_filetypes", [])
-    config["verbose"] = args.verbose
+	config["exclude_filetypes"] = args.excludefiletypes.split(",") if args.excludefiletypes else config.get("exclude_filetypes",[])
+	config["verbose"] = args.verbose
 
-    if has_secretstorage and config.get("use_secret_service"):
-        if not args.user and not config.get("user"):
-            print("You need to provide your username in the config file or through --user!")
-            exit(1)
-        if config.get("password"):
-            print("You need to remove your password from your config file!")
-            exit(1)
+	if has_secretstorage and config.get("use_secret_service"):
+		if not args.user and not config.get("user"):
+			print("You need to provide your username in the config file or through --user!")
+			exit(1)
+		if config.get("password"):
+			print("You need to remove your password from your config file!")
+			exit(1)
 
-        connection = secretstorage.dbus_init()
-        collection = secretstorage.get_default_collection(connection)
-        attributes = {"application": "syncMyMoodle", "username": config["user"]}
-        results = list(collection.search_items(attributes))
-        if len(results) == 0:
-            if args.password:
-                password = args.password
-            else:
-                password = getpass.getpass("Password:")
-            item = collection.create_item(f'{config["user"]}@rwth-aachen.de', attributes, password)
-        else:
-            item = results[0]
-        if item.is_locked():
-            item.unlock()
-        config["password"] = item.get_secret().decode("utf-8")
+		connection = secretstorage.dbus_init()
+		collection = secretstorage.get_default_collection(connection)
+		attributes = {"application": "syncMyMoodle", "username": config["user"]}
+		results = list(collection.search_items(attributes))
+		if len(results) == 0:
+			if args.password:
+				password = args.password
+			else:
+				password = getpass.getpass("Password:")
+			item = collection.create_item(f'{config["user"]}@rwth-aachen.de', attributes, password)
+		else:
+			item = results[0]
+		if item.is_locked():
+			item.unlock()
+		config["password"] = item.get_secret().decode("utf-8")
 
-    if not config.get("user") or not config.get("password"):
-        print("You need to specify your username and password in the config file or as an argument!")
-        exit(1)
+	if not config.get("user") or not config.get("password"):
+		print("You need to specify your username and password in the config file or as an argument!")
+		exit(1)
 
-    smm = SyncMyMoodle(config)
+	smm = SyncMyMoodle(config)
 
-    print(f"Logging in...")
-    smm.login()
-    smm.get_moodle_wstoken()
-    smm.get_userid()
-    print(f"Syncing file tree...")
-    smm.sync()
-    print(f"Downloading files...")
-    smm.download_all_files()
+	print(f"Logging in...")
+	smm.login()
+	smm.get_moodle_wstoken()
+	smm.get_userid()
+	print(f"Syncing file tree...")
+	smm.sync()
+	print(f"Downloading files...")
+	smm.download_all_files()
