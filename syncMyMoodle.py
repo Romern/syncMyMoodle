@@ -15,6 +15,8 @@ import urllib.parse
 from tqdm import tqdm
 from argparse import ArgumentParser
 import getpass
+import pdfkit
+import shutil
 
 class Node:
 	def __init__(self, name, id, type, parent, url=None, additional_info=None, is_downloaded=False):
@@ -91,7 +93,7 @@ class SyncMyMoodle:
 				print("-------Login-Error-Soup--------")
 				print(soup)
 			exit(1)
-		data = {"RelayState": soup.find("input",{"name": "RelayState"})["value"], 
+		data = {"RelayState": soup.find("input",{"name": "RelayState"})["value"],
 				"SAMLResponse": soup.find("input",{"name": "SAMLResponse"})["value"]}
 		resp = self.session.post("https://moodle.rwth-aachen.de/Shibboleth.sso/SAML2/POST", data=data)
 		with open(self.config.get("cookie_file", "./session"), 'wb') as f:
@@ -369,6 +371,20 @@ class SyncMyMoodle:
 								engage_id = engage_id.get("value")
 								name = name.get("value")
 								section_node.add_child(f"Opencast: {engage_id}", name, "Opencast", url=f"https://engage.streaming.rwth-aachen.de/play/{engage_id}", additional_info=course_id)
+
+						# Integration for Quizzes
+						if module["modname"] == "quiz" and self.config.get("used_modules",{}).get("url",{}).get("quiz",{}):
+							info_url = f'https://moodle.rwth-aachen.de/mod/quiz/view.php?id={module["id"]}'
+							info_res = bs(self.session.get(info_url).text,features="html.parser")
+							attempts = info_res.findAll("a",{"title": "Überprüfung der eigenen Antworten dieses Versuchs"})
+							attempt_cnt = 0
+							for attempt in attempts:
+								attempt_cnt += 1
+								review_url = attempt.get("href")
+								quiz_res = bs(self.session.get(review_url).text,features="html.parser")
+								name = quiz_res.find("title").get_text().replace(": Überprüfung des Testversuchs", "") + ", Versuch " + str(attempt_cnt)
+								section_node.add_child(self.sanitize(name), urllib.parse.urlparse(review_url)[1], "Quiz", url=review_url)
+
 					except Exception as e:
 						traceback.print_exc()
 						print(f"Failed to download the module {module}: {e}")
@@ -403,6 +419,14 @@ class SyncMyMoodle:
 					except Exception as e:
 						traceback.print_exc()
 						print(f"Failed to download the module {cur_node}: {e}")
+				elif cur_node.type == "Quiz":
+					try:
+						self.downloadQuiz(cur_node)
+						cur_node.is_downloaded = True
+					except Exception as e:
+						traceback.print_exc()
+						print(f"Failed to download the module {cur_node}: {e}")
+						print("Is wkhtmltopdf correctly installed?")
 				else:
 					try:
 						self.download_file(cur_node)
@@ -518,6 +542,21 @@ class SyncMyMoodle:
 			ydl.download([link])
 		return True
 
+	def downloadQuiz(self, node):
+		path = self.get_sanitized_node_path(node.parent)
+		os.makedirs(path, exist_ok=True)
+		quiz_res = bs(self.session.get(node.url).text,features="html.parser")
+
+		# i need to hide the left nav element because its obscuring the quiz in the resulting pdf
+		for nav in quiz_res.findAll("div", {"id": "nav-drawer"}):
+			nav['style'] = "visibility: hidden;"
+
+		quiz_html = str(quiz_res)
+		print("Generating quiz-PDF for " + node.name + "... [Quiz]")
+		pdfkit.from_string(quiz_html, os.path.join(path,f"{node.name}.pdf"), options={'quiet': ''})
+		print("...done!")
+		return True
+
 	def scanForLinks(self, text, parent_node, course_id, module_title=None, single=False):
 		# A single link is supplied and the contents of it are checked
 		if single:
@@ -619,12 +658,17 @@ if __name__ == '__main__':
         "url": {
             "youtube": True,
             "opencast": True,
-            "sciebo": True
+            "sciebo": True,
+			"quiz": True
         },
         "folder": True
     }
 	config["exclude_filetypes"] = args.excludefiletypes.split(",") if args.excludefiletypes else config.get("exclude_filetypes",[])
 	config["verbose"] = args.verbose
+
+	if not shutil.which("wkhtmltopdf") and config["used_modules"]["url"]["quiz"]:
+		config["used_modules"]["url"]["quiz"] = False
+		print("You do not have wkhtmltopdf in your path. Quiz-PDFs are NOT generated")
 
 	if has_secretstorage and config.get("use_secret_service"):
 		if not args.user and not config.get("user"):
