@@ -352,6 +352,7 @@ class SyncMyMoodle:
 								self.scanForLinks(module["url"], section_node, course_id, module_title=module["name"], single=True)
 							else:
 								self.scanForLinks(module.get("description",""), section_node, course_id, module_title=module["name"])
+
 						## New OpenCast integration
 						if module["modname"] == "lti" and self.config.get("used_modules",{}).get("url",{}).get("opencast",{}):
 							info_url = f'https://moodle.rwth-aachen.de/mod/lti/launch.php?id={module["id"]}&triggerview=0'
@@ -370,10 +371,10 @@ class SyncMyMoodle:
 								name = name.get("value")
 								section_node.add_child(f"Opencast: {engage_id}", name, "Opencast", url=f"https://engage.streaming.rwth-aachen.de/play/{engage_id}", additional_info=course_id)
 
-						if module["modname"] == "quiz":
+						# Integration for Quizzes
+						if module["modname"] == "quiz" and self.config.get("used_modules",{}).get("url",{}).get("quiz",{}):
 							info_url = f'https://moodle.rwth-aachen.de/mod/quiz/view.php?id={module["id"]}'
 							info_res = bs(self.session.get(info_url).text,features="html.parser")
-							# print(info_res)
 							attempts = info_res.findAll("a",{"title": "Überprüfung der eigenen Antworten dieses Versuchs"})
 							attempt_cnt = 0
 							for attempt in attempts:
@@ -381,7 +382,7 @@ class SyncMyMoodle:
 								review_url = attempt.get("href")
 								quiz_res = bs(self.session.get(review_url).text,features="html.parser")
 								name = quiz_res.find("title").get_text().replace(": Überprüfung des Testversuchs", "") + ", Versuch " + str(attempt_cnt)
-								section_node.add_child(name, "quiz", "Quiz", url=review_url)
+								section_node.add_child(name, urllib.parse.urlparse(review_url)[1], "Quiz", url=review_url)
 
 					except Exception as e:
 						traceback.print_exc()
@@ -424,6 +425,7 @@ class SyncMyMoodle:
 					except Exception as e:
 						traceback.print_exc()
 						print(f"Failed to download the module {cur_node}: {e}")
+						print("Is wkhtmltopdf correctly installed?")
 				else:
 					try:
 						self.download_file(cur_node)
@@ -541,9 +543,16 @@ class SyncMyMoodle:
 
 	def downloadQuiz(self, node):
 		path = self.get_sanitized_node_path(node.parent)
-		link = node.url
-		quiz_res = bs(self.session.get(link).text,features="html.parser");
-		pdfkit.from_url(self.session.get(link).text, "lol.pdf")
+		quiz_res = bs(self.session.get(node.url).text,features="html.parser")
+
+		# i need to hide the left nav element because its obscuring the quiz in the resulting pdf
+		for nav in quiz_res.findAll("div", {"id": "nav-drawer"}):
+			nav['style'] = "visibility: hidden;"
+
+		quiz_html = str(quiz_res)
+		print("Generating quiz-PDF for " + node.name + "... [Quiz]")
+		pdfkit.from_string(quiz_html, os.path.join(path, node.name + ".pdf"), options={'quiet': ''})
+		print("...done!")
 		return True
 
 	def scanForLinks(self, text, parent_node, course_id, module_title=None, single=False):
@@ -647,7 +656,8 @@ if __name__ == '__main__':
         "url": {
             "youtube": True,
             "opencast": True,
-            "sciebo": True
+            "sciebo": True,
+			"quiz": True
         },
         "folder": True
     }
