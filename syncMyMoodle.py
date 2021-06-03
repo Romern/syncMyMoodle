@@ -382,7 +382,7 @@ class SyncMyMoodle:
 								review_url = attempt.get("href")
 								quiz_res = bs(self.session.get(review_url).text,features="html.parser")
 								name = quiz_res.find("title").get_text().replace(": Überprüfung des Testversuchs", "") + ", Versuch " + str(attempt_cnt)
-								section_node.add_child(name, urllib.parse.urlparse(review_url)[1], "Quiz", url=review_url)
+								section_node.add_child(self.sanitize(name), urllib.parse.urlparse(review_url)[1], "Quiz", url=review_url)
 
 					except Exception as e:
 						traceback.print_exc()
@@ -543,6 +543,7 @@ class SyncMyMoodle:
 
 	def downloadQuiz(self, node):
 		path = self.get_sanitized_node_path(node.parent)
+		os.makedirs(path, exist_ok=True)
 		quiz_res = bs(self.session.get(node.url).text,features="html.parser")
 
 		# i need to hide the left nav element because its obscuring the quiz in the resulting pdf
@@ -551,7 +552,7 @@ class SyncMyMoodle:
 
 		quiz_html = str(quiz_res)
 		print("Generating quiz-PDF for " + node.name + "... [Quiz]")
-		pdfkit.from_string(quiz_html, os.path.join(path, node.name + ".pdf"), options={'quiet': ''})
+		pdfkit.from_string(quiz_html, os.path.join(path,f"{node.name}.pdf"), options={'quiet': ''})
 		print("...done!")
 		return True
 
