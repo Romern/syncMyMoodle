@@ -16,6 +16,7 @@ from tqdm import tqdm
 from argparse import ArgumentParser
 import getpass
 import pdfkit
+import shutil
 
 class Node:
 	def __init__(self, name, id, type, parent, url=None, additional_info=None, is_downloaded=False):
