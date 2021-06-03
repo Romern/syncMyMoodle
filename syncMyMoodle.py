@@ -665,6 +665,10 @@ if __name__ == '__main__':
 	config["exclude_filetypes"] = args.excludefiletypes.split(",") if args.excludefiletypes else config.get("exclude_filetypes",[])
 	config["verbose"] = args.verbose
 
+	if not shutil.which("wkhtmltopdf") and config["used_modules"]["url"]["quiz"]:
+		config["used_modules"]["url"]["quiz"] = False
+		print("You do not have wkhtmltopdf in your path. Quiz-PDFs are NOT generated")
+
 	if has_secretstorage and config.get("use_secret_service"):
 		if not args.user and not config.get("user"):
 			print("You need to provide your username in the config file or through --user!")
