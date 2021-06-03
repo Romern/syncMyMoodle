@@ -559,26 +559,15 @@ class SyncMyMoodle:
 		print("Generating quiz-PDF for " + node.name + "... [Quiz]")
 
 		# workaround for images, wkhtmltopdf seems to get stuck while trying to retrieve embedded images and waiting for window-status to be 'finished'
-		#if len(quiz_res.findAll("img", {"class": "course-logo"})) > 0:
-		#	if len(quiz_res.findAll("img")) > 5: # there are always at least 4 img tags on the moodle page + course-logo
-		#		pdfkit.from_string(quiz_html, os.path.join(path,f"{node.name}.pdf"), options={'quiet': '','disable-smart-shrinking': '','run-script': 'MathJax.Hub.Config({"HTML-CSS": {scale: 200}}); MathJax.Hub.Queue(["Rerender", MathJax.Hub], function () {window.status="finished"})'})
-		#		print("ich bin in 1")
-		#		print(quiz_res.findAll("img"))
-		#	else:
-		#		pdfkit.from_string(quiz_html, os.path.join(path,f"{node.name}.pdf"), options={'quiet': '','window-status': 'finished','disable-smart-shrinking': '','run-script': 'MathJax.Hub.Config({"HTML-CSS": {scale: 200}}); MathJax.Hub.Queue(["Rerender", MathJax.Hub], function () {window.status="finished"})'})
-		#		print("ich bin in 2")
+		#if len(quiz_res.findAll("img", {"alt": "presentation"})) > 0:
+		#	pdfkit.from_string(quiz_html, os.path.join(path,f"{node.name}.pdf"), options={'quiet': '','javascript-delay':'30000','disable-smart-shrinking': '','run-script': 'MathJax.Hub.Config({"CommonHTML": {minScaleAdjust: 100},"HTML-CSS": {scale: 200}}); MathJax.Hub.Queue(["Rerender", MathJax.Hub], function () {window.status="finished"})'})
 		#else:
-		#	if len(quiz_res.findAll("img")) > 4:
-		#		pdfkit.from_string(quiz_html, os.path.join(path,f"{node.name}.pdf"), options={'quiet': '','disable-smart-shrinking': '','run-script': 'MathJax.Hub.Config({"HTML-CSS": {scale: 200}}); MathJax.Hub.Queue(["Rerender", MathJax.Hub], function () {window.status="finished"})'})
-		#		print("ich bin in 3")
+		#	if len(quiz_res.findAll("span",{"class": "MathJax"})) > 0:
+		#		pdfkit.from_string(quiz_html, os.path.join(path,f"{node.name}.pdf"), options={'quiet': '','window-status': 'finished','disable-smart-shrinking': '','run-script': 'MathJax.Hub.Config({"CommonHTML": {minScaleAdjust: 100},"HTML-CSS": {scale: 200}}); MathJax.Hub.Queue(["Rerender", MathJax.Hub], function () {window.status="finished"})'})
 		#	else:
-		#		pdfkit.from_string(quiz_html, os.path.join(path,f"{node.name}.pdf"), options={'quiet': '','window-status': 'finished','disable-smart-shrinking': '','run-script': 'MathJax.Hub.Config({"HTML-CSS": {scale: 200}}); MathJax.Hub.Queue(["Rerender", MathJax.Hub], function () {window.status="finished"})'})
-		#		print("ich bin in 4")
+		#		pdfkit.from_string(quiz_html, os.path.join(path,f"{node.name}.pdf"), options={'quiet': '','javascript-delay': '15000','disable-smart-shrinking': ''})
+		pdfkit.from_string(quiz_html, os.path.join(path,f"{node.name}.pdf"), options={'quiet': '','javascript-delay': '20000','disable-smart-shrinking': '','run-script': 'MathJax.Hub.Config({"CommonHTML": {minScaleAdjust: 100},"HTML-CSS": {scale: 200}}); MathJax.Hub.Queue(["Rerender", MathJax.Hub], function () {window.status="finished"})'})
 
-		if len(quiz_res.findAll("img", {"alt": "presentation"})) > 0:
-			pdfkit.from_string(quiz_html, os.path.join(path,f"{node.name}.pdf"), options={'quiet': '','disable-smart-shrinking': '','run-script': 'MathJax.Hub.Config({"HTML-CSS": {scale: 200}}); MathJax.Hub.Queue(["Rerender", MathJax.Hub], function () {window.status="finished"})'})
-		else:
-			pdfkit.from_string(quiz_html, os.path.join(path,f"{node.name}.pdf"), options={'quiet': '','window-status': 'finished','disable-smart-shrinking': '','run-script': 'MathJax.Hub.Config({"HTML-CSS": {scale: 200}}); MathJax.Hub.Queue(["Rerender", MathJax.Hub], function () {window.status="finished"})'})
 		print("...done!")
 		return True
 
