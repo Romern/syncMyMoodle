@@ -553,7 +553,12 @@ class SyncMyMoodle:
 
 		quiz_html = str(quiz_res)
 		print("Generating quiz-PDF for " + node.name + "... [Quiz]")
-		pdfkit.from_string(quiz_html, os.path.join(path,f"{node.name}.pdf"), options={'quiet': ''})
+
+		# workaround for images, wkhtmltopdf seems to get stuck while trying to retrieve embedded images and waiting for window-status to be 'finished'
+		if  len(quiz_res.findAll("img")) > 0:
+			pdfkit.from_string(quiz_html, os.path.join(path,f"{node.name}.pdf"), options={'quiet': '','disable-smart-shrinking': '','run-script': 'MathJax.Hub.Config({"HTML-CSS": {scale: 200}}); MathJax.Hub.Queue(["Rerender", MathJax.Hub], function () {window.status="finished"})'})
+		else:
+			pdfkit.from_string(quiz_html, os.path.join(path,f"{node.name}.pdf"), options={'quiet': '','window-status': 'finished','disable-smart-shrinking': '','run-script': 'MathJax.Hub.Config({"HTML-CSS": {scale: 200}}); MathJax.Hub.Queue(["Rerender", MathJax.Hub], function () {window.status="finished"})'})
 		print("...done!")
 		return True
 
