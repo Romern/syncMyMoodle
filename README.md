@@ -35,7 +35,7 @@ Copy ``config.json.example`` to ``config.json`` and adjust the settings:
             "youtube": true, //Youtube Links/Embeds
             "opencast": true, //Opencast Links/Embeds
             "sciebo": true, //Sciebo Links/Embeds
-			"quiz": true //Quiz Links
+            "quiz": true //Quiz Links
         },
         "folder": true, //Folders
     },
