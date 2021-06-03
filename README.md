@@ -83,5 +83,5 @@ You need to have the python package ``secretstorage`` installed:
 ```bash
 pip3 install secretstorage
 ```
-After you removed your password from the config file (delete the whole line in config.json), you need to specify your password once, either using ``--password``, or you will be promted.
+After you removed your password from the config file (delete the whole line in config.json), you will be prompted for your password when syncing for the first time.
 In subsequent runs, the credentials will be obtained automatically.
