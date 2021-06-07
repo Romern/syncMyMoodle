@@ -545,6 +545,10 @@ class SyncMyMoodle:
 	def downloadQuiz(self, node):
 		path = self.get_sanitized_node_path(node.parent)
 		os.makedirs(path, exist_ok=True)
+
+		if os.path.exists(os.path.join(path, f"{node.name}.pdf")):
+			return True
+
 		quiz_res = bs(self.session.get(node.url).text,features="html.parser")
 
 		# i need to hide the left nav element because its obscuring the quiz in the resulting pdf
@@ -553,7 +557,9 @@ class SyncMyMoodle:
 
 		quiz_html = str(quiz_res)
 		print("Generating quiz-PDF for " + node.name + "... [Quiz]")
-		pdfkit.from_string(quiz_html, os.path.join(path,f"{node.name}.pdf"), options={'quiet': ''})
+
+		pdfkit.from_string(quiz_html, os.path.join(path,f"{node.name}.pdf"), options={'quiet': '','javascript-delay': '30000','disable-smart-shrinking': '','run-script': 'MathJax.Hub.Config({"CommonHTML": {minScaleAdjust: 100},"HTML-CSS": {scale: 200}}); MathJax.Hub.Queue(["Rerender", MathJax.Hub], function () {window.status="finished"})'})
+
 		print("...done!")
 		return True
 
@@ -659,7 +665,7 @@ if __name__ == '__main__':
             "youtube": True,
             "opencast": True,
             "sciebo": True,
-			"quiz": True
+            "quiz": False
         },
         "folder": True
     }
