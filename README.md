@@ -6,7 +6,7 @@ Downloads the following materials:
 * Resource files
 * Urls: OpenCast, Youtube and Sciebo videos/files, and all other non HTML files
 * Folders
-* Quizzes
+* Quizzes (**Disabled by default**)
 * Pages and Labels: Embedded Opencast and Youtube Videos
 
 # Setup
@@ -35,7 +35,7 @@ Copy ``config.json.example`` to ``config.json`` and adjust the settings:
             "youtube": true, //Youtube Links/Embeds
             "opencast": true, //Opencast Links/Embeds
             "sciebo": true, //Sciebo Links/Embeds
-            "quiz": true //Quiz Links
+            "quiz": false //Quiz Links
         },
         "folder": true, //Folders
     },

@@ -665,7 +665,7 @@ if __name__ == '__main__':
             "youtube": True,
             "opencast": True,
             "sciebo": True,
-			"quiz": True
+            "quiz": False
         },
         "folder": True
     }

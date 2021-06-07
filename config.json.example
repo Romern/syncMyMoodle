@@ -15,7 +15,7 @@
             "youtube": true,
             "opencast": true,
             "sciebo": true,
-            "quiz": true
+            "quiz": false
         },
         "folder": true
     },
