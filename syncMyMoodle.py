@@ -33,6 +33,19 @@ class Node:
 		return f'Node(name={self.name}, id={self.id}, url={self.url}, type={self.type})'
 
 	def add_child(self, name, id, type, url=None, additional_info=None):
+		if url:
+			url = url.replace("?forcedownload=1","").replace("mod_page/content/3","mod_page/content")
+			url = url.replace("webservice/pluginfile.php","pluginfile.php")
+
+		# Check for duplicate urls and just ignore those nodes:
+		if url and any([True for c in self.children if c.url == url]):
+			return None
+
+		# Check for duplicate filenames:
+		if any([True for c in self.children if c.name == name and c.url != url]):
+			# if a filename is duplicate in its directory, we rename it by appending its id (urlsafe base64 so it also works for urls).
+			base, ext = os.path.splitext(name)
+			name = base + base64.urlsafe_b64encode(str(id).encode("utf-8")) + ext
 		temp = Node(name, id, type, self, url=url, additional_info=additional_info)
 		self.children.append(temp)
 		return temp
@@ -57,7 +70,6 @@ class SyncMyMoodle:
 		self.session = None
 		self.session_key = None
 		self.wstoken = None
-		self.user_private_access_key = None
 		self.user_id = None
 		self.root_node = None
 
@@ -324,9 +336,7 @@ class SyncMyMoodle:
 								continue
 							for c in module.get("contents",[]):
 								if c["fileurl"]:
-									if module["modname"] in ["book","page"]:
-										c["fileurl"] = c["fileurl"].replace("webservice/pluginfile.php","tokenpluginfile.php/" + self.user_private_access_key)
-									self.scanForLinks(c["fileurl"], section_node, course_id, single=True)
+									self.scanForLinks(c["fileurl"], section_node, course_id, single=True, module_title=module["name"])
 
 						## Get Folders
 						if module["modname"] == "folder" and self.config.get("used_modules",{}).get("folder",{}):
@@ -370,8 +380,7 @@ class SyncMyMoodle:
 							else:
 								engage_id = engage_id.get("value")
 								name = name.get("value")
-								section_node.add_child(f"Opencast: {engage_id}", name, "Opencast", url=f"https://engage.streaming.rwth-aachen.de/play/{engage_id}", additional_info=course_id)
-
+								section_node.add_child(name + ".mp4", engage_id, "Opencast", url=f"https://engage.streaming.rwth-aachen.de/play/{engage_id}", additional_info=course_id)
 						# Integration for Quizzes
 						if module["modname"] == "quiz" and self.config.get("used_modules",{}).get("url",{}).get("quiz",{}):
 							info_url = f'https://moodle.rwth-aachen.de/mod/quiz/view.php?id={module["id"]}'
@@ -464,8 +473,6 @@ class SyncMyMoodle:
 		if len(node.name.split("."))>0 and node.name.split(".")[-1] in self.config.get("exclude_filetypes",[]):
 			return True
 
-		url = node.url.replace("webservice/pluginfile.php","tokenpluginfile.php/" + self.user_private_access_key)
-
 		if os.path.exists(downloadpath + ".temp"):
 			resume_size = os.stat(downloadpath + ".temp").st_size
 			header = {'Range':f'bytes= {resume_size}-'}
@@ -473,7 +480,7 @@ class SyncMyMoodle:
 			resume_size = 0
 			header = dict()
 
-		with closing(self.session.get(url, headers=header, stream=True)) as response:
+		with closing(self.session.get(node.url, headers=header, stream=True)) as response:
 			print(f"Downloading {downloadpath} [{node.type}]")
 			total_size_in_bytes = int(response.headers.get('content-length', 0)) + resume_size
 			progress_bar = tqdm(total=total_size_in_bytes, unit='iB', unit_scale=True)
@@ -520,7 +527,8 @@ class SyncMyMoodle:
 		# only choose mp4s provided with plain https (no transport key), and use the one with the highest resolution (sorted by width) (could also use bitrate)
 		finaltrack = tracks[-1]
 		node.url = finaltrack[0]
-		node.name = finaltrack[0].split("/")[-1]
+		if ".mp4" not in node.name: # shouldn't happen, but whatever
+			node.name = finaltrack[0].split("/")[-1]
 		return self.download_file(node)
 
 	# Downloads Youtube-Videos using youtube_dl
@@ -567,7 +575,7 @@ class SyncMyMoodle:
 		# A single link is supplied and the contents of it are checked
 		if single:
 			try:
-				text = text.replace("webservice/pluginfile.php","tokenpluginfile.php/" + self.user_private_access_key)
+				text = text.replace("webservice/pluginfile.php","pluginfile.php")
 				response = self.session.head(text)
 				if "youtube.com" in text or "youtu.be" in text:
 					# workaround for youtube providing bad headers when using HEAD
@@ -610,7 +618,7 @@ class SyncMyMoodle:
 		if self.config.get("used_modules",{}).get("url",{}).get("opencast",{}):
 			opencast_links = re.findall("https://engage.streaming.rwth-aachen.de/play/[a-zA-Z0-9\-]+", text)
 			for vid in opencast_links:
-				parent_node.add_child(f"Opencast: {module_title or vid}", vid, "Opencast", url=vid, additional_info=course_id)
+				parent_node.add_child(f"{module_title}.mp4" or vid, vid, "Opencast", url=vid, additional_info=course_id)
 
 		#https://rwth-aachen.sciebo.de/s/XXX
 		if self.config.get("used_modules",{}).get("url",{}).get("sciebo",{}):
