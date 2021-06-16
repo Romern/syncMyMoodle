@@ -45,7 +45,7 @@ class Node:
 		if any([True for c in self.children if c.name == name and c.url != url]):
 			# if a filename is duplicate in its directory, we rename it by appending its id (urlsafe base64 so it also works for urls).
 			base, ext = os.path.splitext(name)
-			name = base + base64.urlsafe_b64encode(str(id).encode("utf-8")) + ext
+			name = base + base64.urlsafe_b64encode(str(id).encode("utf-8")).decode() + ext
 		temp = Node(name, id, type, self, url=url, additional_info=additional_info)
 		self.children.append(temp)
 		return temp
