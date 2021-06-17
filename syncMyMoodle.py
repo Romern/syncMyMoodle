@@ -53,7 +53,7 @@ class Node:
 	def get_path(self):
 		ret = []
 		cur = self
-		while cur != None:
+		while cur is not None:
 			ret.insert(0, cur.name)
 			cur = cur.parent
 		return ret
@@ -667,16 +667,16 @@ if __name__ == '__main__':
 	config["skip_courses"] = args.skipcourses.split(",") if args.skipcourses else config.get("skip_courses",[])
 	config["nolinks"] = args.nolinks or config.get("no_links")
 	config["used_modules"] = config.get("used_modules") or {
-        "assign": True,
-        "resource": True,
-        "url": {
-            "youtube": True,
-            "opencast": True,
-            "sciebo": True,
-            "quiz": False
-        },
-        "folder": True
-    }
+		"assign": True,
+		"resource": True,
+		"url": {
+			"youtube": True,
+			"opencast": True,
+			"sciebo": True,
+			"quiz": False
+		},
+		"folder": True
+	}
 	config["exclude_filetypes"] = args.excludefiletypes.split(",") if args.excludefiletypes else config.get("exclude_filetypes",[])
 	config["verbose"] = args.verbose
 
