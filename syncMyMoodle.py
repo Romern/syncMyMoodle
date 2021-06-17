@@ -527,7 +527,7 @@ class SyncMyMoodle:
 		# only choose mp4s provided with plain https (no transport key), and use the one with the highest resolution (sorted by width) (could also use bitrate)
 		finaltrack = tracks[-1]
 		node.url = finaltrack[0]
-		if ".mp4" not in node.name: # shouldn't happen, but whatever
+		if ".mp4" not in node.name:
 			node.name = finaltrack[0].split("/")[-1]
 		return self.download_file(node)
 
@@ -618,7 +618,7 @@ class SyncMyMoodle:
 		if self.config.get("used_modules",{}).get("url",{}).get("opencast",{}):
 			opencast_links = re.findall("https://engage.streaming.rwth-aachen.de/play/[a-zA-Z0-9\-]+", text)
 			for vid in opencast_links:
-				parent_node.add_child(f"{module_title}.mp4" or vid, vid, "Opencast", url=vid, additional_info=course_id)
+				parent_node.add_child(f"{module_title}.mp4" if module_title else vid, vid, "Opencast", url=vid, additional_info=course_id)
 
 		#https://rwth-aachen.sciebo.de/s/XXX
 		if self.config.get("used_modules",{}).get("url",{}).get("sciebo",{}):
