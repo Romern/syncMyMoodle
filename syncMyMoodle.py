@@ -41,11 +41,6 @@ class Node:
 		if url and any([True for c in self.children if c.url == url]):
 			return None
 
-		# Check for duplicate filenames:
-		if any([True for c in self.children if c.name == name and c.url != url]):
-			# if a filename is duplicate in its directory, we rename it by appending its id (urlsafe base64 so it also works for urls).
-			base, ext = os.path.splitext(name)
-			name = base + base64.urlsafe_b64encode(str(id).encode("utf-8")).decode() + ext
 		temp = Node(name, id, type, self, url=url, additional_info=additional_info)
 		self.children.append(temp)
 		return temp
@@ -57,6 +52,53 @@ class Node:
 			ret.insert(0, cur.name)
 			cur = cur.parent
 		return ret
+
+	def remove_children_nameclashes(self):
+		# Check for duplicate filenames
+
+		unclashed_children = []
+		# work on copy since deleting from the iterated list breaks stuff
+		copy_children = self.children.copy()
+		for child in copy_children:
+			if child not in self.children: continue
+			self.children.remove(child)
+			unclashed_children.append(child)
+			if child.type == "Opencast":
+				siblings = [c for c in self.children if c.name == child.name and c.url != child.url]
+				if len(siblings) > 0:
+					# if an Opencast filename is duplicate in its directory, we append the filename as it was uploaded
+					tmp_name, tmp_ext = os.path.splitext(child.name)
+					child.name = f"{tmp_name}_{child.url.split('/')[-1]}"
+					for s in siblings:
+						tmp_name, tmp_ext = os.path.splitext(s.name)
+						s.name = f"{s.name}_{s.url.split('/')[-1]}"
+						self.children.remove(s)
+					unclashed_children.extend(siblings)
+
+		self.children = unclashed_children
+
+		unclashed_children = []
+		copy_children = self.children.copy()
+		for child in copy_children:
+			if child not in self.children: continue
+			self.children.remove(child)
+			unclashed_children.append(child)
+			siblings = [c for c in self.children if c.name == child.name and c.url != child.url]
+			if len(siblings) > 0:
+				# if a filename is still duplicate in its directory, we rename it by appending its id (urlsafe base64 so it also works for urls).
+				base, ext = os.path.splitext(child.name)
+				child.name = base + "_" + base64.urlsafe_b64encode(str(child.id).encode("utf-8")).decode() + ext
+				for s in siblings:
+					base, ext = os.path.splitext(s.name)
+					s.name = base + "_" + base64.urlsafe_b64encode(str(s.id).encode("utf-8")).decode() + ext
+					self.children.remove(s)
+				unclashed_children.extend(siblings)
+
+		self.children = unclashed_children
+
+		for child in self.children:
+			# recurse whole tree
+			child.remove_children_nameclashes()
 
 class SyncMyMoodle:
 	params = {
@@ -380,7 +422,7 @@ class SyncMyMoodle:
 							else:
 								engage_id = engage_id.get("value")
 								name = name.get("value")
-								section_node.add_child(name + ".mp4", engage_id, "Opencast", url=f"https://engage.streaming.rwth-aachen.de/play/{engage_id}", additional_info=course_id)
+								section_node.add_child(name, engage_id, "Opencast", url=f"https://engage.streaming.rwth-aachen.de/play/{engage_id}", additional_info=course_id)
 						# Integration for Quizzes
 						if module["modname"] == "quiz" and self.config.get("used_modules",{}).get("url",{}).get("quiz",{}):
 							info_url = f'https://moodle.rwth-aachen.de/mod/quiz/view.php?id={module["id"]}'
@@ -397,6 +439,8 @@ class SyncMyMoodle:
 					except Exception as e:
 						traceback.print_exc()
 						print(f"Failed to download the module {module}: {e}")
+
+		self.root_node.remove_children_nameclashes()
 
 	def download_all_files(self):
 		if not self.session:
@@ -498,9 +542,9 @@ class SyncMyMoodle:
 
 	# Downloads Opencast videos by using the engage API
 
-	def downloadOpenCastVideos(self, node):
+	def getOpenCastRealURL(self, additional_info, url):
 		# get engage authentication form
-		course_info = [{"index":0,"methodname":"filter_opencast_get_lti_form","args":{"courseid":str(node.additional_info)}}]
+		course_info = [{"index":0,"methodname":"filter_opencast_get_lti_form","args":{"courseid":str(additional_info)}}]
 		response = self.session.post(f'https://moodle.rwth-aachen.de/lib/ajax/service.php?sesskey={self.session_key}&info=filter_opencast_get_lti_form', data=json.dumps(course_info))
 
 		# submit engage authentication info
@@ -516,7 +560,7 @@ class SyncMyMoodle:
 		engageData = dict([(i["name"], i["value"]) for i in engageDataSoup.findAll("input")])
 		response = self.session.post('https://engage.streaming.rwth-aachen.de/lti', data=engageData)
 
-		linkid = re.match("https://engage.streaming.rwth-aachen.de/play/([a-z0-9\-]{36})$", node.url)
+		linkid = re.match("https://engage.streaming.rwth-aachen.de/play/([a-z0-9\-]{36})$", url)
 		if not linkid:
 			return False
 		episodejson = f'https://engage.streaming.rwth-aachen.de/search/episode.json?id={linkid.groups()[0]}'
@@ -526,9 +570,15 @@ class SyncMyMoodle:
 		tracks = sorted([(t["url"],t["video"]["resolution"]) for t in tracks if t["mimetype"] == 'video/mp4' and "transport" not in t], key=(lambda x: int(x[1].split("x")[0]) ))
 		# only choose mp4s provided with plain https (no transport key), and use the one with the highest resolution (sorted by width) (could also use bitrate)
 		finaltrack = tracks[-1]
-		node.url = finaltrack[0]
+
+		return finaltrack[0]
+
+	def downloadOpenCastVideos(self, node):
 		if ".mp4" not in node.name:
-			node.name = finaltrack[0].split("/")[-1]
+			if node.name is not None and node.name != "":
+				node.name += ".mp4"
+			else:
+				node.name = node.url.split("/")[-1]
 		return self.download_file(node)
 
 	# Downloads Youtube-Videos using youtube_dl
@@ -618,7 +668,8 @@ class SyncMyMoodle:
 		if self.config.get("used_modules",{}).get("url",{}).get("opencast",{}):
 			opencast_links = re.findall("https://engage.streaming.rwth-aachen.de/play/[a-zA-Z0-9\-]+", text)
 			for vid in opencast_links:
-				parent_node.add_child(f"{module_title}.mp4" if module_title else vid, vid, "Opencast", url=vid, additional_info=course_id)
+				vid = self.getOpenCastRealURL(course_id, vid)
+				parent_node.add_child(module_title or vid.split('/')[-1], vid, "Opencast", url=vid, additional_info=course_id)
 
 		#https://rwth-aachen.sciebo.de/s/XXX
 		if self.config.get("used_modules",{}).get("url",{}).get("sciebo",{}):
