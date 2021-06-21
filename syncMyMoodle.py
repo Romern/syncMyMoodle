@@ -88,12 +88,10 @@ class Node:
 			if len(siblings) > 0:
 				# if a filename is still duplicate in its directory, we rename it by appending its id (urlsafe base64 so it also works for urls).
 				base, ext = os.path.splitext(child.name)
-				# child.name = base + "_" + base64.urlsafe_b64encode(hashlib.md5(str(child.id).encode("utf-8")).hexdigest().encode("utf-8")).decode()[:10] + ext
-				child.name = base + "_" + base64.urlsafe_b64encode(str(child.id).encode("utf-8")).decode() + ext
+				child.name = base + "_" + base64.urlsafe_b64encode(hashlib.md5(str(child.id).encode("utf-8")).hexdigest().encode("utf-8")).decode()[:10] + ext
 				for s in siblings:
 					base, ext = os.path.splitext(s.name)
-					# s.name = base + "_" + base64.urlsafe_b64encode(hashlib.md5(str(s.id).encode("utf-8")).hexdigest().encode("utf-8")).decode()[:10] + ext
-					s.name = base + "_" + base64.urlsafe_b64encode(str(s.id).encode("utf-8")).decode() + ext
+					s.name = base + "_" + base64.urlsafe_b64encode(hashlib.md5(str(s.id).encode("utf-8")).hexdigest().encode("utf-8")).decode()[:10] + ext
 					self.children.remove(s)
 				unclashed_children.extend(siblings)
 
