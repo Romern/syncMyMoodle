@@ -77,9 +77,17 @@ optional arguments:
   --nolinks             Wether to not inspect links embedded in pages
 ```
 
+# Docker
+
+This project is dockerized. Edit the `docker-compose.yml` and change the locations of the `config.json` and the `baseDir`.
+
+Then run: `docker-compose up -d`
+
 # FreeDesktop.org Secret Service integration
+
 If you have a FreeDesktop.org Secret Service integration compatible keyring installed, you can save your RWTH SSO credentials in it.
 You need to have the python package ``secretstorage`` installed:
+
 ```bash
 pip3 install secretstorage
 ```

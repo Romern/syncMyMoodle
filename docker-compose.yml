@@ -1,0 +1,10 @@
+version: "3.9"
+
+services:
+  syncmymoodle:
+    build: .
+    restart: always
+    volumes:
+      # change the following lines
+      - "./config.json:/config.json:ro"
+      - "./syncMyMoodle:/syncBaseDir"
