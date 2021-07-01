@@ -706,6 +706,8 @@ if __name__ == '__main__':
 	parser.add_argument('--verbose', action='store_true', help="Verbose output for debugging.")
 	args = parser.parse_args()
 
+	config = {}
+
 	if os.path.exists(args.config):
 		config = json.load(open(args.config))
 
