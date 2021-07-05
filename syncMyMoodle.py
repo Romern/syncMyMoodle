@@ -423,7 +423,8 @@ class SyncMyMoodle:
 							else:
 								engage_id = engage_id.get("value")
 								name = name.get("value")
-								section_node.add_child(name, engage_id, "Opencast", url=f"https://engage.streaming.rwth-aachen.de/play/{engage_id}", additional_info=course_id)
+								vid = self.getOpenCastRealURL(course_id, f"https://engage.streaming.rwth-aachen.de/play/{engage_id}")
+								section_node.add_child(name, engage_id, "Opencast", url=vid, additional_info=course_id)
 						# Integration for Quizzes
 						if module["modname"] == "quiz" and self.config.get("used_modules",{}).get("url",{}).get("quiz",{}):
 							info_url = f'https://moodle.rwth-aachen.de/mod/quiz/view.php?id={module["id"]}'
