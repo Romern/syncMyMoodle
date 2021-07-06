@@ -660,9 +660,9 @@ class SyncMyMoodle:
 		# Youtube videos
 		if self.config.get("used_modules",{}).get("url",{}).get("youtube",{}):
 			if single and "youtube.com" in text or "youtu.be" in text:
-				youtube_links = [text]
+				youtube_links = [u[0] for u in re.findall("(https?://(www\.)?(youtube\.com/(watch\?[a-zA-Z0-9=\&]*v=|embed/)|youtu.be/).{11})", text)]
 			else:
-				youtube_links = re.findall("https://www.youtube.com/embed/.{11}", text)
+				youtube_links = re.findall("https://www.youtube.com/embed/[a-zA-Z0-9]{11}", text)
 			for l in youtube_links:
 				parent_node.add_child(f"Youtube: {module_title or l}", l, "Youtube", url=l)
 
