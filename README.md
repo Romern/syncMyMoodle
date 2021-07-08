@@ -12,7 +12,7 @@ Downloads the following materials:
 # Setup
 This software requires **Python version >=3.6**.
 
-Obtain the source, for example using `git clone` or downloading and unzipping a zip.
+Obtain the source, for example using `git clone` or downloading and unzipping a zip. The following exemplary commands are to be used from inside that downloaded `syncMyMoodle` directory.
 
 Since you need to install dependencies to run syncMyMoodle, the recommended way to install them is by first creating and activating a virtual environment ([more info](https://packaging.python.org/guides/installing-using-pip-and-virtual-environments/#creating-a-virtual-environment)):
 ```bash
