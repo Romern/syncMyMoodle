@@ -10,10 +10,21 @@ Downloads the following materials:
 * Pages and Labels: Embedded Opencast and Youtube Videos
 
 # Setup
-Initially you need to install the requirements (**Python version >=3.6 is needed.**):
+This software requires **Python version >=3.6**.
+
+Obtain the source, for example using `git clone` or downloading and unzipping a zip.
+
+Since you need to install dependencies to run syncMyMoodle, the recommended way to install them is by creating a virtual environment first and activating it:
+```bash
+python3 -m venv moodle-venv
+source moodle-venv/bin/activate
+```
+
+Then install the requirements:
 ```bash
 pip3 install -r requirements.txt
 ```
+It is recommended to also install and use the [FreeDesktop.org Secret Service integration](#freedesktoporg-secret-service-integration) if your system supports it.
 
 Copy ``config.json.example`` to ``config.json`` and adjust the settings:
 
@@ -48,6 +59,7 @@ And your courses will be synced into the ``basedir`` you specified (default is t
 # CLI usage
 Run
 ```bash
+source moodle-venv/bin/activate # if you installed using virtual environment
 ./syncMyMoodle.py
 ```
 You can override the fields in the config file by using command line arguments:
