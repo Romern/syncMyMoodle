@@ -14,7 +14,7 @@ This software requires **Python version >=3.6**.
 
 Obtain the source, for example using `git clone` or downloading and unzipping a zip.
 
-Since you need to install dependencies to run syncMyMoodle, the recommended way to install them is by creating a virtual environment first and activating it:
+Since you need to install dependencies to run syncMyMoodle, the recommended way to install them is by first creating and activating a virtual environment ([more info](https://packaging.python.org/guides/installing-using-pip-and-virtual-environments/#creating-a-virtual-environment)):
 ```bash
 python3 -m venv moodle-venv
 source moodle-venv/bin/activate
@@ -61,6 +61,7 @@ Run
 ```bash
 source moodle-venv/bin/activate # if you installed using virtual environment
 ./syncMyMoodle.py
+deactivate # leave virtual environment
 ```
 You can override the fields in the config file by using command line arguments:
 
