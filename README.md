@@ -40,7 +40,7 @@ Then install the requirements using pip:
 ```bash
 pip3 install -r requirements.txt
 ```
-It is recommended to also install and use the [FreeDesktop.org Secret Service integration](#freedesktoporg-secret-service-integration) if your system supports it.
+It is recommended to also install and use the optional [FreeDesktop.org Secret Service integration](#freedesktoporg-secret-service-integration) to store your password securely if your system supports it - if you're on Linux, it probably does!
 
 Copy ``config.json.example`` to ``config.json`` and adjust the settings:
 
