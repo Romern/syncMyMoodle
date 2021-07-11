@@ -12,15 +12,31 @@ Downloads the following materials:
 # Setup
 This software requires **Python version >=3.6**.
 
-Obtain the source, for example using `git clone` or downloading and unzipping a zip. The following exemplary commands are to be used from inside that downloaded `syncMyMoodle` directory.
+Obtain the source, e.g. `git clone` or downloading as zip and unzip. Use the following exemplary commands from your downloaded `syncMyMoodle` directory.
 
-Since you need to install dependencies to run syncMyMoodle, the recommended way to install them is by first creating and activating a virtual environment ([more info](https://packaging.python.org/guides/installing-using-pip-and-virtual-environments/#creating-a-virtual-environment)):
+syncMyMoodle requires further dependencies which can be installed using `pip` or your distros package manager (`apt`, `dnf`, `pacman`, etc.). The recommended method is to first create and activate a virtual environment. If you are unfamiliar, you can use the following commands ([more info](https://packaging.python.org/guides/installing-using-pip-and-virtual-environments/#creating-a-virtual-environment)):
 ```bash
 python3 -m venv moodle-venv
-source moodle-venv/bin/activate
+source moodle-venv/bin/activate # bash/zsh
 ```
 
-Then install the requirements:
+<details>
+    <summary>commands for shells other than bash</summary>
+
+(taken from [here](https://docs.python.org/3/library/venv.html))
+    
+| Platform | Shell           | Command to activate virtual environment |
+| -------- | --------------- | --------------------------------------- |
+| POSIX    | bash/zsh        | `source <venv>/bin/activate`            |
+|          | fish            | `source <venv>/bin/activate.fish`       |
+|          | csh/tcsh        | `source <venv>/bin/activate.csh`        |
+|          | PowerShell Core | `<venv>/bin/Activate.ps1`               |
+| Windows  | cmd.exe         | `<venv>\Scripts\activate.bat`           |
+|          | PowerShell      | `<venv>\Scripts\Activate.ps1`           |
+
+</details>
+
+Then install the requirements using pip:
 ```bash
 pip3 install -r requirements.txt
 ```
