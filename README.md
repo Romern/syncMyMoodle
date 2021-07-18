@@ -10,10 +10,42 @@ Downloads the following materials:
 * Pages and Labels: Embedded Opencast and Youtube Videos
 
 # Setup
-Initially you need to install the requirements (**Python version >=3.6 is needed.**):
+This software requires **Python version >= 3.6**.
+
+First obtain the source using `git` or by downloading the zip.
+Use the following exemplary commands from the `syncMyMoodle` directory.
+
+syncMyMoodle requires further dependencies which can be installed using `pip` or your distro's package manager (`apt`, `dnf`, `pacman`, etc.).
+The recommended method is to first create and activate a virtual environment.
+If you are unfamiliar, you can use the following commands
+([more info](https://packaging.python.org/guides/installing-using-pip-and-virtual-environments/#creating-a-virtual-environment)):
+```bash
+python3 -m venv .venv
+source moodle-venv/bin/activate # bash/zsh
+```
+
+<details>
+    <summary>commands for shells other than bash</summary>
+
+(taken from [here](https://docs.python.org/3/library/venv.html))
+    
+| Platform | Shell           | Command to activate virtual environment |
+| -------- | --------------- | --------------------------------------- |
+| POSIX    | bash/zsh        | `source <venv>/bin/activate`            |
+|          | fish            | `source <venv>/bin/activate.fish`       |
+|          | csh/tcsh        | `source <venv>/bin/activate.csh`        |
+|          | PowerShell Core | `<venv>/bin/Activate.ps1`               |
+| Windows  | cmd.exe         | `<venv>\Scripts\activate.bat`           |
+|          | PowerShell      | `<venv>\Scripts\Activate.ps1`           |
+
+</details>
+
+Then install the requirements using pip:
 ```bash
 pip3 install -r requirements.txt
 ```
+    
+It is recommended to also install and use the optional [FreeDesktop.org Secret Service integration](#freedesktoporg-secret-service-integration) to store your password securely if your system supports it - if you're on Linux, it probably does!
 
 Copy ``config.json.example`` to ``config.json`` and adjust the settings:
 
@@ -48,7 +80,9 @@ And your courses will be synced into the ``basedir`` you specified (default is t
 # CLI usage
 Run
 ```bash
+source moodle-venv/bin/activate # if you installed using virtual environment
 ./syncMyMoodle.py
+deactivate # leave virtual environment
 ```
 You can override the fields in the config file by using command line arguments:
 
