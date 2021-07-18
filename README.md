@@ -42,7 +42,7 @@ source moodle-venv/bin/activate # bash/zsh
 
 Then install the requirements using pip:
 ```bash
-(.venv) pip install -r requirements.txt
+pip3 install -r requirements.txt
 ```
     
 It is recommended to also install and use the optional [FreeDesktop.org Secret Service integration](#freedesktoporg-secret-service-integration) to store your password securely if your system supports it - if you're on Linux, it probably does!
