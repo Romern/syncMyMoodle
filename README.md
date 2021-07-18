@@ -15,7 +15,7 @@ This software requires **Python version >= 3.6**.
 First obtain the source using `git` or by downloading the zip.
 Use the following exemplary commands from the `syncMyMoodle` directory.
 
-syncMyMoodle requires further dependencies which can be installed using `pip` or your distros package manager (`apt`, `dnf`, `pacman`, etc.).
+syncMyMoodle requires further dependencies which can be installed using `pip` or your distro's package manager (`apt`, `dnf`, `pacman`, etc.).
 The recommended method is to first create and activate a virtual environment.
 If you are unfamiliar, you can use the following commands
 ([more info](https://packaging.python.org/guides/installing-using-pip-and-virtual-environments/#creating-a-virtual-environment)):
