@@ -3,3 +3,4 @@ config.json
 downloaded_modules.json
 session
 .idea
+.venv
