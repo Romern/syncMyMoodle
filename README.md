@@ -10,13 +10,17 @@ Downloads the following materials:
 * Pages and Labels: Embedded Opencast and Youtube Videos
 
 # Setup
-This software requires **Python version >=3.6**.
+This software requires **Python version >= 3.6**.
 
-Obtain the source, e.g. `git clone` or downloading as zip and unzip. Use the following exemplary commands from your downloaded `syncMyMoodle` directory.
+First obtain the source using `git` or by downloading the zip.
+Use the following exemplary commands from the `syncMyMoodle` directory.
 
-syncMyMoodle requires further dependencies which can be installed using `pip` or your distros package manager (`apt`, `dnf`, `pacman`, etc.). The recommended method is to first create and activate a virtual environment. If you are unfamiliar, you can use the following commands ([more info](https://packaging.python.org/guides/installing-using-pip-and-virtual-environments/#creating-a-virtual-environment)):
+syncMyMoodle requires further dependencies which can be installed using `pip` or your distros package manager (`apt`, `dnf`, `pacman`, etc.).
+The recommended method is to first create and activate a virtual environment.
+If you are unfamiliar, you can use the following commands
+([more info](https://packaging.python.org/guides/installing-using-pip-and-virtual-environments/#creating-a-virtual-environment)):
 ```bash
-python3 -m venv moodle-venv
+python3 -m venv .venv
 source moodle-venv/bin/activate # bash/zsh
 ```
 
@@ -38,8 +42,9 @@ source moodle-venv/bin/activate # bash/zsh
 
 Then install the requirements using pip:
 ```bash
-pip3 install -r requirements.txt
+(.venv) pip install -r requirements.txt
 ```
+    
 It is recommended to also install and use the optional [FreeDesktop.org Secret Service integration](#freedesktoporg-secret-service-integration) to store your password securely if your system supports it - if you're on Linux, it probably does!
 
 Copy ``config.json.example`` to ``config.json`` and adjust the settings:
