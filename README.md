@@ -1,7 +1,9 @@
 # syncMyMoodle
+
 Synchronization client for RWTH Moodle
 
 Downloads the following materials:
+
 * Assignment files, submissions and feedback
 * Resource files
 * Urls: OpenCast, Youtube and Sciebo videos/files, and all other non HTML files
@@ -9,7 +11,8 @@ Downloads the following materials:
 * Quizzes (**Disabled by default**)
 * Pages and Labels: Embedded Opencast and Youtube Videos
 
-# Setup
+## Setup
+
 This software requires **Python version >= 3.6**.
 
 First obtain the source using `git` or by downloading the zip.
@@ -19,6 +22,7 @@ syncMyMoodle requires further dependencies which can be installed using `pip` or
 The recommended method is to first create and activate a virtual environment.
 If you are unfamiliar, you can use the following commands
 ([more info](https://packaging.python.org/guides/installing-using-pip-and-virtual-environments/#creating-a-virtual-environment)):
+
 ```bash
 python3 -m venv .venv
 source moodle-venv/bin/activate # bash/zsh
@@ -28,7 +32,7 @@ source moodle-venv/bin/activate # bash/zsh
     <summary>commands for shells other than bash</summary>
 
 (taken from [here](https://docs.python.org/3/library/venv.html))
-    
+
 | Platform | Shell           | Command to activate virtual environment |
 | -------- | --------------- | --------------------------------------- |
 | POSIX    | bash/zsh        | `source <venv>/bin/activate`            |
@@ -41,13 +45,14 @@ source moodle-venv/bin/activate # bash/zsh
 </details>
 
 Then install the requirements using pip:
+
 ```bash
 pip3 install -r requirements.txt
 ```
-    
+
 It is recommended to also install and use the optional [FreeDesktop.org Secret Service integration](#freedesktoporg-secret-service-integration) to store your password securely if your system supports it - if you're on Linux, it probably does!
 
-Copy ``config.json.example`` to ``config.json`` and adjust the settings:
+Copy `config.json.example` to `config.json` and adjust the settings:
 
 ```js
 {
@@ -75,18 +80,22 @@ Copy ``config.json.example`` to ``config.json`` and adjust the settings:
 }
 ```
 
-And your courses will be synced into the ``basedir`` you specified (default is the current directory). Your cookies will be stored in a session file.
+And your courses will be synced into the `basedir` you specified (default is the current directory).
+Your cookies will be stored in a session file.
 
-# CLI usage
+## CLI usage
+
 Run
+
 ```bash
 source moodle-venv/bin/activate # if you installed using virtual environment
 ./syncMyMoodle.py
 deactivate # leave virtual environment
 ```
+
 You can override the fields in the config file by using command line arguments:
 
-```
+```bash
 usage: syncMyMoodle.py [-h] [--secretservice] [--user USER] [--password PASSWORD] [--config CONFIG]
                        [--cookiefile COOKIEFILE] [--courses COURSES] [--skipcourses SKIPCOURSES]
                        [--semester SEMESTER] [--basedir BASEDIR] [--nolinks]
@@ -111,11 +120,14 @@ optional arguments:
   --nolinks             Wether to not inspect links embedded in pages
 ```
 
-# FreeDesktop.org Secret Service integration
+## FreeDesktop.org Secret Service integration
+
 If you have a FreeDesktop.org Secret Service integration compatible keyring installed, you can save your RWTH SSO credentials in it.
-You need to have the python package ``secretstorage`` installed:
+You need to have the python package `secretstorage` installed:
+
 ```bash
 pip3 install secretstorage
 ```
+
 After you removed your password from the config file (delete the whole line in config.json), you will be prompted for your password when syncing for the first time.
 In subsequent runs, the credentials will be obtained automatically.
