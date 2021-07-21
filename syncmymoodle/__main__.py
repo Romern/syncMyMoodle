@@ -18,6 +18,7 @@ from argparse import ArgumentParser
 import getpass
 import pdfkit
 import shutil
+from pathlib import Path
 
 class Node:
 	def __init__(self, name, id, type, parent, url=None, additional_info=None, is_downloaded=False):
@@ -265,7 +266,7 @@ class SyncMyMoodle:
 		response = self.session.post('https://moodle.rwth-aachen.de/webservice/rest/server.php', params=params, data=data)
 
 		if self.config.get("verbose"):
-			print("------ASSIGNMENT-{assignment_id}-DATA------")
+			print(f"------ASSIGNMENT-{assignment_id}-DATA------")
 			print(response.text)
 
 		files = response.json().get("lastattempt",{}).get("submission",{}).get("plugins",[])
@@ -336,7 +337,7 @@ class SyncMyMoodle:
 
 			if self.config.get("verbose"):
 				print("-----------------------")
-				print("------{semestername} - {course_name}------")
+				print(f"------{semestername} - {course_name}------")
 				print("------COURSE-DATA------")
 				print(json.dumps(course))
 				print("------ASSIGNMENT-DATA------")
@@ -691,12 +692,16 @@ if __name__ == '__main__':
 	except:
 		has_secretstorage = False
 
-	parser = ArgumentParser(description="Synchronization client for RWTH Moodle. All optional arguments override those in config.json.")
+	parser = ArgumentParser(
+		# workaround for invoking as `python3 -m ...`
+		prog=None if not globals().get('__spec__') else 'python3 -m {}'.format(__spec__.name.partition('.')[0]),
+		description="Synchronization client for RWTH Moodle. All optional arguments override those in config.json."
+	)
 	if has_secretstorage:
 		parser.add_argument('--secretservice',action='store_true', help="Use FreeDesktop.org Secret Service as storage/retrival for username/passwords.")
 	parser.add_argument('--user', default=None, help="Your RWTH SSO username")
 	parser.add_argument('--password', default=None, help="Your RWTH SSO password")
-	parser.add_argument('--config', default="config.json", help="The path to the config file")
+	parser.add_argument('--config', default=None, help="The path to the config file")
 	parser.add_argument('--cookiefile', default=None, help="The location of the cookie file")
 	parser.add_argument('--courses', default=None, help="Only these courses will be synced (comma seperated links) (if empty, all courses will be synced)")
 	parser.add_argument('--skipcourses', default=None, help="These courses will NOT be synced (comma seperated links)")
@@ -709,8 +714,24 @@ if __name__ == '__main__':
 
 	config = {}
 
-	if os.path.exists(args.config):
-		config = json.load(open(args.config))
+	global_config = Path(os.environ.get(
+		"XDG_CONFIG_HOME",
+		Path("~/.config").expanduser()
+	)) / "syncmymoodle" / "config.json"
+	if global_config.is_file():
+		with global_config.open() as f:
+			config.update(json.load(f))
+
+	local_config = Path("config.json")
+	if local_config.is_file():
+		with local_config.open() as f:
+			config.update(json.load(f))
+
+	if args.config:
+		overwrite_config = Path(args.config)
+		if overwrite_config.is_file():
+			with overwrite_config.open() as f:
+				config.update(json.load(f))
 
 	config["user"] = args.user or config.get("user")
 	config["password"] = args.password or config.get("password")
