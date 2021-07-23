@@ -693,8 +693,7 @@ if __name__ == '__main__':
 		has_secretstorage = False
 
 	parser = ArgumentParser(
-		# workaround for invoking as `python3 -m ...`
-		prog=None if not globals().get('__spec__') else 'python3 -m {}'.format(__spec__.name.partition('.')[0]),
+		prog="python3 -m syncmymoodle",
 		description="Synchronization client for RWTH Moodle. All optional arguments override those in config.json."
 	)
 	if has_secretstorage:
@@ -712,25 +711,26 @@ if __name__ == '__main__':
 	parser.add_argument('--verbose', action='store_true', help="Verbose output for debugging.")
 	args = parser.parse_args()
 
-	config = {}
-
-	global_config = Path(os.environ.get(
-		"XDG_CONFIG_HOME",
-		Path("~/.config").expanduser()
-	)) / "syncmymoodle" / "config.json"
-	if global_config.is_file():
-		with global_config.open() as f:
-			config.update(json.load(f))
-
-	local_config = Path("config.json")
-	if local_config.is_file():
-		with local_config.open() as f:
-			config.update(json.load(f))
 
 	if args.config:
 		overwrite_config = Path(args.config)
 		if overwrite_config.is_file():
 			with overwrite_config.open() as f:
+				config = json.load(f)
+	else:
+		config = {}
+
+		global_config = Path(os.environ.get(
+			"XDG_CONFIG_HOME",
+			Path("~/.config").expanduser()
+		)) / "syncmymoodle" / "config.json"
+		if global_config.is_file():
+			with global_config.open() as f:
+				config.update(json.load(f))
+
+		local_config = Path("config.json")
+		if local_config.is_file():
+			with local_config.open() as f:
 				config.update(json.load(f))
 
 	config["user"] = args.user or config.get("user")

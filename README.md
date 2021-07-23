@@ -51,7 +51,9 @@ to store your password securely if your system supports it - if you're on Linux,
 
 ## Configuration
 
-Copy `config.json.example` to `config.json` and adjust the settings:
+Copy `config.json.example` or the following text (minus the comments) to `config.json` in your current directory
+or alternatively to `~/.config/syncmymoodle/config.json` for configuring `syncmymoodle` user-wide.
+Afterwards you can adjust the settings:
 
 ```js
 {
