@@ -1,5 +1,0 @@
-requests
-beautifulsoup4
-youtube_dl
-tqdm
-pdfkit

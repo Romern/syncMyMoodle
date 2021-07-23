@@ -11,48 +11,49 @@ Downloads the following materials:
 * Quizzes (**Disabled by default**)
 * Pages and Labels: Embedded Opencast and Youtube Videos
 
-## Setup
+## Installation
 
 This software requires **Python version >= 3.6**.
 
-First obtain the source using `git` or by downloading the zip.
-Use the following exemplary commands from the `syncMyMoodle` directory.
+### Installation using `pip` (recommended)
 
-syncMyMoodle requires further dependencies which can be installed using `pip` or your distro's package manager (`apt`, `dnf`, `pacman`, etc.).
-The recommended method is to first create and activate a virtual environment.
-If you are unfamiliar, you can use the following commands
-([more info](https://packaging.python.org/guides/installing-using-pip-and-virtual-environments/#creating-a-virtual-environment)):
+The simples way to setup this app is to install it using pip.
+To isolate dependencies it is advised to use a virtual environment.
+For more information take a look at
+[the guide from the Python website](https://packaging.python.org/guides/installing-using-pip-and-virtual-environments/#creating-a-virtual-environment):
 
 ```bash
 python3 -m venv .venv
-source moodle-venv/bin/activate # bash/zsh
+source .venv/bin/activate  # bash/zsh, for other shells view the docs
+pip3 install syncmymoodle
 ```
 
-<details>
-    <summary>commands for shells other than bash</summary>
+### Manual installation
 
-(taken from [here](https://docs.python.org/3/library/venv.html))
+If you like living on the bleeding edge you can also clone or download the source directly
+and setup everything manually.
+syncMyMoodle requires some dependencies which can be installed using `pip`
+or your distro's package manager (`apt`, `dnf`, `pacman`, etc.).
 
-| Platform | Shell           | Command to activate virtual environment |
-| -------- | --------------- | --------------------------------------- |
-| POSIX    | bash/zsh        | `source <venv>/bin/activate`            |
-|          | fish            | `source <venv>/bin/activate.fish`       |
-|          | csh/tcsh        | `source <venv>/bin/activate.csh`        |
-|          | PowerShell Core | `<venv>/bin/Activate.ps1`               |
-| Windows  | cmd.exe         | `<venv>\Scripts\activate.bat`           |
-|          | PowerShell      | `<venv>\Scripts\Activate.ps1`           |
-
-</details>
-
-Then install the requirements using pip:
+To install the requirements using pip execute the following command from the repository root.
 
 ```bash
-pip3 install -r requirements.txt
+# It is best to run this in a virtual environment.
+# For more information see the section above.
+pip3 install .
 ```
 
-It is recommended to also install and use the optional [FreeDesktop.org Secret Service integration](#freedesktoporg-secret-service-integration) to store your password securely if your system supports it - if you're on Linux, it probably does!
+### Optional steps
 
-Copy `config.json.example` to `config.json` and adjust the settings:
+It is recommended to also install and use the optional
+[FreeDesktop.org Secret Service integration](#freedesktoporg-secret-service-integration)
+to store your password securely if your system supports it - if you're on Linux, it probably does!
+
+## Configuration
+
+Copy `config.json.example` or the following text (minus the comments) to `config.json` in your current directory
+or alternatively to `~/.config/syncmymoodle/config.json` for configuring `syncmymoodle` user-wide.
+Afterwards you can adjust the settings:
 
 ```js
 {
@@ -85,12 +86,12 @@ Your cookies will be stored in a session file.
 
 ## CLI usage
 
-Run
+Run:
 
 ```bash
-source moodle-venv/bin/activate # if you installed using virtual environment
-./syncMyMoodle.py
-deactivate # leave virtual environment
+source .venv/bin/activate  # if you installed using virtual environment
+python3 -m syncmymoodle
+deactivate  # leave virtual environment
 ```
 
 You can override the fields in the config file by using command line arguments:
@@ -122,12 +123,16 @@ optional arguments:
 
 ## FreeDesktop.org Secret Service integration
 
-If you have a FreeDesktop.org Secret Service integration compatible keyring installed, you can save your RWTH SSO credentials in it.
-You need to have the python package `secretstorage` installed:
+If you have a FreeDesktop.org Secret Service integration compatible keyring installed,
+you can save your RWTH SSO credentials in it.
+You need to install syncMyMoodle with the `keyring` extra installed:
 
 ```bash
-pip3 install secretstorage
+pip3 install syncmymoodle[keyring]  # when installing from PyPi
+# or
+pip3 install .[keyring]  # when installing manually
 ```
 
-After you removed your password from the config file (delete the whole line in config.json), you will be prompted for your password when syncing for the first time.
+After you removed your password from the config file (delete the whole line in config.json),
+you will be prompted for your password when syncing for the first time.
 In subsequent runs, the credentials will be obtained automatically.
