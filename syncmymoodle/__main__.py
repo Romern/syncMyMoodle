@@ -11,7 +11,6 @@ import hashlib
 import youtube_dl
 import traceback
 import http.client
-import html
 import urllib.parse
 from tqdm import tqdm
 from argparse import ArgumentParser
@@ -19,6 +18,11 @@ import getpass
 import pdfkit
 import shutil
 from pathlib import Path
+from typing import List
+
+
+YOUTUBE_ID_LENGTH = 11
+
 
 class Node:
 	def __init__(self, name, id, type, parent, url=None, additional_info=None, is_downloaded=False):
@@ -27,7 +31,7 @@ class Node:
 		self.url = url
 		self.type = type
 		self.parent = parent
-		self.children = []
+		self.children: List[Node] = []
 		self.additional_info = additional_info # Currently only used for course_id in opencast
 		self.is_downloaded = is_downloaded # Can also be used to exclude files from being downloaded
 
@@ -69,10 +73,10 @@ class Node:
 				siblings = [c for c in self.children if c.name == child.name and c.url != child.url]
 				if len(siblings) > 0:
 					# if an Opencast filename is duplicate in its directory, we append the filename as it was uploaded
-					tmp_name, tmp_ext = os.path.splitext(child.name)
+					tmp_name = Path(child.name).name
 					child.name = f"{tmp_name}_{child.url.split('/')[-1]}"
 					for s in siblings:
-						tmp_name, tmp_ext = os.path.splitext(s.name)
+						tmp_name = Path(s.name).name
 						s.name = f"{s.name}_{s.url.split('/')[-1]}"
 						self.children.remove(s)
 					unclashed_children.extend(siblings)
@@ -88,11 +92,11 @@ class Node:
 			siblings = [c for c in self.children if c.name == child.name and c.url != child.url]
 			if len(siblings) > 0:
 				# if a filename is still duplicate in its directory, we rename it by appending its id (urlsafe base64 so it also works for urls).
-				base, ext = os.path.splitext(child.name)
-				child.name = base + "_" + base64.urlsafe_b64encode(hashlib.md5(str(child.id).encode("utf-8")).hexdigest().encode("utf-8")).decode()[:10] + ext
+				filename = Path(child.name)
+				child.name = filename.stem + "_" + base64.urlsafe_b64encode(hashlib.md5(str(child.id).encode("utf-8")).hexdigest().encode("utf-8")).decode()[:10] + filename.suffix
 				for s in siblings:
-					base, ext = os.path.splitext(s.name)
-					s.name = base + "_" + base64.urlsafe_b64encode(hashlib.md5(str(s.id).encode("utf-8")).hexdigest().encode("utf-8")).decode()[:10] + ext
+					filename = Path(s.name)
+					s.name = filename.stem + "_" + base64.urlsafe_b64encode(hashlib.md5(str(s.id).encode("utf-8")).hexdigest().encode("utf-8")).decode()[:10] + filename.suffix
 					self.children.remove(s)
 				unclashed_children.extend(siblings)
 
@@ -125,15 +129,16 @@ class SyncMyMoodle:
 			return re.findall("sesskey=([a-zA-Z0-9]*)", session_key)[0]
 
 		self.session = requests.Session()
-		if os.path.exists(self.config.get("cookie_file", "./session")):
-			with open(self.config.get("cookie_file", "./session"), 'rb') as f:
+		cookie_file = Path(self.config.get("cookie_file", "./session"))
+		if cookie_file.exists():
+			with cookie_file.open('rb') as f:
 				self.session.cookies.update(pickle.load(f))
 		resp = self.session.get("https://moodle.rwth-aachen.de/")
 		resp = self.session.get("https://moodle.rwth-aachen.de/auth/shibboleth/index.php")
 		if resp.url == "https://moodle.rwth-aachen.de/my/":
 			soup = bs(resp.text, features="html.parser")
 			self.session_key = get_session_key(soup)
-			with open(self.config.get("cookie_file", "./session"), 'wb') as f:
+			with cookie_file.open('wb') as f:
 				pickle.dump(self.session.cookies, f)
 			return
 		soup = bs(resp.text, features="html.parser")
@@ -152,7 +157,7 @@ class SyncMyMoodle:
 		data = {"RelayState": soup.find("input",{"name": "RelayState"})["value"],
 				"SAMLResponse": soup.find("input",{"name": "SAMLResponse"})["value"]}
 		resp = self.session.post("https://moodle.rwth-aachen.de/Shibboleth.sso/SAML2/POST", data=data)
-		with open(self.config.get("cookie_file", "./session"), 'wb') as f:
+		with cookie_file.open('wb') as f:
 			soup = bs(resp.text, features="html.parser")
 			self.session_key = get_session_key(soup)
 			pickle.dump(self.session.cookies, f)
@@ -370,9 +375,14 @@ class SyncMyMoodle:
 							ass = ass["introattachments"] + self.get_assignment_submission_files(assignment_id)
 							for c in ass:
 								if c["filepath"] != "/":
-									file_node = assignment_node.add_child(os.path.join(self.sanitize(c["filepath"]),self.sanitize(c["filename"])), c["fileurl"], "Assignment File", url=c["fileurl"])
+									assignment_node.add_child(
+										Path(self.sanitize(c["filepath"]), self.sanitize(c["filename"])),
+										c["fileurl"],
+										"Assignment File",
+										url=c["fileurl"]
+									)
 								else:
-									file_node = assignment_node.add_child(c["filename"], c["fileurl"], "Assignment File", url=c["fileurl"])
+									assignment_node.add_child(c["filename"], c["fileurl"], "Assignment File", url=c["fileurl"])
 
 						## Get Resources or URLs
 						if module["modname"] in ["resource", "url", "book", "page", "pdfannotator"]:
@@ -397,9 +407,14 @@ class SyncMyMoodle:
 										c["filepath"] = c["filepath"][:-1]
 									while c["filepath"][0] == "/":
 										c["filepath"] = c["filepath"][1:]
-									file_node = folder_node.add_child(os.path.join(self.sanitize(c["filepath"]),self.sanitize(c["filename"])), c["fileurl"], "Folder File", url=c["fileurl"])
+									folder_node.add_child(
+										str(Path(self.sanitize(c["filepath"]), self.sanitize(c["filename"]))),
+										c["fileurl"],
+										"Folder File",
+										url=c["fileurl"]
+									)
 								else:
-									file_node = folder_node.add_child(c["filename"], c["fileurl"], "Folder File", url=c["fileurl"])
+									folder_node.add_child(c["filename"], c["fileurl"], "Folder File", url=c["fileurl"])
 
 						## Get embedded videos in pages or labels
 						if module["modname"] in ["page","label"] and self.config.get("used_modules",{}).get("url",{}):
@@ -495,9 +510,9 @@ class SyncMyMoodle:
 		for child in cur_node.children:
 			self._download_all_files(child)
 
-	def get_sanitized_node_path(self, node):
-		path_temp = [os.path.expanduser(self.config.get("basedir","./"))] + [self.sanitize(p) for p in node.get_path()]
-		return os.path.join(*path_temp)
+	def get_sanitized_node_path(self, node: Node) -> Path:
+		basedir = Path(self.config.get("basedir","./")).expanduser()
+		return basedir.joinpath(*(self.sanitize(p) for p in node.get_path()))
 
 	def sanitize(self, path):
 		path = urllib.parse.unquote(path)
@@ -512,16 +527,16 @@ class SyncMyMoodle:
 
 	def download_file(self, node):
 		downloadpath = self.get_sanitized_node_path(node)
-		downloadpathparent = self.get_sanitized_node_path(node.parent)
 
-		if os.path.exists(downloadpath):
+		if downloadpath.exists():
 			return True
 
 		if len(node.name.split("."))>0 and node.name.split(".")[-1] in self.config.get("exclude_filetypes",[]):
 			return True
 
-		if os.path.exists(downloadpath + ".temp"):
-			resume_size = os.stat(downloadpath + ".temp").st_size
+		tmp_downloadpath = downloadpath.with_suffix(downloadpath.suffix + ".temp")
+		if tmp_downloadpath.exists():
+			resume_size = tmp_downloadpath.stat().st_size
 			header = {'Range':f'bytes= {resume_size}-'}
 		else:
 			resume_size = 0
@@ -533,13 +548,13 @@ class SyncMyMoodle:
 			progress_bar = tqdm(total=total_size_in_bytes, unit='iB', unit_scale=True)
 			if resume_size:
 				progress_bar.update(resume_size)
-			os.makedirs(downloadpathparent, exist_ok=True)
-			with open(downloadpath + ".temp","ab") as file:
+			downloadpath.parent.mkdir(parents=True, exist_ok=True)
+			with tmp_downloadpath.open("ab") as file:
 				for data in response.iter_content(self.block_size):
 					progress_bar.update(len(data))
 					file.write(data)
 			progress_bar.close()
-			os.rename(downloadpath + ".temp", downloadpath)
+			tmp_downloadpath.rename(downloadpath)
 			return True
 		return False
 
@@ -589,8 +604,8 @@ class SyncMyMoodle:
 	def scanAndDownloadYouTube(self, node):
 		path = self.get_sanitized_node_path(node.parent)
 		link = node.url
-		if os.path.exists(path):
-			if len([f for f in os.listdir(path) if link[-11:] in f])!=0:
+		if path.exists():
+			if any(link[-YOUTUBE_ID_LENGTH:] in f.name for f in path.iterdir()):
 				return False
 		ydl_opts = {
 			"outtmpl": "{}/%(title)s-%(id)s.%(ext)s".format(path),
@@ -598,16 +613,16 @@ class SyncMyMoodle:
 			"nooverwrites": True,
 			"retries": 15
 		}
-		os.makedirs(path, exist_ok=True)
+		path.mkdir(parents=True, exist_ok=True)
 		with youtube_dl.YoutubeDL(ydl_opts) as ydl:
 			ydl.download([link])
 		return True
 
 	def downloadQuiz(self, node):
 		path = self.get_sanitized_node_path(node.parent)
-		os.makedirs(path, exist_ok=True)
+		path.mkdir(parents=True, exist_ok=True)
 
-		if os.path.exists(os.path.join(path, f"{node.name}.pdf")):
+		if (path / f"{node.name}.pdf").exists():
 			return True
 
 		quiz_res = bs(self.session.get(node.url).text,features="html.parser")
@@ -619,7 +634,7 @@ class SyncMyMoodle:
 		quiz_html = str(quiz_res)
 		print("Generating quiz-PDF for " + node.name + "... [Quiz]")
 
-		pdfkit.from_string(quiz_html, os.path.join(path,f"{node.name}.pdf"), options={'quiet': '','javascript-delay': '30000','disable-smart-shrinking': '','run-script': 'MathJax.Hub.Config({"CommonHTML": {minScaleAdjust: 100},"HTML-CSS": {scale: 200}}); MathJax.Hub.Queue(["Rerender", MathJax.Hub], function () {window.status="finished"})'})
+		pdfkit.from_string(quiz_html, path / f"{node.name}.pdf", options={'quiet': '','javascript-delay': '30000','disable-smart-shrinking': '','run-script': 'MathJax.Hub.Config({"CommonHTML": {minScaleAdjust: 100},"HTML-CSS": {scale: 200}}); MathJax.Hub.Queue(["Rerender", MathJax.Hub], function () {window.status="finished"})'})
 
 		print("...done!")
 		return True
