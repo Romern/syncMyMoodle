@@ -761,27 +761,30 @@ if __name__ == '__main__':
 		print("You do not have wkhtmltopdf in your path. Quiz-PDFs are NOT generated")
 
 	if has_secretstorage and config.get("use_secret_service"):
-		if not args.user and not config.get("user"):
-			print("You need to provide your username in the config file or through --user!")
-			exit(1)
 		if config.get("password"):
 			print("You need to remove your password from your config file!")
 			exit(1)
 
 		connection = secretstorage.dbus_init()
 		collection = secretstorage.get_default_collection(connection)
-		attributes = {"application": "syncMyMoodle", "username": config["user"]}
+		attributes = {"application": "syncMyMoodle"}
 		results = list(collection.search_items(attributes))
 		if len(results) == 0:
 			if args.password:
 				password = args.password
 			else:
 				password = getpass.getpass("Password:")
+			if not args.user and not config.get("user"):
+				print("You need to provide your username in the config file or through --user!")
+				exit(1)
+			attributes["username"] = config["user"]
 			item = collection.create_item(f'{config["user"]}@rwth-aachen.de', attributes, password)
 		else:
 			item = results[0]
 		if item.is_locked():
 			item.unlock()
+		if not config.get("user"):
+			config["user"] = item.get_attributes().get("username")
 		config["password"] = item.get_secret().decode("utf-8")
 
 	if not config.get("user") or not config.get("password"):
