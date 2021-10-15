@@ -17,11 +17,14 @@ from argparse import ArgumentParser
 import getpass
 import pdfkit
 import shutil
+import logging
 from pathlib import Path
 from typing import List
 
 
 YOUTUBE_ID_LENGTH = 11
+
+logger = logging.getLogger(__name__)
 
 
 class Node:
@@ -149,10 +152,9 @@ class SyncMyMoodle:
 			resp2 = self.session.post(resp.url,data=data)
 			soup = bs(resp2.text, features="html.parser")
 		if soup.find("input",{"name": "RelayState"}) is None:
-			print(f"Failed to login! Maybe your login-info was wrong or the RWTH-Servers have difficulties, see https://maintenance.rz.rwth-aachen.de/ticket/status/messages . For more info use the --verbose argument.")
-			if self.config.get("verbose"):
-				print("-------Login-Error-Soup--------")
-				print(soup)
+			logger.critical(f"Failed to login! Maybe your login-info was wrong or the RWTH-Servers have difficulties, see https://maintenance.rz.rwth-aachen.de/ticket/status/messages . For more info use the --verbose argument.")
+			logger.info("-------Login-Error-Soup--------")
+			logger.info(soup)
 			exit(1)
 		data = {"RelayState": soup.find("input",{"name": "RelayState"})["value"],
 				"SAMLResponse": soup.find("input",{"name": "SAMLResponse"})["value"]}
@@ -231,7 +233,7 @@ class SyncMyMoodle:
 		}
 		resp = self.session.post(f"https://moodle.rwth-aachen.de/webservice/rest/server.php", params=params, data=data)
 		if not resp.json().get("userid") or not resp.json()["userprivateaccesskey"]:
-			print(f"Error while getting userid and access key: {json.dumps(resp.json(), indent=4)}")
+			logger.critical(f"Error while getting userid and access key: {json.dumps(resp.json(), indent=4)}")
 			exit(1)
 		self.user_id = resp.json()["userid"]
 		self.user_private_access_key = resp.json()["userprivateaccesskey"]
@@ -270,9 +272,8 @@ class SyncMyMoodle:
 
 		response = self.session.post('https://moodle.rwth-aachen.de/webservice/rest/server.php', params=params, data=data)
 
-		if self.config.get("verbose"):
-			print(f"------ASSIGNMENT-{assignment_id}-DATA------")
-			print(response.text)
+		logger.info(f"------ASSIGNMENT-{assignment_id}-DATA------")
+		logger.info(response.text)
 
 		files = response.json().get("lastattempt",{}).get("submission",{}).get("plugins",[])
 		files += response.json().get("lastattempt",{}).get("teamsubmission",{}).get("plugins",[])
@@ -340,23 +341,21 @@ class SyncMyMoodle:
 			assignments = self.get_assignment(course_id)
 			folders = self.get_folders_by_courses(course_id)
 
-			if self.config.get("verbose"):
-				print("-----------------------")
-				print(f"------{semestername} - {course_name}------")
-				print("------COURSE-DATA------")
-				print(json.dumps(course))
-				print("------ASSIGNMENT-DATA------")
-				print(json.dumps(assignments))
-				print("------FOLDER-DATA------")
-				print(json.dumps(folders))
+			logger.info("-----------------------")
+			logger.info(f"------{semestername} - {course_name}------")
+			logger.info("------COURSE-DATA------")
+			logger.info(json.dumps(course))
+			logger.info("------ASSIGNMENT-DATA------")
+			logger.info(json.dumps(assignments))
+			logger.info("------FOLDER-DATA------")
+			logger.info(json.dumps(folders))
 
 			for section in self.get_course(course_id):
 				if isinstance(section, str):
-					print(f"Error syncing section in {course_name}: {section}")
+					logger.error(f"Error syncing section in {course_name}: {section}")
 					continue
-				if self.config.get("verbose"):
-					print("------SECTION-DATA------")
-					print(json.dumps(section))
+				logger.info("------SECTION-DATA------")
+				logger.info(json.dumps(section))
 				section_node = course_node.add_child(section["name"], section["id"], "Section")
 				for module in section["modules"]:
 					try:
@@ -431,11 +430,10 @@ class SyncMyMoodle:
 							engage_id = info_res.find("input",{"name": "custom_id"})
 							name = info_res.find("input",{"name": "resource_link_title"})
 							if not engage_id:
-								print("Failed to find custom_id on lti page.")
-								if self.config.get("verbose"):
-									print("------LTI-ERROR-HTML------")
-									print(f"url: {info_url}")
-									print(info_res)
+								logger.error("Failed to find custom_id on lti page.")
+								logger.info("------LTI-ERROR-HTML------")
+								logger.info(f"url: {info_url}")
+								logger.info(info_res)
 							else:
 								engage_id = engage_id.get("value")
 								name = name.get("value")
@@ -455,8 +453,7 @@ class SyncMyMoodle:
 								section_node.add_child(self.sanitize(name), urllib.parse.urlparse(review_url)[1], "Quiz", url=review_url)
 
 					except Exception as e:
-						traceback.print_exc()
-						print(f"Failed to download the module {module}: {e}")
+						logger.exception(f"Failed to download the module {module}")
 
 		self.root_node.remove_children_nameclashes()
 
@@ -480,31 +477,27 @@ class SyncMyMoodle:
 						self.scanAndDownloadYouTube(cur_node)
 						cur_node.is_downloaded = True
 					except Exception as e:
-						traceback.print_exc()
-						print(f"Failed to download the module {cur_node}: {e}")
-						print("This could be caused by an out of date youtube-dl version. Try upgrading youtube-dl through pip or your package manager.")
+						logger.exception(f"Failed to download the module {cur_node}")
+						logger.error("This could be caused by an out of date youtube-dl version. Try upgrading youtube-dl through pip or your package manager.")
 				elif cur_node.type == "Opencast":
 					try:
 						self.downloadOpenCastVideos(cur_node)
 						cur_node.is_downloaded = True
 					except Exception as e:
-						traceback.print_exc()
-						print(f"Failed to download the module {cur_node}: {e}")
+						logger.exception(f"Failed to download the module {cur_node}")
 				elif cur_node.type == "Quiz":
 					try:
 						self.downloadQuiz(cur_node)
 						cur_node.is_downloaded = True
 					except Exception as e:
-						traceback.print_exc()
-						print(f"Failed to download the module {cur_node}: {e}")
-						print("Is wkhtmltopdf correctly installed?")
+						logger.exception(f"Failed to download the module {cur_node}")
+						logger.warning("Is wkhtmltopdf correctly installed?")
 				else:
 					try:
 						self.download_file(cur_node)
 						cur_node.is_downloaded = True
 					except Exception as e:
-						traceback.print_exc()
-						print(f"Failed to download the module {cur_node}: {e}")
+						logger.exception(f"Failed to download the module {cur_node}")
 			return
 
 		for child in cur_node.children:
@@ -569,10 +562,9 @@ class SyncMyMoodle:
 		try:
 			engageDataSoup = bs(response.json()[0]["data"], features="html.parser")
 		except Exception as e:
-			print("Failed to parse Opencast response!")
-			if self.config.get("verbose"):
-				print("------Opencast-Error------")
-				print(response.text)
+			logger.exception("Failed to parse Opencast response!")
+			logger.info("------Opencast-Error------")
+			logger.info(response.text)
 			raise e
 
 		engageData = dict([(i["name"], i["value"]) for i in engageDataSoup.findAll("input")])
@@ -668,8 +660,7 @@ class SyncMyMoodle:
 					self.scanForLinks(response.text, parent_node, course_id, module_title=module_title, single=False)
 			except Exception as e:
 				# Maybe the url is down?
-				traceback.print_exc()
-				print(f'Error while downloading url {text}: {e}')
+				logger.exception(f'Error while downloading url {text}')
 		if self.config.get("nolinks"):
 			return
 
@@ -700,7 +691,7 @@ class SyncMyMoodle:
 				if url and filename:
 					parent_node.add_child(filename["value"], url["value"], "Sciebo file", url=url["value"])
 
-if __name__ == '__main__':
+def main():
 	try:
 		import secretstorage
 		has_secretstorage = True
@@ -723,7 +714,7 @@ if __name__ == '__main__':
 	parser.add_argument('--basedir', default=None, help="The base directory where all files will be synced to")
 	parser.add_argument('--nolinks', action='store_true', help="Wether to not inspect links embedded in pages")
 	parser.add_argument('--excludefiletypes', default=None, help="Exclude downloading files from urls with these extensions (comma seperated types, e.g. \"mp4,mkv\")")
-	parser.add_argument('--verbose', action='store_true', help="Verbose output for debugging.")
+	parser.add_argument('--verbose', action="store_const", dest="loglevel", const=logging.INFO, default=logging.WARNING, help="Verbose output for debugging.", )
 	args = parser.parse_args()
 
 
@@ -769,18 +760,19 @@ if __name__ == '__main__':
 		"folder": True
 	}
 	config["exclude_filetypes"] = args.excludefiletypes.split(",") if args.excludefiletypes else config.get("exclude_filetypes",[])
-	config["verbose"] = args.verbose
+
+	logging.basicConfig(level=args.loglevel)
 
 	if not shutil.which("wkhtmltopdf") and config["used_modules"]["url"]["quiz"]:
 		config["used_modules"]["url"]["quiz"] = False
-		print("You do not have wkhtmltopdf in your path. Quiz-PDFs are NOT generated")
+		logger.warning("You do not have wkhtmltopdf in your path. Quiz-PDFs are NOT generated")
 
 	if has_secretstorage and config.get("use_secret_service"):
 		if not args.user and not config.get("user"):
-			print("You need to provide your username in the config file or through --user!")
+			logger.critical("You need to provide your username in the config file or through --user!")
 			exit(1)
 		if config.get("password"):
-			print("You need to remove your password from your config file!")
+			logger.critical("You need to remove your password from your config file!")
 			exit(1)
 
 		connection = secretstorage.dbus_init()
@@ -800,7 +792,7 @@ if __name__ == '__main__':
 		config["password"] = item.get_secret().decode("utf-8")
 
 	if not config.get("user") or not config.get("password"):
-		print("You need to specify your username and password in the config file or as an argument!")
+		logger.critical("You need to specify your username and password in the config file or as an argument!")
 		exit(1)
 
 	smm = SyncMyMoodle(config)
@@ -813,3 +805,6 @@ if __name__ == '__main__':
 	smm.sync()
 	print(f"Downloading files...")
 	smm.download_all_files()
+
+if __name__ == "__main__":
+	main()
