@@ -376,7 +376,7 @@ class SyncMyMoodle:
 							for c in ass:
 								if c["filepath"] != "/":
 									assignment_node.add_child(
-										Path(self.sanitize(c["filepath"]), self.sanitize(c["filename"])),
+										str(Path(self.sanitize(c["filepath"]), self.sanitize(c["filename"]))),
 										c["fileurl"],
 										"Assignment File",
 										url=c["fileurl"]
