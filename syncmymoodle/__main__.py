@@ -109,6 +109,22 @@ class Node:
 			# recurse whole tree
 			child.remove_children_nameclashes()
 
+	def export_as_dot(self, ident="0"):
+		lines = []
+
+		if ident == "0":
+			lines.append("strict digraph {")
+
+		lines.append(f'node_{ident} [label="{self.name}"];')
+		for i, child in enumerate(self.children):
+			lines.append(f"node_{ident} -> node_{ident}{i};")
+			lines.extend(child.export_as_dot(f"{ident}{i}"))
+
+		if ident == "0":
+			lines.append("}")
+
+		return lines
+
 class SyncMyMoodle:
 	params = {
 		'lang': 'en' #Titles for some pages differ
