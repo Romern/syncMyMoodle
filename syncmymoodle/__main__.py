@@ -1,26 +1,26 @@
 #!/usr/bin/env python3
 
-import requests, pickle
-from bs4 import BeautifulSoup as bs
-import os
-import re
-from contextlib import closing
-import json
 import base64
-import hashlib
-import youtube_dl
-import traceback
-import http.client
-import urllib.parse
-from tqdm import tqdm
-from argparse import ArgumentParser
 import getpass
-import pdfkit
-import shutil
+import hashlib
+import http.client
+import json
 import logging
+import os
+import pickle
+import re
+import shutil
+import urllib.parse
+from argparse import ArgumentParser
+from contextlib import closing
 from pathlib import Path
 from typing import List
 
+import pdfkit
+import requests
+import youtube_dl
+from bs4 import BeautifulSoup as bs
+from tqdm import tqdm
 
 YOUTUBE_ID_LENGTH = 11
 
