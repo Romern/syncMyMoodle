@@ -22,6 +22,11 @@ import youtube_dl
 from bs4 import BeautifulSoup as bs
 from tqdm import tqdm
 
+try:
+    import secretstorage
+except ImportError:
+    secretstorage = None
+
 YOUTUBE_ID_LENGTH = 11
 
 logger = logging.getLogger(__name__)
@@ -197,7 +202,7 @@ class SyncMyMoodle:
             soup = bs(resp2.text, features="html.parser")
         if soup.find("input", {"name": "RelayState"}) is None:
             logger.critical(
-                f"Failed to login! Maybe your login-info was wrong or the RWTH-Servers have difficulties, see https://maintenance.rz.rwth-aachen.de/ticket/status/messages . For more info use the --verbose argument."
+                "Failed to login! Maybe your login-info was wrong or the RWTH-Servers have difficulties, see https://maintenance.rz.rwth-aachen.de/ticket/status/messages . For more info use the --verbose argument."
             )
             logger.info("-------Login-Error-Soup--------")
             logger.info(soup)
@@ -214,7 +219,7 @@ class SyncMyMoodle:
             self.session_key = get_session_key(soup)
             pickle.dump(self.session.cookies, f)
 
-    ### Moodle Web Services API
+    # Moodle Web Services API
 
     def get_moodle_wstoken(self):
         if not self.session:
@@ -225,8 +230,9 @@ class SyncMyMoodle:
             "urlscheme": "moodlemobile",
         }
         # response = self.session.head("https://moodle.rwth-aachen.de/admin/tool/mobile/launch.php", params=params, allow_redirects=False)
-        # workaround for macos
+
         def getCookies(cookie_jar, domain):
+            # workaround for macos
             cookie_dict = cookie_jar.get_dict(domain=domain)
             found = ["%s=%s" % (name, value) for (name, value) in cookie_dict.items()]
             return ";".join(found)
@@ -262,7 +268,7 @@ class SyncMyMoodle:
             "wsfunction": "tool_mobile_call_external_functions",
         }
         resp = self.session.post(
-            f"https://moodle.rwth-aachen.de/webservice/rest/server.php",
+            "https://moodle.rwth-aachen.de/webservice/rest/server.php",
             params=params,
             data=data,
         )
@@ -281,7 +287,7 @@ class SyncMyMoodle:
             "wsfunction": "core_course_get_contents",
         }
         resp = self.session.post(
-            f"https://moodle.rwth-aachen.de/webservice/rest/server.php",
+            "https://moodle.rwth-aachen.de/webservice/rest/server.php",
             params=params,
             data=data,
         )
@@ -299,7 +305,7 @@ class SyncMyMoodle:
             "wsfunction": "core_webservice_get_site_info",
         }
         resp = self.session.post(
-            f"https://moodle.rwth-aachen.de/webservice/rest/server.php",
+            "https://moodle.rwth-aachen.de/webservice/rest/server.php",
             params=params,
             data=data,
         )
@@ -326,7 +332,7 @@ class SyncMyMoodle:
             "wsfunction": "mod_assign_get_assignments",
         }
         resp = self.session.post(
-            f"https://moodle.rwth-aachen.de/webservice/rest/server.php",
+            "https://moodle.rwth-aachen.de/webservice/rest/server.php",
             params=params,
             data=data,
         )
@@ -401,9 +407,8 @@ class SyncMyMoodle:
         folder = response.json()["folders"]
         return folder
 
-    ### Retrives the file tree for all courses
-
     def sync(self):
+        """Retrives the file tree for all courses"""
         if not self.session:
             raise Exception("You need to login() first.")
         if not self.wstoken:
@@ -412,7 +417,7 @@ class SyncMyMoodle:
             raise Exception("You need to get_userid() first.")
         self.root_node = Node("", -1, "Root", None)
 
-        ### Syncing all courses
+        # Syncing all courses
         for course in self.get_all_courses():
             course_name = course["shortname"]
             course_id = course["id"]
@@ -486,11 +491,11 @@ class SyncMyMoodle:
                 )
                 for module in section["modules"]:
                     try:
-                        ## Get Assignments
+                        # Get Assignments
                         if module["modname"] == "assign" and self.config.get(
                             "used_modules", {}
                         ).get("assign", {}):
-                            if assignments == None:
+                            if assignments is None:
                                 continue
                             ass = [
                                 a
@@ -530,7 +535,7 @@ class SyncMyMoodle:
                                         url=c["fileurl"],
                                     )
 
-                        ## Get Resources or URLs
+                        # Get Resources or URLs
                         if module["modname"] in [
                             "resource",
                             "url",
@@ -552,7 +557,7 @@ class SyncMyMoodle:
                                         module_title=module["name"],
                                     )
 
-                        ## Get Folders
+                        # Get Folders
                         if module["modname"] == "folder" and self.config.get(
                             "used_modules", {}
                         ).get("folder", {}):
@@ -594,7 +599,7 @@ class SyncMyMoodle:
                                         url=c["fileurl"],
                                     )
 
-                        ## Get embedded videos in pages or labels
+                        # Get embedded videos in pages or labels
                         if module["modname"] in ["page", "label"] and self.config.get(
                             "used_modules", {}
                         ).get("url", {}):
@@ -614,7 +619,7 @@ class SyncMyMoodle:
                                     module_title=module["name"],
                                 )
 
-                        ## New OpenCast integration
+                        # New OpenCast integration
                         if module["modname"] == "lti" and self.config.get(
                             "used_modules", {}
                         ).get("url", {}).get("opencast", {}):
@@ -682,7 +687,7 @@ class SyncMyMoodle:
                                     url=review_url,
                                 )
 
-                    except Exception as e:
+                    except Exception:
                         logger.exception(f"Failed to download the module {module}")
 
         self.root_node.remove_children_nameclashes()
@@ -706,7 +711,7 @@ class SyncMyMoodle:
                     try:
                         self.scanAndDownloadYouTube(cur_node)
                         cur_node.is_downloaded = True
-                    except Exception as e:
+                    except Exception:
                         logger.exception(f"Failed to download the module {cur_node}")
                         logger.error(
                             "This could be caused by an out of date youtube-dl version. Try upgrading youtube-dl through pip or your package manager."
@@ -715,20 +720,20 @@ class SyncMyMoodle:
                     try:
                         self.downloadOpenCastVideos(cur_node)
                         cur_node.is_downloaded = True
-                    except Exception as e:
+                    except Exception:
                         logger.exception(f"Failed to download the module {cur_node}")
                 elif cur_node.type == "Quiz":
                     try:
                         self.downloadQuiz(cur_node)
                         cur_node.is_downloaded = True
-                    except Exception as e:
+                    except Exception:
                         logger.exception(f"Failed to download the module {cur_node}")
                         logger.warning("Is wkhtmltopdf correctly installed?")
                 else:
                     try:
                         self.download_file(cur_node)
                         cur_node.is_downloaded = True
-                    except Exception as e:
+                    except Exception:
                         logger.exception(f"Failed to download the module {cur_node}")
             return
 
@@ -748,9 +753,8 @@ class SyncMyMoodle:
             path = path[1:]
         return path
 
-    # Downloads file with progress bar if it isn't already downloaded
-
     def download_file(self, node):
+        """Download file with progress bar if it isn't already downloaded"""
         downloadpath = self.get_sanitized_node_path(node)
 
         if downloadpath.exists():
@@ -787,11 +791,9 @@ class SyncMyMoodle:
             progress_bar.close()
             tmp_downloadpath.rename(downloadpath)
             return True
-        return False
-
-    # Downloads Opencast videos by using the engage API
 
     def getOpenCastRealURL(self, additional_info, url):
+        """Download Opencast videos by using the engage API"""
         # get engage authentication form
         course_info = [
             {
@@ -822,7 +824,7 @@ class SyncMyMoodle:
         )
 
         linkid = re.match(
-            "https://engage.streaming.rwth-aachen.de/play/([a-z0-9\-]{36})$", url
+            "https://engage.streaming.rwth-aachen.de/play/([a-z0-9-]{36})$", url
         )
         if not linkid:
             return False
@@ -853,9 +855,8 @@ class SyncMyMoodle:
                 node.name = node.url.split("/")[-1]
         return self.download_file(node)
 
-    # Downloads Youtube-Videos using youtube_dl
-
     def scanAndDownloadYouTube(self, node):
+        """Download Youtube-Videos using youtube_dl"""
         path = self.get_sanitized_node_path(node.parent)
         link = node.url
         if path.exists():
@@ -953,7 +954,7 @@ class SyncMyMoodle:
                         module_title=module_title,
                         single=False,
                     )
-            except Exception as e:
+            except Exception:
                 # Maybe the url is down?
                 logger.exception(f"Error while downloading url {text}")
         if self.config.get("nolinks"):
@@ -965,23 +966,23 @@ class SyncMyMoodle:
                 youtube_links = [
                     u[0]
                     for u in re.findall(
-                        "(https?://(www\.)?(youtube\.com/(watch\?[a-zA-Z0-9_\-=\&]*v=|embed/)|youtu.be/).{11})",
+                        r"(https?://(www\.)?(youtube\.com/(watch\?[a-zA-Z0-9_=&-]*v=|embed/)|youtu.be/).{11})",
                         text,
                     )
                 ]
             else:
                 youtube_links = re.findall(
-                    "https://www.youtube.com/embed/[a-zA-Z0-9_\-]{11}", text
+                    "https://www.youtube.com/embed/[a-zA-Z0-9_-]{11}", text
                 )
-            for l in youtube_links:
+            for link in youtube_links:
                 parent_node.add_child(
-                    f"Youtube: {module_title or l}", l, "Youtube", url=l
+                    f"Youtube: {module_title or link}", link, "Youtube", url=link
                 )
 
         # OpenCast videos
         if self.config.get("used_modules", {}).get("url", {}).get("opencast", {}):
             opencast_links = re.findall(
-                "https://engage.streaming.rwth-aachen.de/play/[a-zA-Z0-9\-]+", text
+                "https://engage.streaming.rwth-aachen.de/play/[a-zA-Z0-9-]+", text
             )
             for vid in opencast_links:
                 vid = self.getOpenCastRealURL(course_id, vid)
@@ -996,7 +997,7 @@ class SyncMyMoodle:
         # https://rwth-aachen.sciebo.de/s/XXX
         if self.config.get("used_modules", {}).get("url", {}).get("sciebo", {}):
             sciebo_links = re.findall(
-                "https://rwth-aachen.sciebo.de/s/[a-zA-Z0-9\-]+", text
+                "https://rwth-aachen.sciebo.de/s/[a-zA-Z0-9-]+", text
             )
             for vid in sciebo_links:
                 response = self.session.get(vid)
@@ -1010,18 +1011,11 @@ class SyncMyMoodle:
 
 
 def main():
-    try:
-        import secretstorage
-
-        has_secretstorage = True
-    except:
-        has_secretstorage = False
-
     parser = ArgumentParser(
         prog="python3 -m syncmymoodle",
         description="Synchronization client for RWTH Moodle. All optional arguments override those in config.json.",
     )
-    if has_secretstorage:
+    if secretstorage:
         parser.add_argument(
             "--secretservice",
             action="store_true",
@@ -1108,7 +1102,7 @@ def main():
     )
     config["basedir"] = args.basedir or config.get("basedir", "./")
     config["use_secret_service"] = (
-        args.secretservice if has_secretstorage else None
+        args.secretservice if secretstorage else None
     ) or config.get("use_secret_service")
     config["skip_courses"] = (
         args.skipcourses.split(",")
@@ -1136,7 +1130,7 @@ def main():
             "You do not have wkhtmltopdf in your path. Quiz-PDFs are NOT generated"
         )
 
-    if has_secretstorage and config.get("use_secret_service"):
+    if secretstorage and config.get("use_secret_service"):
         if config.get("password"):
             logger.critical("You need to remove your password from your config file!")
             exit(1)
@@ -1175,13 +1169,13 @@ def main():
 
     smm = SyncMyMoodle(config)
 
-    print(f"Logging in...")
+    print("Logging in...")
     smm.login()
     smm.get_moodle_wstoken()
     smm.get_userid()
-    print(f"Syncing file tree...")
+    print("Syncing file tree...")
     smm.sync()
-    print(f"Downloading files...")
+    print("Downloading files...")
     smm.download_all_files()
 
 
