@@ -1,24 +1,31 @@
 #!/usr/bin/env python3
 
-import requests, pickle
-from bs4 import BeautifulSoup as bs
-import os
-import re
-from contextlib import closing
-import json
 import base64
-import hashlib
-import youtube_dl
-import traceback
-import http.client
-import html
-import urllib.parse
-from tqdm import tqdm
-from argparse import ArgumentParser
 import getpass
-import pdfkit
+import hashlib
+import http.client
+import json
+import logging
+import os
+import pickle
+import re
 import shutil
+import urllib.parse
+from argparse import ArgumentParser
+from contextlib import closing
 from pathlib import Path
+from typing import List
+
+import pdfkit
+import requests
+import youtube_dl
+from bs4 import BeautifulSoup as bs
+from tqdm import tqdm
+
+YOUTUBE_ID_LENGTH = 11
+
+logger = logging.getLogger(__name__)
+
 
 class Node:
 	def __init__(self, name, id, type, parent, url=None, additional_info=None, is_downloaded=False):
@@ -27,7 +34,7 @@ class Node:
 		self.url = url
 		self.type = type
 		self.parent = parent
-		self.children = []
+		self.children: List[Node] = []
 		self.additional_info = additional_info # Currently only used for course_id in opencast
 		self.is_downloaded = is_downloaded # Can also be used to exclude files from being downloaded
 
@@ -69,10 +76,10 @@ class Node:
 				siblings = [c for c in self.children if c.name == child.name and c.url != child.url]
 				if len(siblings) > 0:
 					# if an Opencast filename is duplicate in its directory, we append the filename as it was uploaded
-					tmp_name, tmp_ext = os.path.splitext(child.name)
+					tmp_name = Path(child.name).name
 					child.name = f"{tmp_name}_{child.url.split('/')[-1]}"
 					for s in siblings:
-						tmp_name, tmp_ext = os.path.splitext(s.name)
+						tmp_name = Path(s.name).name
 						s.name = f"{s.name}_{s.url.split('/')[-1]}"
 						self.children.remove(s)
 					unclashed_children.extend(siblings)
@@ -88,11 +95,11 @@ class Node:
 			siblings = [c for c in self.children if c.name == child.name and c.url != child.url]
 			if len(siblings) > 0:
 				# if a filename is still duplicate in its directory, we rename it by appending its id (urlsafe base64 so it also works for urls).
-				base, ext = os.path.splitext(child.name)
-				child.name = base + "_" + base64.urlsafe_b64encode(hashlib.md5(str(child.id).encode("utf-8")).hexdigest().encode("utf-8")).decode()[:10] + ext
+				filename = Path(child.name)
+				child.name = filename.stem + "_" + base64.urlsafe_b64encode(hashlib.md5(str(child.id).encode("utf-8")).hexdigest().encode("utf-8")).decode()[:10] + filename.suffix
 				for s in siblings:
-					base, ext = os.path.splitext(s.name)
-					s.name = base + "_" + base64.urlsafe_b64encode(hashlib.md5(str(s.id).encode("utf-8")).hexdigest().encode("utf-8")).decode()[:10] + ext
+					filename = Path(s.name)
+					s.name = filename.stem + "_" + base64.urlsafe_b64encode(hashlib.md5(str(s.id).encode("utf-8")).hexdigest().encode("utf-8")).decode()[:10] + filename.suffix
 					self.children.remove(s)
 				unclashed_children.extend(siblings)
 
@@ -125,15 +132,16 @@ class SyncMyMoodle:
 			return re.findall("sesskey=([a-zA-Z0-9]*)", session_key)[0]
 
 		self.session = requests.Session()
-		if os.path.exists(self.config.get("cookie_file", "./session")):
-			with open(self.config.get("cookie_file", "./session"), 'rb') as f:
+		cookie_file = Path(self.config.get("cookie_file", "./session"))
+		if cookie_file.exists():
+			with cookie_file.open('rb') as f:
 				self.session.cookies.update(pickle.load(f))
 		resp = self.session.get("https://moodle.rwth-aachen.de/")
 		resp = self.session.get("https://moodle.rwth-aachen.de/auth/shibboleth/index.php")
 		if resp.url == "https://moodle.rwth-aachen.de/my/":
 			soup = bs(resp.text, features="html.parser")
 			self.session_key = get_session_key(soup)
-			with open(self.config.get("cookie_file", "./session"), 'wb') as f:
+			with cookie_file.open('wb') as f:
 				pickle.dump(self.session.cookies, f)
 			return
 		soup = bs(resp.text, features="html.parser")
@@ -144,15 +152,14 @@ class SyncMyMoodle:
 			resp2 = self.session.post(resp.url,data=data)
 			soup = bs(resp2.text, features="html.parser")
 		if soup.find("input",{"name": "RelayState"}) is None:
-			print(f"Failed to login! Maybe your login-info was wrong or the RWTH-Servers have difficulties, see https://maintenance.rz.rwth-aachen.de/ticket/status/messages . For more info use the --verbose argument.")
-			if self.config.get("verbose"):
-				print("-------Login-Error-Soup--------")
-				print(soup)
+			logger.critical(f"Failed to login! Maybe your login-info was wrong or the RWTH-Servers have difficulties, see https://maintenance.rz.rwth-aachen.de/ticket/status/messages . For more info use the --verbose argument.")
+			logger.info("-------Login-Error-Soup--------")
+			logger.info(soup)
 			exit(1)
 		data = {"RelayState": soup.find("input",{"name": "RelayState"})["value"],
 				"SAMLResponse": soup.find("input",{"name": "SAMLResponse"})["value"]}
 		resp = self.session.post("https://moodle.rwth-aachen.de/Shibboleth.sso/SAML2/POST", data=data)
-		with open(self.config.get("cookie_file", "./session"), 'wb') as f:
+		with cookie_file.open('wb') as f:
 			soup = bs(resp.text, features="html.parser")
 			self.session_key = get_session_key(soup)
 			pickle.dump(self.session.cookies, f)
@@ -226,7 +233,7 @@ class SyncMyMoodle:
 		}
 		resp = self.session.post(f"https://moodle.rwth-aachen.de/webservice/rest/server.php", params=params, data=data)
 		if not resp.json().get("userid") or not resp.json()["userprivateaccesskey"]:
-			print(f"Error while getting userid and access key: {json.dumps(resp.json(), indent=4)}")
+			logger.critical(f"Error while getting userid and access key: {json.dumps(resp.json(), indent=4)}")
 			exit(1)
 		self.user_id = resp.json()["userid"]
 		self.user_private_access_key = resp.json()["userprivateaccesskey"]
@@ -265,9 +272,8 @@ class SyncMyMoodle:
 
 		response = self.session.post('https://moodle.rwth-aachen.de/webservice/rest/server.php', params=params, data=data)
 
-		if self.config.get("verbose"):
-			print(f"------ASSIGNMENT-{assignment_id}-DATA------")
-			print(response.text)
+		logger.info(f"------ASSIGNMENT-{assignment_id}-DATA------")
+		logger.info(response.text)
 
 		files = response.json().get("lastattempt",{}).get("submission",{}).get("plugins",[])
 		files += response.json().get("lastattempt",{}).get("teamsubmission",{}).get("plugins",[])
@@ -335,23 +341,21 @@ class SyncMyMoodle:
 			assignments = self.get_assignment(course_id)
 			folders = self.get_folders_by_courses(course_id)
 
-			if self.config.get("verbose"):
-				print("-----------------------")
-				print(f"------{semestername} - {course_name}------")
-				print("------COURSE-DATA------")
-				print(json.dumps(course))
-				print("------ASSIGNMENT-DATA------")
-				print(json.dumps(assignments))
-				print("------FOLDER-DATA------")
-				print(json.dumps(folders))
+			logger.info("-----------------------")
+			logger.info(f"------{semestername} - {course_name}------")
+			logger.info("------COURSE-DATA------")
+			logger.info(json.dumps(course))
+			logger.info("------ASSIGNMENT-DATA------")
+			logger.info(json.dumps(assignments))
+			logger.info("------FOLDER-DATA------")
+			logger.info(json.dumps(folders))
 
 			for section in self.get_course(course_id):
 				if isinstance(section, str):
-					print(f"Error syncing section in {course_name}: {section}")
+					logger.error(f"Error syncing section in {course_name}: {section}")
 					continue
-				if self.config.get("verbose"):
-					print("------SECTION-DATA------")
-					print(json.dumps(section))
+				logger.info("------SECTION-DATA------")
+				logger.info(json.dumps(section))
 				section_node = course_node.add_child(section["name"], section["id"], "Section")
 				for module in section["modules"]:
 					try:
@@ -370,9 +374,14 @@ class SyncMyMoodle:
 							ass = ass["introattachments"] + self.get_assignment_submission_files(assignment_id)
 							for c in ass:
 								if c["filepath"] != "/":
-									file_node = assignment_node.add_child(os.path.join(self.sanitize(c["filepath"]),self.sanitize(c["filename"])), c["fileurl"], "Assignment File", url=c["fileurl"])
+									assignment_node.add_child(
+										str(Path(self.sanitize(c["filepath"]), self.sanitize(c["filename"]))),
+										c["fileurl"],
+										"Assignment File",
+										url=c["fileurl"]
+									)
 								else:
-									file_node = assignment_node.add_child(c["filename"], c["fileurl"], "Assignment File", url=c["fileurl"])
+									assignment_node.add_child(c["filename"], c["fileurl"], "Assignment File", url=c["fileurl"])
 
 						## Get Resources or URLs
 						if module["modname"] in ["resource", "url", "book", "page", "pdfannotator"]:
@@ -397,9 +406,14 @@ class SyncMyMoodle:
 										c["filepath"] = c["filepath"][:-1]
 									while c["filepath"][0] == "/":
 										c["filepath"] = c["filepath"][1:]
-									file_node = folder_node.add_child(os.path.join(self.sanitize(c["filepath"]),self.sanitize(c["filename"])), c["fileurl"], "Folder File", url=c["fileurl"])
+									folder_node.add_child(
+										str(Path(self.sanitize(c["filepath"]), self.sanitize(c["filename"]))),
+										c["fileurl"],
+										"Folder File",
+										url=c["fileurl"]
+									)
 								else:
-									file_node = folder_node.add_child(c["filename"], c["fileurl"], "Folder File", url=c["fileurl"])
+									folder_node.add_child(c["filename"], c["fileurl"], "Folder File", url=c["fileurl"])
 
 						## Get embedded videos in pages or labels
 						if module["modname"] in ["page","label"] and self.config.get("used_modules",{}).get("url",{}):
@@ -416,11 +430,10 @@ class SyncMyMoodle:
 							engage_id = info_res.find("input",{"name": "custom_id"})
 							name = info_res.find("input",{"name": "resource_link_title"})
 							if not engage_id:
-								print("Failed to find custom_id on lti page.")
-								if self.config.get("verbose"):
-									print("------LTI-ERROR-HTML------")
-									print(f"url: {info_url}")
-									print(info_res)
+								logger.error("Failed to find custom_id on lti page.")
+								logger.info("------LTI-ERROR-HTML------")
+								logger.info(f"url: {info_url}")
+								logger.info(info_res)
 							else:
 								engage_id = engage_id.get("value")
 								name = name.get("value")
@@ -440,8 +453,7 @@ class SyncMyMoodle:
 								section_node.add_child(self.sanitize(name), urllib.parse.urlparse(review_url)[1], "Quiz", url=review_url)
 
 					except Exception as e:
-						traceback.print_exc()
-						print(f"Failed to download the module {module}: {e}")
+						logger.exception(f"Failed to download the module {module}")
 
 		self.root_node.remove_children_nameclashes()
 
@@ -465,39 +477,35 @@ class SyncMyMoodle:
 						self.scanAndDownloadYouTube(cur_node)
 						cur_node.is_downloaded = True
 					except Exception as e:
-						traceback.print_exc()
-						print(f"Failed to download the module {cur_node}: {e}")
-						print("This could be caused by an out of date youtube-dl version. Try upgrading youtube-dl through pip or your package manager.")
+						logger.exception(f"Failed to download the module {cur_node}")
+						logger.error("This could be caused by an out of date youtube-dl version. Try upgrading youtube-dl through pip or your package manager.")
 				elif cur_node.type == "Opencast":
 					try:
 						self.downloadOpenCastVideos(cur_node)
 						cur_node.is_downloaded = True
 					except Exception as e:
-						traceback.print_exc()
-						print(f"Failed to download the module {cur_node}: {e}")
+						logger.exception(f"Failed to download the module {cur_node}")
 				elif cur_node.type == "Quiz":
 					try:
 						self.downloadQuiz(cur_node)
 						cur_node.is_downloaded = True
 					except Exception as e:
-						traceback.print_exc()
-						print(f"Failed to download the module {cur_node}: {e}")
-						print("Is wkhtmltopdf correctly installed?")
+						logger.exception(f"Failed to download the module {cur_node}")
+						logger.warning("Is wkhtmltopdf correctly installed?")
 				else:
 					try:
 						self.download_file(cur_node)
 						cur_node.is_downloaded = True
 					except Exception as e:
-						traceback.print_exc()
-						print(f"Failed to download the module {cur_node}: {e}")
+						logger.exception(f"Failed to download the module {cur_node}")
 			return
 
 		for child in cur_node.children:
 			self._download_all_files(child)
 
-	def get_sanitized_node_path(self, node):
-		path_temp = [os.path.expanduser(self.config.get("basedir","./"))] + [self.sanitize(p) for p in node.get_path()]
-		return os.path.join(*path_temp)
+	def get_sanitized_node_path(self, node: Node) -> Path:
+		basedir = Path(self.config.get("basedir","./")).expanduser()
+		return basedir.joinpath(*(self.sanitize(p) for p in node.get_path()))
 
 	def sanitize(self, path):
 		path = urllib.parse.unquote(path)
@@ -512,16 +520,16 @@ class SyncMyMoodle:
 
 	def download_file(self, node):
 		downloadpath = self.get_sanitized_node_path(node)
-		downloadpathparent = self.get_sanitized_node_path(node.parent)
 
-		if os.path.exists(downloadpath):
+		if downloadpath.exists():
 			return True
 
 		if len(node.name.split("."))>0 and node.name.split(".")[-1] in self.config.get("exclude_filetypes",[]):
 			return True
 
-		if os.path.exists(downloadpath + ".temp"):
-			resume_size = os.stat(downloadpath + ".temp").st_size
+		tmp_downloadpath = downloadpath.with_suffix(downloadpath.suffix + ".temp")
+		if tmp_downloadpath.exists():
+			resume_size = tmp_downloadpath.stat().st_size
 			header = {'Range':f'bytes= {resume_size}-'}
 		else:
 			resume_size = 0
@@ -533,13 +541,13 @@ class SyncMyMoodle:
 			progress_bar = tqdm(total=total_size_in_bytes, unit='iB', unit_scale=True)
 			if resume_size:
 				progress_bar.update(resume_size)
-			os.makedirs(downloadpathparent, exist_ok=True)
-			with open(downloadpath + ".temp","ab") as file:
+			downloadpath.parent.mkdir(parents=True, exist_ok=True)
+			with tmp_downloadpath.open("ab") as file:
 				for data in response.iter_content(self.block_size):
 					progress_bar.update(len(data))
 					file.write(data)
 			progress_bar.close()
-			os.rename(downloadpath + ".temp", downloadpath)
+			tmp_downloadpath.rename(downloadpath)
 			return True
 		return False
 
@@ -554,10 +562,9 @@ class SyncMyMoodle:
 		try:
 			engageDataSoup = bs(response.json()[0]["data"], features="html.parser")
 		except Exception as e:
-			print("Failed to parse Opencast response!")
-			if self.config.get("verbose"):
-				print("------Opencast-Error------")
-				print(response.text)
+			logger.exception("Failed to parse Opencast response!")
+			logger.info("------Opencast-Error------")
+			logger.info(response.text)
 			raise e
 
 		engageData = dict([(i["name"], i["value"]) for i in engageDataSoup.findAll("input")])
@@ -589,8 +596,8 @@ class SyncMyMoodle:
 	def scanAndDownloadYouTube(self, node):
 		path = self.get_sanitized_node_path(node.parent)
 		link = node.url
-		if os.path.exists(path):
-			if len([f for f in os.listdir(path) if link[-11:] in f])!=0:
+		if path.exists():
+			if any(link[-YOUTUBE_ID_LENGTH:] in f.name for f in path.iterdir()):
 				return False
 		ydl_opts = {
 			"outtmpl": "{}/%(title)s-%(id)s.%(ext)s".format(path),
@@ -598,16 +605,16 @@ class SyncMyMoodle:
 			"nooverwrites": True,
 			"retries": 15
 		}
-		os.makedirs(path, exist_ok=True)
+		path.mkdir(parents=True, exist_ok=True)
 		with youtube_dl.YoutubeDL(ydl_opts) as ydl:
 			ydl.download([link])
 		return True
 
 	def downloadQuiz(self, node):
 		path = self.get_sanitized_node_path(node.parent)
-		os.makedirs(path, exist_ok=True)
+		path.mkdir(parents=True, exist_ok=True)
 
-		if os.path.exists(os.path.join(path, f"{node.name}.pdf")):
+		if (path / f"{node.name}.pdf").exists():
 			return True
 
 		quiz_res = bs(self.session.get(node.url).text,features="html.parser")
@@ -619,7 +626,7 @@ class SyncMyMoodle:
 		quiz_html = str(quiz_res)
 		print("Generating quiz-PDF for " + node.name + "... [Quiz]")
 
-		pdfkit.from_string(quiz_html, os.path.join(path,f"{node.name}.pdf"), options={'quiet': '','javascript-delay': '30000','disable-smart-shrinking': '','run-script': 'MathJax.Hub.Config({"CommonHTML": {minScaleAdjust: 100},"HTML-CSS": {scale: 200}}); MathJax.Hub.Queue(["Rerender", MathJax.Hub], function () {window.status="finished"})'})
+		pdfkit.from_string(quiz_html, path / f"{node.name}.pdf", options={'quiet': '','javascript-delay': '30000','disable-smart-shrinking': '','run-script': 'MathJax.Hub.Config({"CommonHTML": {minScaleAdjust: 100},"HTML-CSS": {scale: 200}}); MathJax.Hub.Queue(["Rerender", MathJax.Hub], function () {window.status="finished"})'})
 
 		print("...done!")
 		return True
@@ -653,8 +660,7 @@ class SyncMyMoodle:
 					self.scanForLinks(response.text, parent_node, course_id, module_title=module_title, single=False)
 			except Exception as e:
 				# Maybe the url is down?
-				traceback.print_exc()
-				print(f'Error while downloading url {text}: {e}')
+				logger.exception(f'Error while downloading url {text}')
 		if self.config.get("nolinks"):
 			return
 
@@ -685,7 +691,7 @@ class SyncMyMoodle:
 				if url and filename:
 					parent_node.add_child(filename["value"], url["value"], "Sciebo file", url=url["value"])
 
-if __name__ == '__main__':
+def main():
 	try:
 		import secretstorage
 		has_secretstorage = True
@@ -708,7 +714,7 @@ if __name__ == '__main__':
 	parser.add_argument('--basedir', default=None, help="The base directory where all files will be synced to")
 	parser.add_argument('--nolinks', action='store_true', help="Wether to not inspect links embedded in pages")
 	parser.add_argument('--excludefiletypes', default=None, help="Exclude downloading files from urls with these extensions (comma seperated types, e.g. \"mp4,mkv\")")
-	parser.add_argument('--verbose', action='store_true', help="Verbose output for debugging.")
+	parser.add_argument('--verbose', action="store_const", dest="loglevel", const=logging.INFO, default=logging.WARNING, help="Verbose output for debugging.", )
 	args = parser.parse_args()
 
 
@@ -754,15 +760,16 @@ if __name__ == '__main__':
 		"folder": True
 	}
 	config["exclude_filetypes"] = args.excludefiletypes.split(",") if args.excludefiletypes else config.get("exclude_filetypes",[])
-	config["verbose"] = args.verbose
+
+	logging.basicConfig(level=args.loglevel)
 
 	if not shutil.which("wkhtmltopdf") and config["used_modules"]["url"]["quiz"]:
 		config["used_modules"]["url"]["quiz"] = False
-		print("You do not have wkhtmltopdf in your path. Quiz-PDFs are NOT generated")
+		logger.warning("You do not have wkhtmltopdf in your path. Quiz-PDFs are NOT generated")
 
 	if has_secretstorage and config.get("use_secret_service"):
 		if config.get("password"):
-			print("You need to remove your password from your config file!")
+			logger.critical("You need to remove your password from your config file!")
 			exit(1)
 
 		connection = secretstorage.dbus_init()
@@ -788,7 +795,7 @@ if __name__ == '__main__':
 		config["password"] = item.get_secret().decode("utf-8")
 
 	if not config.get("user") or not config.get("password"):
-		print("You need to specify your username and password in the config file or as an argument!")
+		logger.critical("You need to specify your username and password in the config file or as an argument!")
 		exit(1)
 
 	smm = SyncMyMoodle(config)
@@ -801,3 +808,6 @@ if __name__ == '__main__':
 	smm.sync()
 	print(f"Downloading files...")
 	smm.download_all_files()
+
+if __name__ == "__main__":
+	main()

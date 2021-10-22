@@ -4,3 +4,15 @@ requires = [
     "wheel"
 ]
 build-backend = "setuptools.build_meta"
+
+[tool.isort]
+profile = "black"
+
+[[tool.mypy.overrides]]
+module = [
+    "bs4",
+    "youtube_dl",
+    "tqdm",
+    "pdfkit",
+]
+ignore_missing_imports = true
