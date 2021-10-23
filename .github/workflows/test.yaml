@@ -19,7 +19,12 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install isort
-      - name: Check formatting with isort
+          pip install .[test]
+      - name: Check formatting with black and isort
         run: |
+          black --check syncmymoodle
           isort --check-only syncmymoodle
+      - name: Lint with flake8
+        run: flake8 syncmymoodle
+      - name: Analyze with mypy
+        run: mypy syncmymoodle
