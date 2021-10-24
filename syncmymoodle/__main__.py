@@ -25,29 +25,35 @@ from tqdm import tqdm
 try:
     import secretstorage
 except ImportError:
-    secretstorage = None
+    secretstorage = None  # type: ignore
 
 YOUTUBE_ID_LENGTH = 11
+INVALID_CHARS = frozenset('~"#%&*:<>?/\\{|}')
 
 logger = logging.getLogger(__name__)
+
+
+def sanitize_path(path: str) -> str:
+    path = urllib.parse.unquote(path)
+    path = "".join(s for s in path if s not in INVALID_CHARS)
+    path.strip()
+    return path
 
 
 class Node:
     def __init__(
         self,
-        name,
+        name: str,
         id,
         type,
-        parent,
         url=None,
         additional_info=None,
-        is_downloaded=False,
+        is_downloaded: bool = False,
     ):
         self.name = name
         self.id = id
         self.url = url
         self.type = type
-        self.parent = parent
         self.children: List[Node] = []
         self.additional_info = (
             additional_info  # Currently only used for course_id in opencast
@@ -67,20 +73,12 @@ class Node:
             url = url.replace("webservice/pluginfile.php", "pluginfile.php")
 
         # Check for duplicate urls and just ignore those nodes:
-        if url and any([True for c in self.children if c.url == url]):
+        if url and any(c.url == url for c in self.children):
             return None
 
-        temp = Node(name, id, type, self, url=url, additional_info=additional_info)
+        temp = Node(name, id, type, url=url, additional_info=additional_info)
         self.children.append(temp)
         return temp
-
-    def get_path(self):
-        ret = []
-        cur = self
-        while cur is not None:
-            ret.insert(0, cur.name)
-            cur = cur.parent
-        return ret
 
     def remove_children_nameclashes(self):
         # Check for duplicate filenames
@@ -159,7 +157,6 @@ class Node:
 class SyncMyMoodle:
     params = {"lang": "en"}  # Titles for some pages differ
     block_size = 1024
-    invalid_chars = '~"#%&*:<>?/\\{|}'
 
     def __init__(self, config):
         self.config = config
@@ -415,7 +412,7 @@ class SyncMyMoodle:
             raise Exception("You need to get_moodle_wstoken() first.")
         if not self.user_id:
             raise Exception("You need to get_userid() first.")
-        self.root_node = Node("", -1, "Root", None)
+        self.root_node = Node("", -1, "Root")
 
         # Syncing all courses
         for course in self.get_all_courses():
@@ -519,8 +516,8 @@ class SyncMyMoodle:
                                     assignment_node.add_child(
                                         str(
                                             Path(
-                                                self.sanitize(c["filepath"]),
-                                                self.sanitize(c["filename"]),
+                                                sanitize_path(c["filepath"]),
+                                                sanitize_path(c["filename"]),
                                             )
                                         ),
                                         c["fileurl"],
@@ -583,8 +580,8 @@ class SyncMyMoodle:
                                     folder_node.add_child(
                                         str(
                                             Path(
-                                                self.sanitize(c["filepath"]),
-                                                self.sanitize(c["filename"]),
+                                                sanitize_path(c["filepath"]),
+                                                sanitize_path(c["filename"]),
                                             )
                                         ),
                                         c["fileurl"],
@@ -681,7 +678,7 @@ class SyncMyMoodle:
                                     + str(attempt_cnt)
                                 )
                                 section_node.add_child(
-                                    self.sanitize(name),
+                                    sanitize_path(name),
                                     urllib.parse.urlparse(review_url)[1],
                                     "Quiz",
                                     url=review_url,
@@ -702,14 +699,18 @@ class SyncMyMoodle:
         if not self.root_node:
             raise Exception("You need to sync() first.")
 
-        self._download_all_files(self.root_node)
+        self._download_all_files(
+            self.root_node, Path(self.config.get("basedir", Path.cwd())).expanduser()
+        )
 
-    def _download_all_files(self, cur_node):
-        if len(cur_node.children) == 0:
+    def _download_all_files(self, cur_node: Node, dest: Path):
+        if not cur_node.children:
+            targetfile = dest / sanitize_path(cur_node.name)
+            # We are in a leaf not which represents a downloadable node
             if cur_node.url and not cur_node.is_downloaded:
                 if cur_node.type == "Youtube":
                     try:
-                        self.scanAndDownloadYouTube(cur_node)
+                        self.scanAndDownloadYouTube(cur_node, targetfile)
                         cur_node.is_downloaded = True
                     except Exception:
                         logger.exception(f"Failed to download the module {cur_node}")
@@ -718,56 +719,41 @@ class SyncMyMoodle:
                         )
                 elif cur_node.type == "Opencast":
                     try:
-                        self.downloadOpenCastVideos(cur_node)
+                        self.downloadOpenCastVideos(cur_node, targetfile)
                         cur_node.is_downloaded = True
                     except Exception:
                         logger.exception(f"Failed to download the module {cur_node}")
                 elif cur_node.type == "Quiz":
                     try:
-                        self.downloadQuiz(cur_node)
+                        self.downloadQuiz(cur_node, targetfile)
                         cur_node.is_downloaded = True
                     except Exception:
                         logger.exception(f"Failed to download the module {cur_node}")
                         logger.warning("Is wkhtmltopdf correctly installed?")
                 else:
                     try:
-                        self.download_file(cur_node)
+                        self.download_file(cur_node, targetfile)
                         cur_node.is_downloaded = True
                     except Exception:
                         logger.exception(f"Failed to download the module {cur_node}")
             return
 
         for child in cur_node.children:
-            self._download_all_files(child)
+            targetdir = dest / sanitize_path(cur_node.name)
+            targetdir.mkdir(exist_ok=True)
+            self._download_all_files(child, targetdir)
 
-    def get_sanitized_node_path(self, node: Node) -> Path:
-        basedir = Path(self.config.get("basedir", "./")).expanduser()
-        return basedir.joinpath(*(self.sanitize(p) for p in node.get_path()))
-
-    def sanitize(self, path):
-        path = urllib.parse.unquote(path)
-        path = "".join([s for s in path if s not in self.invalid_chars])
-        while path and path[-1] == " ":
-            path = path[:-1]
-        while path and path[0] == " ":
-            path = path[1:]
-        return path
-
-    def download_file(self, node):
+    def download_file(self, node: Node, dest: Path):
         """Download file with progress bar if it isn't already downloaded"""
-        downloadpath = self.get_sanitized_node_path(node)
-
-        if downloadpath.exists():
+        if dest.exists():
             return True
 
-        if len(node.name.split(".")) > 0 and node.name.split(".")[
-            -1
-        ] in self.config.get("exclude_filetypes", []):
+        if dest.suffix in self.config.get("exclude_filetypes", []):
             return True
 
-        tmp_downloadpath = downloadpath.with_suffix(downloadpath.suffix + ".temp")
-        if tmp_downloadpath.exists():
-            resume_size = tmp_downloadpath.stat().st_size
+        tmp_dest = dest.with_suffix(dest.suffix + ".temp")
+        if tmp_dest.exists():
+            resume_size = tmp_dest.stat().st_size
             header = {"Range": f"bytes= {resume_size}-"}
         else:
             resume_size = 0
@@ -776,20 +762,19 @@ class SyncMyMoodle:
         with closing(
             self.session.get(node.url, headers=header, stream=True)
         ) as response:
-            print(f"Downloading {downloadpath} [{node.type}]")
+            print(f"Downloading {dest} [{node.type}]")
             total_size_in_bytes = (
                 int(response.headers.get("content-length", 0)) + resume_size
             )
             progress_bar = tqdm(total=total_size_in_bytes, unit="iB", unit_scale=True)
             if resume_size:
                 progress_bar.update(resume_size)
-            downloadpath.parent.mkdir(parents=True, exist_ok=True)
-            with tmp_downloadpath.open("ab") as file:
+            with tmp_dest.open("ab") as file:
                 for data in response.iter_content(self.block_size):
                     progress_bar.update(len(data))
                     file.write(data)
             progress_bar.close()
-            tmp_downloadpath.rename(downloadpath)
+            tmp_dest.rename(dest)
             return True
 
     def getOpenCastRealURL(self, additional_info, url):
@@ -847,37 +832,36 @@ class SyncMyMoodle:
 
         return finaltrack[0]
 
-    def downloadOpenCastVideos(self, node):
+    def downloadOpenCastVideos(self, node: Node, dest: Path):
         if ".mp4" not in node.name:
-            if node.name is not None and node.name != "":
+            if node.name:
                 node.name += ".mp4"
             else:
                 node.name = node.url.split("/")[-1]
-        return self.download_file(node)
+        return self.download_file(node, dest.with_name(node.name))
 
-    def scanAndDownloadYouTube(self, node):
+    def scanAndDownloadYouTube(self, node: Node, dest: Path):
         """Download Youtube-Videos using youtube_dl"""
-        path = self.get_sanitized_node_path(node.parent)
-        link = node.url
-        if path.exists():
-            if any(link[-YOUTUBE_ID_LENGTH:] in f.name for f in path.iterdir()):
-                return False
+        # TODO double check dest handling
+        parent_dir = dest.parent
+        if any(node.url[-YOUTUBE_ID_LENGTH:] in f.name for f in parent_dir.iterdir()):
+            return False
+        parent_dir.mkdir(parents=True, exist_ok=True)
         ydl_opts = {
-            "outtmpl": "{}/%(title)s-%(id)s.%(ext)s".format(path),
+            "outtmpl": "{}/%(title)s-%(id)s.%(ext)s".format(parent_dir),
             "ignoreerrors": True,
             "nooverwrites": True,
             "retries": 15,
         }
-        path.mkdir(parents=True, exist_ok=True)
         with youtube_dl.YoutubeDL(ydl_opts) as ydl:
-            ydl.download([link])
+            ydl.download([node.url])
         return True
 
-    def downloadQuiz(self, node):
-        path = self.get_sanitized_node_path(node.parent)
-        path.mkdir(parents=True, exist_ok=True)
+    def downloadQuiz(self, node: Node, dest: Path):
+        # TODO double check dest handling
+        pdf_dest = dest.with_suffix(".pdf")
 
-        if (path / f"{node.name}.pdf").exists():
+        if pdf_dest.exists():
             return True
 
         quiz_res = bs(self.session.get(node.url).text, features="html.parser")
@@ -891,7 +875,7 @@ class SyncMyMoodle:
 
         pdfkit.from_string(
             quiz_html,
-            path / f"{node.name}.pdf",
+            pdf_dest,
             options={
                 "quiet": "",
                 "javascript-delay": "30000",
