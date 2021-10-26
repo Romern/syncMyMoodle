@@ -1,7 +1,7 @@
 import base64
 import hashlib
 from pathlib import Path
-from typing import Iterable, List, Optional, overload
+from typing import Any, Iterable, List, Optional, overload
 
 INVALID_CHARS = frozenset('~"#%&*:<>?/\\{|}')
 
@@ -12,11 +12,11 @@ class Node:
     def __init__(
         self,
         name: str,
-        id,
-        type,
+        id: Any,
+        type: str,
         url: str = None,
         is_downloaded: bool = False,
-    ):
+    ) -> None:
         self.name = name
         self.id = id
         self.url = url
@@ -26,7 +26,7 @@ class Node:
             is_downloaded  # Can also be used to exclude files from being downloaded
         )
 
-    def __repr__(self):
+    def __repr__(self) -> str:
         return f"Node(name={self.name}, id={self.id}, url={self.url}, type={self.type})"
 
     @property
@@ -42,14 +42,16 @@ class Node:
             yield from child.list_files(root / self.sanitized_name)
 
     @overload
-    def add_child(self, name: str, id, type: str, url: None = None) -> "Node":
+    def add_child(self, name: str, id: Any, type: str, url: None = None) -> "Node":
         ...
 
     @overload
-    def add_child(self, name: str, id, type: str, url: str) -> Optional["Node"]:
+    def add_child(self, name: str, id: Any, type: str, url: str) -> Optional["Node"]:
         ...
 
-    def add_child(self, name: str, id, type: str, url: str = None) -> Optional["Node"]:
+    def add_child(
+        self, name: str, id: Any, type: str, url: str = None
+    ) -> Optional["Node"]:
         if url:
             url = url.replace("?forcedownload=1", "")
             url = url.replace("webservice/pluginfile.php", "pluginfile.php")

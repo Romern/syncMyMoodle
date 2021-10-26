@@ -14,6 +14,7 @@ import pdfkit
 import requests
 import youtube_dl
 from bs4 import BeautifulSoup as bs
+from requests.cookies import RequestsCookieJar
 from tqdm import tqdm
 
 from syncmymoodle.filetree import Node
@@ -37,14 +38,17 @@ class SyncMyMoodle:
     # RWTH SSO Login
 
     def login(self) -> None:
-        def get_session_key(soup):
-            session_key = soup.find("a", {"data-title": "logout,moodle"})["href"]
-            return re.findall("sesskey=([a-zA-Z0-9]*)", session_key)[0]
+        def get_session_key(soup: bs) -> str:
+            logoutlink = soup.find("a", {"data-title": "logout,moodle"})["href"]
+            session_key = re.findall("sesskey=([a-zA-Z0-9]*)", logoutlink)[0]
+            if not isinstance(session_key, str):
+                raise RuntimeError("Unexpected value for sessionkey")
+            return session_key
 
         cookie_file = Path(self.config.get("cookie_file", "./session"))
         if cookie_file.exists():
             with cookie_file.open("rb") as f:
-                self.session.cookies.update(pickle.load(f))
+                self.session.cookies.update(pickle.load(f))  # type: ignore
         resp = self.session.get("https://moodle.rwth-aachen.de/")
         resp = self.session.get(
             "https://moodle.rwth-aachen.de/auth/shibboleth/index.php"
@@ -85,7 +89,7 @@ class SyncMyMoodle:
 
     # Moodle Web Services API
 
-    def get_moodle_wstoken(self):
+    def get_moodle_wstoken(self) -> str:
         if not self.session:
             raise Exception("You need to login() first.")
         params = {
@@ -95,9 +99,9 @@ class SyncMyMoodle:
         }
         # response = self.session.head("https://moodle.rwth-aachen.de/admin/tool/mobile/launch.php", params=params, allow_redirects=False)
 
-        def getCookies(cookie_jar, domain):
+        def getCookies(cookie_jar: RequestsCookieJar, domain: str) -> str:
             # workaround for macos
-            cookie_dict = cookie_jar.get_dict(domain=domain)
+            cookie_dict = cookie_jar.get_dict(domain=domain)  # type: ignore
             found = ["%s=%s" % (name, value) for (name, value) in cookie_dict.items()]
             return ";".join(found)
 
@@ -112,11 +116,11 @@ class SyncMyMoodle:
         response = conn.getresponse()
 
         # token is in an app schema, which contains the wstoken base64-encoded along with some other token
-        token_base64d = response.getheader("Location").split("token=")[1]
+        token_base64d = response.headers["Location"].split("token=")[1]
         self.wstoken = base64.b64decode(token_base64d).decode().split(":::")[1]
         return self.wstoken
 
-    def get_all_courses(self):
+    def get_all_courses(self) -> Any:
         data = {
             "requests[0][function]": "core_enrol_get_users_courses",
             "requests[0][arguments]": json.dumps(
@@ -138,7 +142,7 @@ class SyncMyMoodle:
         )
         return json.loads(resp.json()["responses"][0]["data"])
 
-    def get_course(self, course_id):
+    def get_course(self, course_id: int) -> Any:
         data = {
             "courseid": int(course_id),
             "moodlewssettingfilter": True,
@@ -157,7 +161,7 @@ class SyncMyMoodle:
         )
         return resp.json()
 
-    def get_userid(self):
+    def get_userid(self) -> int:
         data = {
             "moodlewssettingfilter": True,
             "moodlewssettingfileurl": True,
@@ -178,11 +182,13 @@ class SyncMyMoodle:
                 f"Error while getting userid and access key: {json.dumps(resp.json(), indent=4)}"
             )
             sys.exit(1)
-        self.user_id = resp.json()["userid"]
-        self.user_private_access_key = resp.json()["userprivateaccesskey"]
-        return self.user_id, self.user_private_access_key
+        userid = resp.json()["userid"]
+        if not isinstance(userid, int):
+            raise RuntimeError("Unexpected response from webservice")
+        self.user_id = userid
+        return self.user_id
 
-    def get_assignment(self, course_id):
+    def get_assignment(self, course_id: int) -> Any:
         data = {
             "courseids[0]": int(course_id),
             "includenotenrolledcourses": 1,
@@ -202,7 +208,7 @@ class SyncMyMoodle:
         )
         return resp.json()["courses"][0] if len(resp.json()["courses"]) > 0 else None
 
-    def get_assignment_submission_files(self, assignment_id):
+    def get_assignment_submission_files(self, assignment_id: int) -> Any:
         data = {
             "assignid": assignment_id,
             "userid": self.user_id,
@@ -249,7 +255,7 @@ class SyncMyMoodle:
         files = [f for folder in files for f in folder]
         return files
 
-    def get_folders_by_courses(self, course_id):
+    def get_folders_by_courses(self, course_id: int) -> Any:
         data = {
             "courseids[0]": str(course_id),
             "moodlewssettingfilter": True,
@@ -643,7 +649,7 @@ class SyncMyMoodle:
             tmp_dest.rename(dest)
             return True
 
-    def getOpenCastRealURL(self, course_id, url):
+    def getOpenCastRealURL(self, course_id: int, url: str) -> str:
         """Download Opencast videos by using the engage API"""
         # get engage authentication form
         course_info = [
@@ -678,25 +684,27 @@ class SyncMyMoodle:
             "https://engage.streaming.rwth-aachen.de/play/([a-z0-9-]{36})$", url
         )
         if not linkid:
-            return False
-        episodejson = f"https://engage.streaming.rwth-aachen.de/search/episode.json?id={linkid.groups()[0]}"
-        episodejson = json.loads(self.session.get(episodejson).text)
+            return ""
+        episodejson_url = f"https://engage.streaming.rwth-aachen.de/search/episode.json?id={linkid.groups()[0]}"
+        episodejson = json.loads(self.session.get(episodejson_url).text)
 
-        tracks = episodejson["search-results"]["result"]["mediapackage"]["media"][
+        all_tracks = episodejson["search-results"]["result"]["mediapackage"]["media"][
             "track"
         ]
-        tracks = sorted(
+        filtered_tracks = sorted(
             [
                 (t["url"], t["video"]["resolution"])
-                for t in tracks
+                for t in all_tracks
                 if t["mimetype"] == "video/mp4" and "transport" not in t
             ],
             key=(lambda x: int(x[1].split("x")[0])),
         )
         # only choose mp4s provided with plain https (no transport key), and use the one with the highest resolution (sorted by width) (could also use bitrate)
-        finaltrack = tracks[-1]
-
-        return finaltrack[0]
+        finaltrack = filtered_tracks[-1]
+        trackurl = finaltrack[0]
+        if not isinstance(trackurl, str):
+            raise RuntimeError("Unexpected response from engage")
+        return trackurl
 
     def downloadOpenCastVideos(self, node: Node, dest: Path) -> bool:
         if ".mp4" not in node.name:
@@ -760,7 +768,7 @@ class SyncMyMoodle:
         self,
         text: str,
         parent_node: Node,
-        course_id,
+        course_id: int,
         module_title: str = None,
         single: bool = False,
     ) -> None:

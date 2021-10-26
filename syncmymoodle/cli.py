@@ -22,7 +22,7 @@ except ImportError:
 logger = logging.getLogger(__name__)
 
 
-def main():
+def main() -> None:
     parser = ArgumentParser(
         prog="python3 -m syncmymoodle",
         description="Synchronization client for RWTH Moodle. All optional arguments override those in config.json.",
