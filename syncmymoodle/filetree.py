@@ -51,9 +51,7 @@ class Node:
 
     def add_child(self, name: str, id, type: str, url: str = None) -> Optional["Node"]:
         if url:
-            url = url.replace("?forcedownload=1", "").replace(
-                "mod_page/content/3", "mod_page/content"
-            )
+            url = url.replace("?forcedownload=1", "")
             url = url.replace("webservice/pluginfile.php", "pluginfile.php")
 
         # Check for duplicate urls and just ignore those nodes:
