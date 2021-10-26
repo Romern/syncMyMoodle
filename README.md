@@ -55,7 +55,7 @@ Copy `config.json.example` or the following text (minus the comments) to `config
 or alternatively to `~/.config/syncmymoodle/config.json` for configuring `syncmymoodle` user-wide.
 Afterwards you can adjust the settings:
 
-```js
+```json
 {
     "selected_courses": [], //Only these courses will be synced, of the form "https://moodle.rwth-aachen.de/course/view.php?id=XXXXX" (if empty, all courses will be synced)
     "skip_courses": [], //Skip these courses
@@ -90,16 +90,17 @@ Run:
 
 ```bash
 source .venv/bin/activate  # if you installed using virtual environment
-python3 -m syncmymoodle
+syncmymoodle
 deactivate  # leave virtual environment
 ```
 
 You can override the fields in the config file by using command line arguments:
 
 ```bash
-usage: syncMyMoodle.py [-h] [--secretservice] [--user USER] [--password PASSWORD] [--config CONFIG]
-                       [--cookiefile COOKIEFILE] [--courses COURSES] [--skipcourses SKIPCOURSES]
-                       [--semester SEMESTER] [--basedir BASEDIR] [--nolinks]
+usage: python3 -m syncmymoodle [-h] [--secretservice] [--user USER] [--password PASSWORD] [--config CONFIG]
+                               [--cookiefile COOKIEFILE] [--courses COURSES] [--skipcourses SKIPCOURSES]
+                               [--semester SEMESTER] [--basedir BASEDIR] [--nolinks]
+                               [--excludefiletypes EXCLUDEFILETYPES] [--dry-run] [--verbose]
 
 Synchronization client for RWTH Moodle. All optional arguments override those in config.json.
 
@@ -119,6 +120,11 @@ optional arguments:
                         [courses] is empty, if empty all semesters will be synced)
   --basedir BASEDIR     The base directory where all files will be synced to
   --nolinks             Wether to not inspect links embedded in pages
+  --excludefiletypes EXCLUDEFILETYPES
+                        Exclude downloading files from urls with these extensions (comma seperated types,
+                        e.g. "mp4,mkv")
+  --dry-run             Do not download any files, instead just perform the synchronization
+  --verbose             Verbose output for debugging.
 ```
 
 ## FreeDesktop.org Secret Service integration
