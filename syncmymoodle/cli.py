@@ -188,9 +188,6 @@ def main() -> None:
 
     logger.info("Logging in...")
     smm.login()
-    smm.get_moodle_wstoken()
-    smm.get_opencast_wstoken()
-    smm.get_userid()
     logger.info("Syncing file tree...")
     smm.sync()
 

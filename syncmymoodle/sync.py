@@ -1,20 +1,15 @@
-import base64
-import http.client
 import json
 import logging
-import pickle
 import re
-import sys
 import urllib.parse
-from contextlib import closing
-from pathlib import Path
-from typing import Any, Dict, Optional
+from http import HTTPStatus
+from pathlib import Path, PurePosixPath
+from typing import Any, Dict, List
 
 import pdfkit
-import requests
 import youtube_dl
 from bs4 import BeautifulSoup as bs
-from requests.cookies import RequestsCookieJar
+from moodle.session import MoodleSession
 from tqdm import tqdm
 
 from syncmymoodle.filetree import Node
@@ -24,267 +19,109 @@ logger = logging.getLogger(__name__)
 
 
 class SyncMyMoodle:
-    params = {"lang": "en"}  # Titles for some pages differ
     block_size = 1024
 
     def __init__(self, config: Dict[str, Any]) -> None:
         self.config = config
-        self.session = requests.Session()
-        self.wstoken: Optional[str] = None
-        self.opencast_wstoken: Optional[str] = None
-        self.user_id: Optional[int] = None
+        self.session = MoodleSession(
+            "https://moodle.rwth-aachen.de", "", follow_redirects=True
+        )
+        self.opencast_session = MoodleSession("https://moodle.rwth-aachen.de", "")
         self.root_node = Node("", -1, "Root")
 
-    # RWTH SSO Login
-
     def login(self) -> None:
-        cookie_file = Path(self.config.get("cookie_file", "./session"))
-        if cookie_file.exists():
-            with cookie_file.open("rb") as f:
-                self.session.cookies.update(pickle.load(f))  # type: ignore
-        resp = self.session.get("https://moodle.rwth-aachen.de/")
-        resp = self.session.get(
-            "https://moodle.rwth-aachen.de/auth/shibboleth/index.php"
+        """Login to Moodle and RWTH SSH
+
+        Also gets tokens for the moodle_mobile_app
+        and filter_opencast_authentication services
+        """
+        self.session.login(self.config["user"], self.config["password"])
+        self.opencast_session.login(
+            self.config["user"],
+            self.config["password"],
+            service="filter_opencast_authentication",
         )
-        if resp.url == "https://moodle.rwth-aachen.de/my/":
-            soup = bs(resp.text, features="html.parser")
-            with cookie_file.open("wb") as f:
-                pickle.dump(self.session.cookies, f)
-            return
-        soup = bs(resp.text, features="html.parser")
-        if soup.find("input", {"name": "RelayState"}) is None:
-            data = {
-                "j_username": self.config["user"],
-                "j_password": self.config["password"],
-                "_eventId_proceed": "",
-            }
-            resp2 = self.session.post(resp.url, data=data)
-            soup = bs(resp2.text, features="html.parser")
-        if soup.find("input", {"name": "RelayState"}) is None:
-            logger.critical(
-                "Failed to login! Maybe your login-info was wrong or the RWTH-Servers have difficulties, see https://maintenance.rz.rwth-aachen.de/ticket/status/messages . For more info use the --verbose argument."
-            )
-            logger.debug("-------Login-Error-Soup--------")
-            logger.debug(soup)
-            sys.exit(1)
-        data = {
-            "RelayState": soup.find("input", {"name": "RelayState"})["value"],
-            "SAMLResponse": soup.find("input", {"name": "SAMLResponse"})["value"],
-        }
-        resp = self.session.post(
-            "https://moodle.rwth-aachen.de/Shibboleth.sso/SAML2/POST", data=data
+
+    def _get_userid(self) -> int:
+        data = self.session.webservice(
+            "core_webservice_get_site_info", data={"moodlewssettingfilter": True}
         )
-        with cookie_file.open("wb") as f:
-            soup = bs(resp.text, features="html.parser")
-            pickle.dump(self.session.cookies, f)
-
-    # Moodle Web Services API
-
-    def get_moodle_wstoken(self) -> str:
-        self.wstoken = self.get_wstoken("moodle_mobile_app")
-        return self.wstoken
-
-    def get_opencast_wstoken(self) -> str:
-        self.opencast_wstoken = self.get_wstoken("filter_opencast_authentication")
-        return self.opencast_wstoken
-
-    def get_wstoken(self, service: str) -> str:
-        if not self.session:
-            raise Exception("You need to login() first.")
-        params = {
-            "service": service,
-            "passport": 1,
-            "urlscheme": "moodlemobile",
-        }
-        # response = self.session.head("https://moodle.rwth-aachen.de/admin/tool/mobile/launch.php", params=params, allow_redirects=False)
-
-        def getCookies(cookie_jar: RequestsCookieJar, domain: str) -> str:
-            # workaround for macos
-            cookie_dict = cookie_jar.get_dict(domain=domain)  # type: ignore
-            found = ["%s=%s" % (name, value) for (name, value) in cookie_dict.items()]
-            return ";".join(found)
-
-        conn = http.client.HTTPSConnection("moodle.rwth-aachen.de")
-        conn.request(
-            "GET",
-            "/admin/tool/mobile/launch.php?" + urllib.parse.urlencode(params),
-            headers={
-                "Cookie": getCookies(self.session.cookies, "moodle.rwth-aachen.de")
-            },
-        )
-        response = conn.getresponse()
-
-        # token is in an app schema, which contains the wstoken base64-encoded along with some other token
-        token_base64d = response.headers["Location"].split("token=")[1]
-        return base64.b64decode(token_base64d).decode().split(":::")[1]
+        userid = data.get("userid")
+        if not userid or not isinstance(userid, int):
+            raise RuntimeError(f"Unexpected response while getting userid: {data}")
+        return userid
 
     def get_all_courses(self) -> Any:
-        data = {
-            "requests[0][function]": "core_enrol_get_users_courses",
-            "requests[0][arguments]": json.dumps(
-                {"userid": str(self.user_id), "returnusercount": "0"}
-            ),
-            "requests[0][settingfilter]": 1,
-            "requests[0][settingfileurl]": 1,
-            "wsfunction": "tool_mobile_call_external_functions",
-            "wstoken": self.wstoken,
-        }
-        params = {
-            "moodlewsrestformat": "json",
-            "wsfunction": "tool_mobile_call_external_functions",
-        }
-        resp = self.session.post(
-            "https://moodle.rwth-aachen.de/webservice/rest/server.php",
-            params=params,
-            data=data,
+        return self.session.webservice(
+            "core_enrol_get_users_courses",
+            {
+                "userid": self._get_userid(),
+                "returnusercount": "0",
+                "moodlewssettingfilter": True,
+            },
         )
-        return json.loads(resp.json()["responses"][0]["data"])
 
     def get_course(self, course_id: int) -> Any:
-        data = {
-            "courseid": int(course_id),
-            "moodlewssettingfilter": True,
-            "moodlewssettingfileurl": True,
-            "wsfunction": "core_course_get_contents",
-            "wstoken": self.wstoken,
-        }
-        params = {
-            "moodlewsrestformat": "json",
-            "wsfunction": "core_course_get_contents",
-        }
-        resp = self.session.post(
-            "https://moodle.rwth-aachen.de/webservice/rest/server.php",
-            params=params,
-            data=data,
+        return self.session.webservice(
+            "core_course_get_contents",
+            {"courseid": course_id, "moodlewssettingfilter": True},
         )
-        return resp.json()
 
-    def get_userid(self) -> int:
-        data = {
-            "moodlewssettingfilter": True,
-            "moodlewssettingfileurl": True,
-            "wsfunction": "core_webservice_get_site_info",
-            "wstoken": self.wstoken,
-        }
-        params = {
-            "moodlewsrestformat": "json",
-            "wsfunction": "core_webservice_get_site_info",
-        }
-        resp = self.session.post(
-            "https://moodle.rwth-aachen.de/webservice/rest/server.php",
-            params=params,
-            data=data,
-        )
-        if not resp.json().get("userid") or not resp.json()["userprivateaccesskey"]:
-            logger.critical(
-                f"Error while getting userid and access key: {json.dumps(resp.json(), indent=4)}"
-            )
-            sys.exit(1)
-        userid = resp.json()["userid"]
-        if not isinstance(userid, int):
-            raise RuntimeError("Unexpected response from webservice")
-        self.user_id = userid
-        return self.user_id
-
+    # TODO rename
     def get_assignment(self, course_id: int) -> Any:
-        data = {
-            "courseids[0]": int(course_id),
-            "includenotenrolledcourses": 1,
-            "moodlewssettingfilter": True,
-            "moodlewssettingfileurl": True,
-            "wsfunction": "mod_assign_get_assignments",
-            "wstoken": self.wstoken,
-        }
-        params = {
-            "moodlewsrestformat": "json",
-            "wsfunction": "mod_assign_get_assignments",
-        }
-        resp = self.session.post(
-            "https://moodle.rwth-aachen.de/webservice/rest/server.php",
-            params=params,
-            data=data,
-        )
-        return resp.json()["courses"][0] if len(resp.json()["courses"]) > 0 else None
+        courses = self.session.webservice(
+            "mod_assign_get_assignments",
+            {
+                "courseids": [course_id],
+                "includenotenrolledcourses": 1,  # TODO Do we really want this?
+                "moodlewssettingfilter": True,
+            },
+        )["courses"]
+        [course] = courses
+        return course
 
-    def get_assignment_submission_files(self, assignment_id: int) -> Any:
-        data = {
-            "assignid": assignment_id,
-            "userid": self.user_id,
-            "moodlewssettingfilter": True,
-            "moodlewssettingfileurl": True,
-            "wsfunction": "mod_assign_get_submission_status",
-            "wstoken": self.wstoken,
-        }
-
-        params = {
-            "moodlewsrestformat": "json",
-            "wsfunction": "mod_assign_get_submission_status",
-        }
-
-        response = self.session.post(
-            "https://moodle.rwth-aachen.de/webservice/rest/server.php",
-            params=params,
-            data=data,
+    def get_assignment_submission_files(self, assignment_id: int) -> List[Any]:
+        submission_stati = self.session.webservice(
+            "mod_assign_get_submission_status",
+            {"assignid": assignment_id, "moodlewssettingfilter": True},
         )
 
         logger.debug(f"------ASSIGNMENT-{assignment_id}-DATA------")
-        logger.debug(response.text)
+        logger.debug(submission_stati)
 
-        files = (
-            response.json()
-            .get("lastattempt", {})
+        plugins = (
+            submission_stati.get("lastattempt", {})
             .get("submission", {})
             .get("plugins", [])
         )
-        files += (
-            response.json()
-            .get("lastattempt", {})
+        plugins += (
+            submission_stati.get("lastattempt", {})
             .get("teamsubmission", {})
             .get("plugins", [])
         )
-        files += response.json().get("feedback", {}).get("plugins", [])
+        plugins += submission_stati.get("feedback", {}).get("plugins", [])
 
-        files = [
-            f.get("files", [])
-            for p in files
-            for f in p.get("fileareas", [])
-            if f["area"] in ["download", "submission_files", "feedback_files"]
+        return [
+            file
+            for plugin in plugins
+            for filearea in plugin.get("fileareas", [])
+            if filearea["area"] in ["download", "submission_files", "feedback_files"]
+            for file in filearea.get("files", [])
         ]
-        files = [f for folder in files for f in folder]
-        return files
 
-    def get_folders_by_courses(self, course_id: int) -> Any:
-        data = {
-            "courseids[0]": str(course_id),
-            "moodlewssettingfilter": True,
-            "moodlewssettingfileurl": True,
-            "wsfunction": "mod_folder_get_folders_by_courses",
-            "wstoken": self.wstoken,
-        }
-
-        params = {
-            "moodlewsrestformat": "json",
-            "wsfunction": "mod_folder_get_folders_by_courses",
-        }
-
-        response = self.session.post(
-            "https://moodle.rwth-aachen.de/webservice/rest/server.php",
-            params=params,
-            data=data,
-        )
-        folder = response.json()["folders"]
-        return folder
+    def get_folders_by_courses(self, course_id: int) -> List[Any]:
+        folders = self.session.webservice(
+            "mod_folder_get_folders_by_courses",
+            {"courseids": [course_id], "moodlewssettingfilter": True},
+        )["folders"]
+        if not isinstance(folders, list):
+            raise RuntimeError(f"Unexpected response while getting folders: {folders}")
+        return folders
 
     def sync(self) -> None:
         """Retrives the file tree for all courses"""
-        if not self.session:
+        if not self.session.wstoken or not self.opencast_session.wstoken:
             raise Exception("You need to login() first.")
-        if not self.wstoken:
-            raise Exception("You need to get_moodle_wstoken() first.")
-        if not self.wstoken:
-            raise Exception("You need to get_opencast_wstoken() first.")
-        if not self.user_id:
-            raise Exception("You need to get_userid() first.")
 
         # Syncing all courses
         for course in self.get_all_courses():
@@ -470,24 +307,15 @@ class SyncMyMoodle:
                                     )
 
                         # Get embedded videos in pages or labels
-                        if module["modname"] in ["page", "label"] and self.config.get(
+                        if module["modname"] == "label" and self.config.get(
                             "used_modules", {}
                         ).get("url", {}):
-                            if module["modname"] == "page":
-                                self.scanForLinks(
-                                    module["url"],
-                                    section_node,
-                                    course_id,
-                                    module_title=module["name"],
-                                    single=True,
-                                )
-                            else:
-                                self.scanForLinks(
-                                    module.get("description", ""),
-                                    section_node,
-                                    course_id,
-                                    module_title=module["name"],
-                                )
+                            self.scanForLinks(
+                                module.get("description", ""),
+                                section_node,
+                                course_id,
+                                module_title=module["name"],
+                            )
 
                         # New OpenCast integration
                         if module["modname"] == "lti" and self.config.get(
@@ -562,16 +390,10 @@ class SyncMyMoodle:
         self.root_node.remove_children_nameclashes()
 
     def download_all_files(self) -> None:
-        if not self.session:
+        if not self.session.wstoken or not self.opencast_session.wstoken:
             raise Exception("You need to login() first.")
-        if not self.wstoken:
-            raise Exception("You need to get_moodle_wstoken() first.")
-        if not self.wstoken:
-            raise Exception("You need to get_opencast_wstoken() first.")
-        if not self.user_id:
-            raise Exception("You need to get_userid() first.")
-        if not self.root_node:
-            raise Exception("You need to sync() first.")
+        if not self.root_node.children:
+            raise Exception("Root node has no children. Did you call sync()?")
 
         self._download_all_files(
             self.root_node, Path(self.config.get("basedir", Path.cwd())).expanduser()
@@ -627,70 +449,83 @@ class SyncMyMoodle:
 
         tmp_dest = dest.with_suffix(dest.suffix + ".temp")
         if tmp_dest.exists():
+            # TODO check if server supports Accept-Ranges: bytes
             resume_size = tmp_dest.stat().st_size
             header = {"Range": f"bytes= {resume_size}-"}
         else:
             resume_size = 0
             header = dict()
 
-        with closing(
-            self.session.get(node.url or "", headers=header, stream=True)
-        ) as response:
+        with self.session.stream("GET", node.url or "", headers=header) as response:
             logger.info(f"Downloading {dest} [{node.type}]")
             total_size_in_bytes = (
                 int(response.headers.get("content-length", 0)) + resume_size
             )
-            progress_bar = tqdm(total=total_size_in_bytes, unit="iB", unit_scale=True)
-            if resume_size:
-                progress_bar.update(resume_size)
-            with tmp_dest.open("ab") as file:
-                for data in response.iter_content(self.block_size):
-                    progress_bar.update(len(data))
-                    file.write(data)
-            progress_bar.close()
+            with tqdm(
+                total=total_size_in_bytes, unit="iB", unit_scale=True
+            ) as progress_bar:
+                if resume_size:
+                    progress_bar.update(resume_size)
+                with tmp_dest.open("ab") as file:
+                    for data in response.iter_bytes(self.block_size):
+                        file.write(data)
+                        # TODO check if this correctly works with compression
+                        progress_bar.update(len(data))
             tmp_dest.rename(dest)
             return True
 
     def getOpenCastRealURL(self, course_id: int, url: str) -> str:
         """Download Opencast videos by using the engage API"""
-        # get engage authentication form
-        response = self.session.post(
-            "https://moodle.rwth-aachen.de/webservice/rest/server.php",
-            data={
-                "moodlewsrestformat": "json",
-                "wsfunction": "filter_opencast_get_lti_form",
-                "courseid": course_id,
-                "wstoken": self.opencast_wstoken,
-            },
-        )
+        parsed = urllib.parse.urlparse(url)
+        linkid = PurePosixPath(parsed.path).name
 
-        # submit engage authentication info
-        try:
-            engageDataSoup = bs(response.json(), features="html.parser")
-        except Exception as e:
-            logger.exception("Failed to parse Opencast response!")
-            logger.debug("------Opencast-Error------")
-            logger.debug(response.text)
-            raise e
-
-        engageData = dict(
-            [(i["name"], i["value"]) for i in engageDataSoup.findAll("input")]
+        # Try getting the metadata without logging in
+        episodejson_url = (
+            f"https://engage.streaming.rwth-aachen.de/search/episode.json?id={linkid}"
         )
-        response = self.session.post(
-            "https://engage.streaming.rwth-aachen.de/lti", data=engageData
-        )
+        searchresults = self.session.get(episodejson_url).json()["search-results"]
 
-        linkid = re.match(
-            "https://engage.streaming.rwth-aachen.de/play/([a-z0-9-]{36})$", url
-        )
-        if not linkid:
-            return ""
-        episodejson_url = f"https://engage.streaming.rwth-aachen.de/search/episode.json?id={linkid.groups()[0]}"
-        episodejson = json.loads(self.session.get(episodejson_url).text)
+        if "result" not in searchresults:
+            # Either the video is broken or we are not yet logged in
+            if (
+                self.session.get(
+                    "https://engage.streaming.rwth-aachen.de/lti",
+                    follow_redirects=False,
+                ).status_code
+                != HTTPStatus.FOUND
+            ):
+                # We seem to be logged in so the video is broken
+                raise RuntimeError(f"Opencast video {url} is broken")
 
-        all_tracks = episodejson["search-results"]["result"]["mediapackage"]["media"][
-            "track"
-        ]
+            # Get engage authentication form using the opencast_session
+            # as only that token has access to the filter_opencast_get_lti_form function
+            response = self.opencast_session.webservice(
+                "filter_opencast_get_lti_form",
+                {"courseid": course_id, "moodlewssettingfilter": True},
+            )
+
+            # Submit engage authentication info
+            try:
+                engageDataSoup = bs(response, features="html.parser")
+            except Exception as e:
+                logger.exception("Failed to parse Opencast response!")
+                logger.debug("------Opencast-Error------")
+                logger.debug(response)
+                raise e
+
+            # Login with the main session as that will also be used for downloads
+            # TODO get post url dynamically from lti_form
+            self.session.post(
+                "https://engage.streaming.rwth-aachen.de/lti",
+                data={i["name"]: i["value"] for i in engageDataSoup.findAll("input")},
+            )
+
+            # Finally retry getting the metadata
+            episodejson_url = f"https://engage.streaming.rwth-aachen.de/search/episode.json?id={linkid}"
+            searchresults = self.session.get(episodejson_url).json()["search-results"]
+
+        all_tracks = searchresults["result"]["mediapackage"]["media"]["track"]
+
         filtered_tracks = sorted(
             [
                 (t["url"], t["video"]["resolution"])
@@ -801,17 +636,19 @@ class SyncMyMoodle:
                     if videojs:
                         videojs = videojs.select_one("source")
                         if videojs and videojs.get("src"):
-                            parsed = urllib.parse.urlparse(response.url)
-                            link = urllib.parse.urljoin(
-                                f"{parsed.scheme}://{parsed.netloc}/{parsed.path}",
-                                videojs["src"],
-                            )
-                            parent_node.add_child(
-                                urllib.parse.unquote(videojs["src"].split("/")[-1]),
-                                None,
-                                "Embedded videojs",
-                                url=link,
-                            )
+                            if not response.url:
+                                logging.warning(f"Response from {text} had no url set")
+                            else:
+                                link = urllib.parse.urljoin(
+                                    f"{response.url.scheme}://{response.url.netloc.decode('ascii')}/{response.url.path}",
+                                    videojs["src"],
+                                )
+                                parent_node.add_child(
+                                    urllib.parse.unquote(videojs["src"].split("/")[-1]),
+                                    None,
+                                    "Embedded videojs",
+                                    url=link,
+                                )
                     # further inspect the response for other links
                     self.scanForLinks(
                         response.text,
@@ -822,7 +659,7 @@ class SyncMyMoodle:
                     )
             except Exception:
                 # Maybe the url is down?
-                logger.exception(f"Error while downloading url {text}")
+                logger.exception(f"Error while scanning url {text}")
         if self.config.get("nolinks"):
             return
 
@@ -851,7 +688,11 @@ class SyncMyMoodle:
                 "https://engage.streaming.rwth-aachen.de/play/[a-zA-Z0-9-]+", text
             )
             for vid in opencast_links:
-                vid = self.getOpenCastRealURL(course_id, vid)
+                try:
+                    vid = self.getOpenCastRealURL(course_id, vid)
+                except RuntimeError:
+                    logging.warning(f"Error while trying to get video url from {vid}")
+                    continue
                 parent_node.add_child(
                     module_title or vid.split("/")[-1], vid, "Opencast", url=vid
                 )
