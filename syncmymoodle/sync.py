@@ -30,21 +30,14 @@ class SyncMyMoodle:
     def __init__(self, config: Dict[str, Any]) -> None:
         self.config = config
         self.session = requests.Session()
-        self.session_key: Optional[Any] = None
-        self.wstoken: Optional[Any] = None
-        self.user_id: Optional[Any] = None
+        self.wstoken: Optional[str] = None
+        self.opencast_wstoken: Optional[str] = None
+        self.user_id: Optional[int] = None
         self.root_node = Node("", -1, "Root")
 
     # RWTH SSO Login
 
     def login(self) -> None:
-        def get_session_key(soup: bs) -> str:
-            logoutlink = soup.find("a", {"data-title": "logout,moodle"})["href"]
-            session_key = re.findall("sesskey=([a-zA-Z0-9]*)", logoutlink)[0]
-            if not isinstance(session_key, str):
-                raise RuntimeError("Unexpected value for sessionkey")
-            return session_key
-
         cookie_file = Path(self.config.get("cookie_file", "./session"))
         if cookie_file.exists():
             with cookie_file.open("rb") as f:
@@ -55,7 +48,6 @@ class SyncMyMoodle:
         )
         if resp.url == "https://moodle.rwth-aachen.de/my/":
             soup = bs(resp.text, features="html.parser")
-            self.session_key = get_session_key(soup)
             with cookie_file.open("wb") as f:
                 pickle.dump(self.session.cookies, f)
             return
@@ -84,16 +76,23 @@ class SyncMyMoodle:
         )
         with cookie_file.open("wb") as f:
             soup = bs(resp.text, features="html.parser")
-            self.session_key = get_session_key(soup)
             pickle.dump(self.session.cookies, f)
 
     # Moodle Web Services API
 
     def get_moodle_wstoken(self) -> str:
+        self.wstoken = self.get_wstoken("moodle_mobile_app")
+        return self.wstoken
+
+    def get_opencast_wstoken(self) -> str:
+        self.opencast_wstoken = self.get_wstoken("filter_opencast_authentication")
+        return self.opencast_wstoken
+
+    def get_wstoken(self, service: str) -> str:
         if not self.session:
             raise Exception("You need to login() first.")
         params = {
-            "service": "moodle_mobile_app",
+            "service": service,
             "passport": 1,
             "urlscheme": "moodlemobile",
         }
@@ -117,8 +116,7 @@ class SyncMyMoodle:
 
         # token is in an app schema, which contains the wstoken base64-encoded along with some other token
         token_base64d = response.headers["Location"].split("token=")[1]
-        self.wstoken = base64.b64decode(token_base64d).decode().split(":::")[1]
-        return self.wstoken
+        return base64.b64decode(token_base64d).decode().split(":::")[1]
 
     def get_all_courses(self) -> Any:
         data = {
@@ -283,6 +281,8 @@ class SyncMyMoodle:
             raise Exception("You need to login() first.")
         if not self.wstoken:
             raise Exception("You need to get_moodle_wstoken() first.")
+        if not self.wstoken:
+            raise Exception("You need to get_opencast_wstoken() first.")
         if not self.user_id:
             raise Exception("You need to get_userid() first.")
 
@@ -566,6 +566,8 @@ class SyncMyMoodle:
             raise Exception("You need to login() first.")
         if not self.wstoken:
             raise Exception("You need to get_moodle_wstoken() first.")
+        if not self.wstoken:
+            raise Exception("You need to get_opencast_wstoken() first.")
         if not self.user_id:
             raise Exception("You need to get_userid() first.")
         if not self.root_node:
@@ -652,21 +654,19 @@ class SyncMyMoodle:
     def getOpenCastRealURL(self, course_id: int, url: str) -> str:
         """Download Opencast videos by using the engage API"""
         # get engage authentication form
-        course_info = [
-            {
-                "index": 0,
-                "methodname": "filter_opencast_get_lti_form",
-                "args": {"courseid": course_id},
-            }
-        ]
         response = self.session.post(
-            f"https://moodle.rwth-aachen.de/lib/ajax/service.php?sesskey={self.session_key}&info=filter_opencast_get_lti_form",
-            data=json.dumps(course_info),
+            "https://moodle.rwth-aachen.de/webservice/rest/server.php",
+            data={
+                "moodlewsrestformat": "json",
+                "wsfunction": "filter_opencast_get_lti_form",
+                "courseid": course_id,
+                "wstoken": self.opencast_wstoken,
+            },
         )
 
         # submit engage authentication info
         try:
-            engageDataSoup = bs(response.json()[0]["data"], features="html.parser")
+            engageDataSoup = bs(response.json(), features="html.parser")
         except Exception as e:
             logger.exception("Failed to parse Opencast response!")
             logger.debug("------Opencast-Error------")
