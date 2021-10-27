@@ -447,16 +447,21 @@ class SyncMyMoodle:
         if dest.suffix in self.config.get("exclude_filetypes", []):
             return True
 
+        resume_size = 0
+        header = {}
         tmp_dest = dest.with_suffix(dest.suffix + ".temp")
         if tmp_dest.exists():
             # TODO check if server supports Accept-Ranges: bytes
             resume_size = tmp_dest.stat().st_size
             header = {"Range": f"bytes= {resume_size}-"}
-        else:
-            resume_size = 0
-            header = dict()
 
-        with self.session.stream("GET", node.url or "", headers=header) as response:
+        extra_params = {}
+        if "webservice/pluginfile.php" in node.url:
+            extra_params = {"token": self.session.wstoken}
+
+        with self.session.stream(
+            "GET", node.url or "", headers=header, params=extra_params
+        ) as response:
             logger.info(f"Downloading {dest} [{node.type}]")
             total_size_in_bytes = (
                 int(response.headers.get("content-length", 0)) + resume_size
@@ -599,6 +604,7 @@ class SyncMyMoodle:
         logger.info("...done!")
         return True
 
+    # TODO Split into scan link and scan html - also see below TODO
     def scanForLinks(
         self,
         text: str,
@@ -609,9 +615,14 @@ class SyncMyMoodle:
     ) -> None:
         # A single link is supplied and the contents of it are checked
         if single:
+            # TODO check if the link points to a know website (opencast, sciebo etc.)
+            # If that is the case we can directly jump to the specific handlers below
             try:
-                text = text.replace("webservice/pluginfile.php", "pluginfile.php")
-                response = self.session.head(text)
+                extra_params = {}
+                if "webservice/pluginfile.php" in text:
+                    extra_params = {"token": self.session.wstoken}
+
+                response = self.session.head(text, params=extra_params)
                 if "youtube.com" in text or "youtu.be" in text:
                     # workaround for youtube providing bad headers when using HEAD
                     pass
@@ -630,7 +641,7 @@ class SyncMyMoodle:
                     # instantly return as it was a direct link
                     return
                 elif not self.config.get("nolinks"):
-                    response = self.session.get(text)
+                    response = self.session.get(text, params=extra_params)
                     tempsoup = bs(response.text, features="html.parser")
                     videojs = tempsoup.select_one(".video-js")
                     if videojs:

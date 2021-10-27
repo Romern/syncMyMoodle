@@ -1,9 +1,12 @@
 import base64
 import hashlib
+import logging
 from pathlib import Path
 from typing import Any, Iterable, List, Optional, overload
 
 INVALID_CHARS = frozenset('~"#%&*:<>?/\\{|}')
+
+logger = logging.getLogger(__name__)
 
 
 # TODO split into class for directory and file to improve type checking
@@ -52,12 +55,11 @@ class Node:
     def add_child(
         self, name: str, id: Any, type: str, url: str = None
     ) -> Optional["Node"]:
-        if url:
-            url = url.replace("?forcedownload=1", "")
-            url = url.replace("webservice/pluginfile.php", "pluginfile.php")
-
         # Check for duplicate urls and just ignore those nodes:
         if url and any(c.url == url for c in self.children):
+            logger.warning(
+                f"Tried adding duplicate url {url} ({name}, {id}, {type}) to {self}"
+            )
             return None
 
         temp = Node(name, id, type, url=url)
