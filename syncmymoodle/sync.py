@@ -256,11 +256,10 @@ class SyncMyMoodle:
                                 continue
                             for c in module.get("contents", []):
                                 if c["fileurl"]:
-                                    self.scanForLinks(
+                                    self.scan_url(
                                         c["fileurl"],
                                         section_node,
                                         course_id,
-                                        single=True,
                                         module_title=module["name"],
                                     )
 
@@ -279,7 +278,12 @@ class SyncMyMoodle:
                                 if f["coursemodule"] == module["id"]
                             ]
                             if rel_folder:
-                                self.scanForLinks(rel_folder[0], folder_node, course_id)
+                                self.scan_markup(
+                                    rel_folder[0],
+                                    folder_node,
+                                    course_id,
+                                    module_title=module["name"],
+                                )
 
                             for c in module.get("contents", []):
                                 if c["filepath"] != "/":
@@ -310,7 +314,7 @@ class SyncMyMoodle:
                         if module["modname"] == "label" and self.config.get(
                             "used_modules", {}
                         ).get("url", {}):
-                            self.scanForLinks(
+                            self.scan_markup(
                                 module.get("description", ""),
                                 section_node,
                                 course_id,
@@ -379,7 +383,7 @@ class SyncMyMoodle:
                                 )
                                 section_node.add_child(
                                     urllib.parse.unquote(name),
-                                    urllib.parse.urlparse(review_url)[1],
+                                    urllib.parse.urlsplit(review_url)[1],
                                     "Quiz",
                                     url=review_url,
                                 )
@@ -455,6 +459,9 @@ class SyncMyMoodle:
             resume_size = tmp_dest.stat().st_size
             header = {"Range": f"bytes= {resume_size}-"}
 
+        if not node.url:
+            raise RuntimeError("Tried downloading node without url")
+
         extra_params = {}
         if "webservice/pluginfile.php" in node.url:
             extra_params = {"token": self.session.wstoken}
@@ -481,7 +488,7 @@ class SyncMyMoodle:
 
     def getOpenCastRealURL(self, course_id: int, url: str) -> str:
         """Download Opencast videos by using the engage API"""
-        parsed = urllib.parse.urlparse(url)
+        parsed = urllib.parse.urlsplit(url)
         linkid = PurePosixPath(parsed.path).name
 
         # Try getting the metadata without logging in
@@ -604,101 +611,119 @@ class SyncMyMoodle:
         logger.info("...done!")
         return True
 
-    # TODO Split into scan link and scan html - also see below TODO
-    def scanForLinks(
+    def scan_url(
         self,
-        text: str,
+        url: str,
         parent_node: Node,
         course_id: int,
-        module_title: str = None,
-        single: bool = False,
+        module_title: str,
     ) -> None:
-        # A single link is supplied and the contents of it are checked
-        if single:
-            # TODO check if the link points to a know website (opencast, sciebo etc.)
-            # If that is the case we can directly jump to the specific handlers below
-            try:
-                extra_params = {}
-                if "webservice/pluginfile.php" in text:
-                    extra_params = {"token": self.session.wstoken}
+        """Given a single link check what it points to"""
+        # TODO check if the link points to a know website (opencast, sciebo etc.)
+        # If that is the case we can directly jump to the specific handlers below
+        extra_params = {}
+        if "webservice/pluginfile.php" in url:
+            extra_params = {"token": self.session.wstoken}
 
-                response = self.session.head(text, params=extra_params)
-                if "youtube.com" in text or "youtu.be" in text:
-                    # workaround for youtube providing bad headers when using HEAD
-                    pass
-                elif (
-                    "Content-Type" in response.headers
-                    and "text/html" not in response.headers["Content-Type"]
-                ):
-                    # non html links, assume the filename is in the path
-                    filename = urllib.parse.urlsplit(text).path.split("/")[-1]
-                    parent_node.add_child(
-                        urllib.parse.unquote(filename),
-                        None,
-                        f'Linked file [{response.headers["Content-Type"]}]',
-                        url=text,
-                    )
-                    # instantly return as it was a direct link
-                    return
-                elif not self.config.get("nolinks"):
-                    response = self.session.get(text, params=extra_params)
-                    tempsoup = bs(response.text, features="html.parser")
-                    videojs = tempsoup.select_one(".video-js")
-                    if videojs:
-                        videojs = videojs.select_one("source")
-                        if videojs and videojs.get("src"):
-                            if not response.url:
-                                logging.warning(f"Response from {text} had no url set")
-                            else:
-                                link = urllib.parse.urljoin(
-                                    f"{response.url.scheme}://{response.url.netloc.decode('ascii')}/{response.url.path}",
-                                    videojs["src"],
-                                )
-                                parent_node.add_child(
-                                    urllib.parse.unquote(videojs["src"].split("/")[-1]),
-                                    None,
-                                    "Embedded videojs",
-                                    url=link,
-                                )
-                    # further inspect the response for other links
-                    self.scanForLinks(
-                        response.text,
-                        parent_node,
-                        course_id,
-                        module_title=module_title,
-                        single=False,
-                    )
-            except Exception:
-                # Maybe the url is down?
-                logger.exception(f"Error while scanning url {text}")
-        if self.config.get("nolinks"):
-            return
-
-        # Youtube videos
         if self.config.get("used_modules", {}).get("url", {}).get("youtube", {}):
-            if single and "youtube.com" in text or "youtu.be" in text:
+            if "youtube.com" in url or "youtu.be" in url:
                 youtube_links = [
                     u[0]
                     for u in re.findall(
                         r"(https?://(www\.)?(youtube\.com/(watch\?[a-zA-Z0-9_=&-]*v=|embed/)|youtu.be/).{11})",
-                        text,
+                        url,
                     )
                 ]
+                for link in youtube_links:
+                    parent_node.add_child(
+                        f"Youtube: {module_title or link}", link, "Youtube", url=link
+                    )
+                return
+
+        try:
+            response = self.session.head(url, params=extra_params)
+        except Exception:
+            # Maybe the url is down?
+            logger.exception(f"Error while scanning url {url}")
+            return
+
+        if (
+            "Content-Type" in response.headers
+            and "text/html" not in response.headers["Content-Type"]
+        ):
+            # non html links, assume the filename is in the path
+            filename = PurePosixPath(urllib.parse.urlsplit(url).path).name
+            parent_node.add_child(
+                urllib.parse.unquote(filename),
+                None,
+                f'Linked file [{response.headers["Content-Type"]}]',
+                url=url,
+            )
+            # instantly return as it was a direct link
+            return
+
+        # The link does not seem to point to a known website or a file
+        # Instead download the page and scrape it for some other links
+        if self.config.get("nolinks"):
+            return
+
+        extra_params = {}
+        if "webservice/pluginfile.php" in url:
+            extra_params = {"token": self.session.wstoken}
+
+        try:
+            response = self.session.get(url, params=extra_params)
+        except Exception:
+            # Maybe the url is down?
+            logger.exception(f"Error while scanning url {url}")
+            return
+
+        # further inspect the response for other links
+        self.scan_markup(response.text, parent_node, course_id, module_title, url)
+
+    def scan_markup(
+        self,
+        markup: str,
+        parent_node: Node,
+        course_id: int,
+        module_title: str,
+        url: str = None,
+    ) -> None:
+        """Given some markup check if it contains any links or embedded resources"""
+
+        if self.config.get("nolinks"):
+            return
+
+        tempsoup = bs(markup, features="html.parser")
+        videojs_source = tempsoup.select_one("video.video-js source")
+        if videojs_source and videojs_source.get("src"):
+            if not url:
+                logging.warning("Unable to get absolute url for videojs")
             else:
-                youtube_links = re.findall(
-                    "https://www.youtube.com/embed/[a-zA-Z0-9_-]{11}", text
+                absolute_url = urllib.parse.urlunsplit(
+                    urllib.parse.urlsplit(url)._replace(path=videojs_source["src"])
                 )
-            for link in youtube_links:
+                parent_node.add_child(
+                    urllib.parse.unquote(videojs_source["src"].split("/")[-1]),
+                    None,
+                    "Embedded videojs",
+                    url=absolute_url,
+                )
+
+        # Youtube videos
+        if self.config.get("used_modules", {}).get("url", {}).get("youtube", {}):
+            for link in re.findall(
+                "https://www.youtube.com/embed/[a-zA-Z0-9_-]{11}", markup
+            ):
                 parent_node.add_child(
                     f"Youtube: {module_title or link}", link, "Youtube", url=link
                 )
 
         # OpenCast videos
         if self.config.get("used_modules", {}).get("url", {}).get("opencast", {}):
-            opencast_links = re.findall(
-                "https://engage.streaming.rwth-aachen.de/play/[a-zA-Z0-9-]+", text
-            )
-            for vid in opencast_links:
+            for vid in re.findall(
+                "https://engage.streaming.rwth-aachen.de/play/[a-zA-Z0-9-]+", markup
+            ):
                 try:
                     vid = self.getOpenCastRealURL(course_id, vid)
                 except RuntimeError:
@@ -710,18 +735,17 @@ class SyncMyMoodle:
 
         # https://rwth-aachen.sciebo.de/s/XXX
         if self.config.get("used_modules", {}).get("url", {}).get("sciebo", {}):
-            sciebo_links = re.findall(
-                "https://rwth-aachen.sciebo.de/s/[a-zA-Z0-9-]+", text
-            )
-            for vid in sciebo_links:
+            for vid in re.findall(
+                "https://rwth-aachen.sciebo.de/s/[a-zA-Z0-9-]+", markup
+            ):
                 response = self.session.get(vid)
                 soup = bs(response.text, features="html.parser")
-                url = soup.find("input", {"name": "downloadURL"})
+                download_url = soup.find("input", {"name": "downloadURL"})
                 filename_input = soup.find("input", {"name": "filename"})
-                if url and filename_input:
+                if download_url and filename_input:
                     parent_node.add_child(
                         filename_input["value"],
-                        url["value"],
+                        download_url["value"],
                         "Sciebo file",
-                        url=url["value"],
+                        url=download_url["value"],
                     )
