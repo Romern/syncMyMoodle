@@ -342,7 +342,7 @@ class SyncMyMoodle:
                             else:
                                 engage_id = engage_id.get("value")
                                 name = name.get("value")
-                                vid = self.getOpenCastRealURL(
+                                vid = self.get_opencast_url(
                                     course_id,
                                     f"https://engage.streaming.rwth-aachen.de/play/{engage_id}",
                                 )
@@ -410,7 +410,7 @@ class SyncMyMoodle:
             if cur_node.url and not cur_node.is_downloaded:
                 if cur_node.type == "Youtube":
                     try:
-                        self.scanAndDownloadYouTube(cur_node, targetfile)
+                        self.scan_and_download_youtube(cur_node, targetfile)
                         cur_node.is_downloaded = True
                     except Exception:
                         logger.exception(f"Failed to download the module {cur_node}")
@@ -419,13 +419,13 @@ class SyncMyMoodle:
                         )
                 elif cur_node.type == "Opencast":
                     try:
-                        self.downloadOpenCastVideos(cur_node, targetfile)
+                        self.download_opencast_video(cur_node, targetfile)
                         cur_node.is_downloaded = True
                     except Exception:
                         logger.exception(f"Failed to download the module {cur_node}")
                 elif cur_node.type == "Quiz":
                     try:
-                        self.downloadQuiz(cur_node, targetfile)
+                        self.download_quiz(cur_node, targetfile)
                         cur_node.is_downloaded = True
                     except Exception:
                         logger.exception(f"Failed to download the module {cur_node}")
@@ -486,7 +486,7 @@ class SyncMyMoodle:
             tmp_dest.rename(dest)
             return True
 
-    def getOpenCastRealURL(self, course_id: int, url: str) -> str:
+    def get_opencast_url(self, course_id: int, url: str) -> str:
         """Download Opencast videos by using the engage API"""
         parsed = urllib.parse.urlsplit(url)
         linkid = PurePosixPath(parsed.path).name
@@ -553,7 +553,7 @@ class SyncMyMoodle:
             raise RuntimeError("Unexpected response from engage")
         return trackurl
 
-    def downloadOpenCastVideos(self, node: Node, dest: Path) -> bool:
+    def download_opencast_video(self, node: Node, dest: Path) -> bool:
         if ".mp4" not in node.name:
             if node.name:
                 node.name += ".mp4"
@@ -561,7 +561,7 @@ class SyncMyMoodle:
                 node.name = urllib.parse.unquote((node.url or "").split("/")[-1])
         return self.download_file(node, dest.with_name(node.name))
 
-    def scanAndDownloadYouTube(self, node: Node, dest: Path) -> bool:
+    def scan_and_download_youtube(self, node: Node, dest: Path) -> bool:
         """Download Youtube-Videos using youtube_dl"""
         # TODO double check dest handling
         parent_dir = dest.parent
@@ -581,7 +581,7 @@ class SyncMyMoodle:
             ydl.download([node.url])
         return True
 
-    def downloadQuiz(self, node: Node, dest: Path) -> bool:
+    def download_quiz(self, node: Node, dest: Path) -> bool:
         # TODO double check dest handling
         pdf_dest = dest.with_suffix(".pdf")
 
@@ -725,7 +725,7 @@ class SyncMyMoodle:
                 "https://engage.streaming.rwth-aachen.de/play/[a-zA-Z0-9-]+", markup
             ):
                 try:
-                    vid = self.getOpenCastRealURL(course_id, vid)
+                    vid = self.get_opencast_url(course_id, vid)
                 except RuntimeError:
                     logging.warning(f"Error while trying to get video url from {vid}")
                     continue
