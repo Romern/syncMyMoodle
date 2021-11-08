@@ -1,3 +1,5 @@
+import asyncio
+
 from .cli import main
 
-main()
+asyncio.run(main())

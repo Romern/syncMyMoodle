@@ -22,7 +22,7 @@ except ImportError:
 logger = logging.getLogger(__name__)
 
 
-def main() -> None:
+async def main() -> None:
     parser = ArgumentParser(
         prog="python3 -m syncmymoodle",
         description="Synchronization client for RWTH Moodle. All optional arguments override those in config.json.",
@@ -187,9 +187,9 @@ def main() -> None:
     smm = SyncMyMoodle(config)
 
     logger.info("Logging in...")
-    smm.login()
+    await smm.login()
     logger.info("Syncing file tree...")
-    smm.sync()
+    await smm.sync()
 
     if args.dry_run:
         logging.info("The following virtual filetree has been generated")
@@ -198,4 +198,4 @@ def main() -> None:
         sys.exit(0)
 
     logger.info("Downloading files...")
-    smm.download_all_files()
+    await smm.download_all_files()

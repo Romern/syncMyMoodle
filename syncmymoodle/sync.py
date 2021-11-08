@@ -9,7 +9,7 @@ from typing import Any, Dict, List
 import pdfkit
 import youtube_dl
 from bs4 import BeautifulSoup as bs
-from moodle.session import MoodleSession
+from moodle.session import AsyncMoodleClient
 from tqdm import tqdm
 
 from syncmymoodle.filetree import Node
@@ -25,27 +25,27 @@ class SyncMyMoodle:
 
     def __init__(self, config: Dict[str, Any]) -> None:
         self.config = config
-        self.session = MoodleSession(
+        self.session = AsyncMoodleClient(
             "https://moodle.rwth-aachen.de", "", follow_redirects=True
         )
-        self.opencast_session = MoodleSession("https://moodle.rwth-aachen.de", "")
+        self.opencast_session = AsyncMoodleClient("https://moodle.rwth-aachen.de", "")
         self.root_node = Node("", -1, "Root")
 
-    def login(self) -> None:
+    async def login(self) -> None:
         """Login to Moodle and RWTH SSH
 
         Also gets tokens for the moodle_mobile_app
         and filter_opencast_authentication services
         """
-        self.session.login(self.config["user"], self.config["password"])
-        self.opencast_session.login(
+        await self.session.login(self.config["user"], self.config["password"])
+        await self.opencast_session.login(
             self.config["user"],
             self.config["password"],
             service="filter_opencast_authentication",
         )
 
-    def _get_userid(self) -> int:
-        data = self.session.webservice(
+    async def _get_userid(self) -> int:
+        data = await self.session.webservice(
             "core_webservice_get_site_info", data={"moodlewssettingfilter": True}
         )
         userid = data.get("userid")
@@ -53,37 +53,39 @@ class SyncMyMoodle:
             raise RuntimeError(f"Unexpected response while getting userid: {data}")
         return userid
 
-    def get_all_courses(self) -> Any:
-        return self.session.webservice(
+    async def get_all_courses(self) -> Any:
+        return await self.session.webservice(
             "core_enrol_get_users_courses",
             {
-                "userid": self._get_userid(),
+                "userid": await self._get_userid(),
                 "returnusercount": "0",
                 "moodlewssettingfilter": True,
             },
         )
 
-    def get_course(self, course_id: int) -> Any:
-        return self.session.webservice(
+    async def get_course(self, course_id: int) -> Any:
+        return await self.session.webservice(
             "core_course_get_contents",
             {"courseid": course_id, "moodlewssettingfilter": True},
         )
 
     # TODO rename
-    def get_assignment(self, course_id: int) -> Any:
-        courses = self.session.webservice(
-            "mod_assign_get_assignments",
-            {
-                "courseids": [course_id],
-                "includenotenrolledcourses": 1,  # TODO Do we really want this?
-                "moodlewssettingfilter": True,
-            },
+    async def get_assignment(self, course_id: int) -> Any:
+        courses = (
+            await self.session.webservice(
+                "mod_assign_get_assignments",
+                {
+                    "courseids": [course_id],
+                    "includenotenrolledcourses": 1,  # TODO Do we really want this?
+                    "moodlewssettingfilter": True,
+                },
+            )
         )["courses"]
         [course] = courses
         return course
 
-    def get_assignment_submission_files(self, assignment_id: int) -> List[Any]:
-        submission_stati = self.session.webservice(
+    async def get_assignment_submission_files(self, assignment_id: int) -> List[Any]:
+        submission_stati = await self.session.webservice(
             "mod_assign_get_submission_status",
             {"assignid": assignment_id, "moodlewssettingfilter": True},
         )
@@ -111,22 +113,24 @@ class SyncMyMoodle:
             for file in filearea.get("files", [])
         ]
 
-    def get_folders_by_courses(self, course_id: int) -> List[Any]:
-        folders = self.session.webservice(
-            "mod_folder_get_folders_by_courses",
-            {"courseids": [course_id], "moodlewssettingfilter": True},
+    async def get_folders_by_courses(self, course_id: int) -> List[Any]:
+        folders = (
+            await self.session.webservice(
+                "mod_folder_get_folders_by_courses",
+                {"courseids": [course_id], "moodlewssettingfilter": True},
+            )
         )["folders"]
         if not isinstance(folders, list):
             raise RuntimeError(f"Unexpected response while getting folders: {folders}")
         return folders
 
-    def sync(self) -> None:
+    async def sync(self) -> None:
         """Retrives the file tree for all courses"""
         if not self.session.wstoken or not self.opencast_session.wstoken:
             raise Exception("You need to login() first.")
 
         # Syncing all courses
-        for course in self.get_all_courses():
+        for course in await self.get_all_courses():
             if any(str(course["id"]) in c for c in self.config.get("skip_courses", [])):
                 return
 
@@ -153,17 +157,17 @@ class SyncMyMoodle:
             except ValueError:
                 semester_node = self.root_node.add_child(semestername, None, "Semester")
 
-            self._sync_course(course, semester_node)
+            await self._sync_course(course, semester_node)
 
-    def _sync_course(self, course: Any, semester_node: Node) -> None:
+    async def _sync_course(self, course: Any, semester_node: Node) -> None:
         course_name = course["shortname"]
         course_id = course["id"]
 
         course_node = semester_node.add_child(course_name, course_id, "Course")
 
         logger.info(f"Syncing {course_name}...")
-        assignments = self.get_assignment(course_id)
-        folders = self.get_folders_by_courses(course_id)
+        assignments = await self.get_assignment(course_id)
+        folders = await self.get_folders_by_courses(course_id)
 
         logger.debug("-----------------------")
         logger.debug(f"------{semester_node.name} - {course_name}------")
@@ -174,13 +178,15 @@ class SyncMyMoodle:
         logger.debug("------FOLDER-DATA------")
         logger.debug(json.dumps(folders))
 
-        for section in self.get_course(course_id):
+        for section in await self.get_course(course_id):
             if isinstance(section, str):
                 logger.error(f"Error syncing section in {course_name}: {section}")
                 continue
-            self._sync_section(section, course_node, course_id, assignments, folders)
+            await self._sync_section(
+                section, course_node, course_id, assignments, folders
+            )
 
-    def _sync_section(
+    async def _sync_section(
         self,
         section: Any,
         course_node: Node,
@@ -193,11 +199,13 @@ class SyncMyMoodle:
         section_node = course_node.add_child(section["name"], section["id"], "Section")
         for module in section["modules"]:
             try:
-                self._sync_module(module, section_node, course_id, assignments, folders)
+                await self._sync_module(
+                    module, section_node, course_id, assignments, folders
+                )
             except Exception:
                 logger.exception(f"Failed to download the module {module}")
 
-    def _sync_module(
+    async def _sync_module(
         self,
         module: Any,
         section_node: Node,
@@ -224,9 +232,9 @@ class SyncMyMoodle:
                 assignment_name, assignment_id, "Assignment"
             )
 
-            ass_contents = ass[
-                "introattachments"
-            ] + self.get_assignment_submission_files(assignment_id)
+            ass_contents = ass["introattachments"] + (
+                await self.get_assignment_submission_files(assignment_id)
+            )
             for c in ass_contents:
                 if c["filepath"] != "/":
                     assignment_node.add_child(
@@ -262,7 +270,7 @@ class SyncMyMoodle:
                 return
             for c in module.get("contents", []):
                 if c["fileurl"]:
-                    self.scan_url(
+                    await self.scan_url(
                         c["fileurl"],
                         section_node,
                         course_id,
@@ -280,7 +288,7 @@ class SyncMyMoodle:
                 f["intro"] for f in folders if f["coursemodule"] == module["id"]
             ]
             if rel_folder:
-                self.scan_markup(
+                await self.scan_markup(
                     rel_folder[0],
                     folder_node,
                     course_id,
@@ -316,7 +324,7 @@ class SyncMyMoodle:
         if module["modname"] == "label" and self.config.get("used_modules", {}).get(
             "url", {}
         ):
-            self.scan_markup(
+            await self.scan_markup(
                 module.get("description", ""),
                 section_node,
                 course_id,
@@ -328,7 +336,9 @@ class SyncMyMoodle:
             "url", {}
         ).get("opencast", {}):
             info_url = f'https://moodle.rwth-aachen.de/mod/lti/launch.php?id={module["id"]}&triggerview=0'
-            info_res = bs(self.session.get(info_url).text, features="html.parser")
+            info_res = bs(
+                (await self.session.get(info_url)).text, features="html.parser"
+            )
             # FIXME: For now we assume that all lti modules will lead to an opencast video
             engage_id = info_res.find("input", {"name": "custom_id"})
             name = info_res.find("input", {"name": "resource_link_title"})
@@ -340,7 +350,7 @@ class SyncMyMoodle:
             else:
                 engage_id = engage_id.get("value")
                 name = name.get("value")
-                vid = self.get_opencast_url(
+                vid = await self.get_opencast_url(
                     course_id,
                     f"https://engage.streaming.rwth-aachen.de/play/{engage_id}",
                 )
@@ -357,7 +367,9 @@ class SyncMyMoodle:
             info_url = (
                 f'https://moodle.rwth-aachen.de/mod/quiz/view.php?id={module["id"]}'
             )
-            info_res = bs(self.session.get(info_url).text, features="html.parser")
+            info_res = bs(
+                (await self.session.get(info_url)).text, features="html.parser"
+            )
             attempts = info_res.findAll(
                 "a",
                 {"title": "Überprüfung der eigenen Antworten dieses Versuchs"},
@@ -367,7 +379,7 @@ class SyncMyMoodle:
                 attempt_cnt += 1
                 review_url = attempt.get("href")
                 quiz_res = bs(
-                    self.session.get(review_url).text,
+                    (await self.session.get(review_url)).text,
                     features="html.parser",
                 )
                 name = (
@@ -384,18 +396,18 @@ class SyncMyMoodle:
                     url=review_url,
                 )
 
-    def download_all_files(self) -> None:
+    async def download_all_files(self) -> None:
         if not self.session.wstoken or not self.opencast_session.wstoken:
             raise Exception("You need to login() first.")
         if not self.root_node.children:
             raise Exception("Root node has no children. Did you call sync()?")
 
         self.root_node.remove_children_nameclashes()
-        self._download_all_files(
+        await self._download_all_files(
             self.root_node, Path(self.config.get("basedir", Path.cwd())).expanduser()
         )
 
-    def _download_all_files(self, cur_node: Node, dest: Path) -> None:
+    async def _download_all_files(self, cur_node: Node, dest: Path) -> None:
         if not cur_node.children:
             targetfile = dest / cur_node.sanitized_name
             # We are in a leaf not which represents a downloadable node
@@ -411,20 +423,20 @@ class SyncMyMoodle:
                         )
                 elif cur_node.type == "Opencast":
                     try:
-                        self.download_opencast_video(cur_node, targetfile)
+                        await self.download_opencast_video(cur_node, targetfile)
                         cur_node.is_downloaded = True
                     except Exception:
                         logger.exception(f"Failed to download the module {cur_node}")
                 elif cur_node.type == "Quiz":
                     try:
-                        self.download_quiz(cur_node, targetfile)
+                        await self.download_quiz(cur_node, targetfile)
                         cur_node.is_downloaded = True
                     except Exception:
                         logger.exception(f"Failed to download the module {cur_node}")
                         logger.warning("Is wkhtmltopdf correctly installed?")
                 else:
                     try:
-                        self.download_file(cur_node, targetfile)
+                        await self.download_file(cur_node, targetfile)
                         cur_node.is_downloaded = True
                     except Exception:
                         logger.exception(f"Failed to download the module {cur_node}")
@@ -433,9 +445,9 @@ class SyncMyMoodle:
         for child in cur_node.children:
             targetdir = dest / cur_node.sanitized_name
             targetdir.mkdir(exist_ok=True)
-            self._download_all_files(child, targetdir)
+            await self._download_all_files(child, targetdir)
 
-    def download_file(self, node: Node, dest: Path) -> bool:
+    async def download_file(self, node: Node, dest: Path) -> bool:
         """Download file with progress bar if it isn't already downloaded"""
         if dest.exists():
             return True
@@ -458,7 +470,7 @@ class SyncMyMoodle:
         if "webservice/pluginfile.php" in node.url:
             extra_params = {"token": self.session.wstoken}
 
-        with self.session.stream(
+        async with self.session.stream(
             "GET", node.url or "", headers=header, params=extra_params
         ) as response:
             logger.info(f"Downloading {dest} [{node.type}]")
@@ -471,14 +483,14 @@ class SyncMyMoodle:
                 if resume_size:
                     progress_bar.update(resume_size)
                 with tmp_dest.open("ab") as file:
-                    for data in response.iter_bytes(self.block_size):
+                    async for data in response.aiter_bytes(self.block_size):
                         file.write(data)
                         # TODO check if this correctly works with compression
                         progress_bar.update(len(data))
             tmp_dest.rename(dest)
             return True
 
-    def get_opencast_url(self, course_id: int, url: str) -> str:
+    async def get_opencast_url(self, course_id: int, url: str) -> str:
         """Download Opencast videos by using the engage API"""
         parsed = urllib.parse.urlsplit(url)
         linkid = PurePosixPath(parsed.path).name
@@ -487,23 +499,24 @@ class SyncMyMoodle:
         episodejson_url = (
             f"https://engage.streaming.rwth-aachen.de/search/episode.json?id={linkid}"
         )
-        searchresults = self.session.get(episodejson_url).json()["search-results"]
+        searchresults = (await self.session.get(episodejson_url)).json()[
+            "search-results"
+        ]
 
         if "result" not in searchresults:
             # Either the video is broken or we are not yet logged in
             if (
-                self.session.get(
+                await self.session.get(
                     "https://engage.streaming.rwth-aachen.de/lti",
                     follow_redirects=False,
-                ).status_code
-                != HTTPStatus.FOUND
-            ):
+                )
+            ).status_code != HTTPStatus.FOUND:
                 # We seem to be logged in so the video is broken
                 raise RuntimeError(f"Opencast video {url} is broken")
 
             # Get engage authentication form using the opencast_session
             # as only that token has access to the filter_opencast_get_lti_form function
-            response = self.opencast_session.webservice(
+            response = await self.opencast_session.webservice(
                 "filter_opencast_get_lti_form",
                 {"courseid": course_id, "moodlewssettingfilter": True},
             )
@@ -519,14 +532,16 @@ class SyncMyMoodle:
 
             # Login with the main session as that will also be used for downloads
             # TODO get post url dynamically from lti_form
-            self.session.post(
+            await self.session.post(
                 "https://engage.streaming.rwth-aachen.de/lti",
                 data={i["name"]: i["value"] for i in engageDataSoup.findAll("input")},
             )
 
             # Finally retry getting the metadata
             episodejson_url = f"https://engage.streaming.rwth-aachen.de/search/episode.json?id={linkid}"
-            searchresults = self.session.get(episodejson_url).json()["search-results"]
+            searchresults = (await self.session.get(episodejson_url)).json()[
+                "search-results"
+            ]
 
         all_tracks = searchresults["result"]["mediapackage"]["media"]["track"]
 
@@ -545,13 +560,13 @@ class SyncMyMoodle:
             raise RuntimeError("Unexpected response from engage")
         return trackurl
 
-    def download_opencast_video(self, node: Node, dest: Path) -> bool:
+    async def download_opencast_video(self, node: Node, dest: Path) -> bool:
         if ".mp4" not in node.name:
             if node.name:
                 node.name += ".mp4"
             else:
                 node.name = urllib.parse.unquote((node.url or "").split("/")[-1])
-        return self.download_file(node, dest.with_name(node.name))
+        return await self.download_file(node, dest.with_name(node.name))
 
     def scan_and_download_youtube(self, node: Node, dest: Path) -> bool:
         """Download Youtube-Videos using youtube_dl"""
@@ -573,14 +588,16 @@ class SyncMyMoodle:
             ydl.download([node.url])
         return True
 
-    def download_quiz(self, node: Node, dest: Path) -> bool:
+    async def download_quiz(self, node: Node, dest: Path) -> bool:
         # TODO double check dest handling
         pdf_dest = dest.with_suffix(".pdf")
 
         if pdf_dest.exists():
             return True
 
-        quiz_res = bs(self.session.get(node.url or "").text, features="html.parser")
+        quiz_res = bs(
+            (await self.session.get(node.url or "")).text, features="html.parser"
+        )
 
         # i need to hide the left nav element because its obscuring the quiz in the resulting pdf
         for nav in quiz_res.findAll("div", {"id": "nav-drawer"}):
@@ -603,7 +620,7 @@ class SyncMyMoodle:
         logger.info("...done!")
         return True
 
-    def scan_url(
+    async def scan_url(
         self,
         url: str,
         parent_node: Node,
@@ -634,7 +651,7 @@ class SyncMyMoodle:
 
         if self.config.get("used_modules", {}).get("url", {}).get("sciebo", {}):
             if SCIEBO_REGEX.match(url):
-                response = self.session.get(url)
+                response = await self.session.get(url)
                 soup = bs(response.text, features="html.parser")
                 download_url = soup.find("input", {"name": "downloadURL"})
                 filename_input = soup.find("input", {"name": "filename"})
@@ -648,7 +665,7 @@ class SyncMyMoodle:
                 return
 
         try:
-            response = self.session.head(url, params=extra_params)
+            response = await self.session.head(url, params=extra_params)
         except Exception:
             # Maybe the url is down?
             logger.exception(f"Error while scanning url {url}")
@@ -679,16 +696,16 @@ class SyncMyMoodle:
             extra_params = {"token": self.session.wstoken}
 
         try:
-            response = self.session.get(url, params=extra_params)
+            response = await self.session.get(url, params=extra_params)
         except Exception:
             # Maybe the url is down?
             logger.exception(f"Error while scanning url {url}")
             return
 
         # further inspect the response for other links
-        self.scan_markup(response.text, parent_node, course_id, module_title, url)
+        await self.scan_markup(response.text, parent_node, course_id, module_title, url)
 
-    def scan_markup(
+    async def scan_markup(
         self,
         markup: str,
         parent_node: Node,
@@ -732,7 +749,7 @@ class SyncMyMoodle:
                 "https://engage.streaming.rwth-aachen.de/play/[a-zA-Z0-9-]+", markup
             ):
                 try:
-                    vid = self.get_opencast_url(course_id, vid)
+                    vid = await self.get_opencast_url(course_id, vid)
                 except RuntimeError:
                     logging.warning(f"Error while trying to get video url from {vid}")
                     continue
@@ -743,7 +760,7 @@ class SyncMyMoodle:
         # https://rwth-aachen.sciebo.de/s/XXX
         if self.config.get("used_modules", {}).get("url", {}).get("sciebo", {}):
             for vid in SCIEBO_REGEX.findall(markup):
-                response = self.session.get(vid)
+                response = await self.session.get(vid)
                 soup = bs(response.text, features="html.parser")
                 download_url = soup.find("input", {"name": "downloadURL"})
                 filename_input = soup.find("input", {"name": "filename"})
