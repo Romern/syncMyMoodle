@@ -1,3 +1,4 @@
+import asyncio
 import json
 import logging
 import re
@@ -6,6 +7,7 @@ from http import HTTPStatus
 from pathlib import Path, PurePosixPath
 from typing import Any, Dict, List
 
+import httpx
 import pdfkit
 import youtube_dl
 from bs4 import BeautifulSoup as bs
@@ -26,7 +28,10 @@ class SyncMyMoodle:
     def __init__(self, config: Dict[str, Any]) -> None:
         self.config = config
         self.session = AsyncMoodleClient(
-            "https://moodle.rwth-aachen.de", "", follow_redirects=True
+            "https://moodle.rwth-aachen.de",
+            "",
+            follow_redirects=True,
+            timeout=httpx.Timeout(60),
         )
         self.opencast_session = AsyncMoodleClient("https://moodle.rwth-aachen.de", "")
         self.root_node = Node("", -1, "Root")
@@ -129,16 +134,18 @@ class SyncMyMoodle:
         if not self.session.wstoken or not self.opencast_session.wstoken:
             raise Exception("You need to login() first.")
 
+        course_tasks = []
+
         # Syncing all courses
         for course in await self.get_all_courses():
             if any(str(course["id"]) in c for c in self.config.get("skip_courses", [])):
-                return
+                continue
 
             # Skip not selected courses
             if self.config.get("selected_courses", []) and not any(
                 str(course["id"]) in c for c in self.config.get("selected_courses", [])
             ):
-                return
+                continue
 
             semestername = course["idnumber"][:4]
             # Skip not selected semesters
@@ -147,7 +154,7 @@ class SyncMyMoodle:
                 and self.config.get("only_sync_semester", [])
                 and semestername not in self.config.get("only_sync_semester", [])
             ):
-                return
+                continue
 
             semester_nodes = [
                 s for s in self.root_node.children if s.name == semestername
@@ -157,7 +164,13 @@ class SyncMyMoodle:
             except ValueError:
                 semester_node = self.root_node.add_child(semestername, None, "Semester")
 
-            await self._sync_course(course, semester_node)
+            course_tasks.append(
+                asyncio.create_task(
+                    self._sync_course(course, semester_node), name=course["shortname"]
+                )
+            )
+
+        await asyncio.gather(*course_tasks)
 
     async def _sync_course(self, course: Any, semester_node: Node) -> None:
         course_name = course["shortname"]
@@ -664,6 +677,8 @@ class SyncMyMoodle:
                     )
                 return
 
+        # TODO add early detection for some Opencast URLs
+        # see https://github.com/opencast/opencast/issues/1856
         try:
             response = await self.session.head(url, params=extra_params)
         except Exception:
