@@ -125,273 +125,262 @@ class SyncMyMoodle:
 
         # Syncing all courses
         for course in self.get_all_courses():
-            course_name = course["shortname"]
-            course_id = course["id"]
-
-            if (
-                len(
-                    [
-                        c
-                        for c in self.config.get("skip_courses", [])
-                        if str(course_id) in c
-                    ]
-                )
-                > 0
-            ):
-                continue
+            if any(str(course["id"]) in c for c in self.config.get("skip_courses", [])):
+                return
 
             # Skip not selected courses
-            if (
-                len(self.config.get("selected_courses", [])) > 0
-                and len(
-                    [
-                        c
-                        for c in self.config.get("selected_courses", [])
-                        if str(course["id"]) in c
-                    ]
-                )
-                == 0
+            if self.config.get("selected_courses", []) and not any(
+                str(course["id"]) in c for c in self.config.get("selected_courses", [])
             ):
-                continue
+                return
 
             semestername = course["idnumber"][:4]
             # Skip not selected semesters
             if (
-                len(self.config.get("selected_courses", [])) == 0
+                not self.config.get("selected_courses", [])
                 and self.config.get("only_sync_semester", [])
                 and semestername not in self.config.get("only_sync_semester", [])
             ):
-                continue
+                return
 
             semester_nodes = [
                 s for s in self.root_node.children if s.name == semestername
             ]
-            if len(semester_nodes) == 0:
-                semester_node = self.root_node.add_child(semestername, None, "Semester")
-            else:
+            try:
                 [semester_node] = semester_nodes
+            except ValueError:
+                semester_node = self.root_node.add_child(semestername, None, "Semester")
 
-            course_node = semester_node.add_child(course_name, course_id, "Course")
+            self._sync_course(course, semester_node)
 
-            logger.info(f"Syncing {course_name}...")
-            assignments = self.get_assignment(course_id)
-            folders = self.get_folders_by_courses(course_id)
+    def _sync_course(self, course: Any, semester_node: Node) -> None:
+        course_name = course["shortname"]
+        course_id = course["id"]
 
-            logger.debug("-----------------------")
-            logger.debug(f"------{semestername} - {course_name}------")
-            logger.debug("------COURSE-DATA------")
-            logger.debug(json.dumps(course))
-            logger.debug("------ASSIGNMENT-DATA------")
-            logger.debug(json.dumps(assignments))
-            logger.debug("------FOLDER-DATA------")
-            logger.debug(json.dumps(folders))
+        course_node = semester_node.add_child(course_name, course_id, "Course")
 
-            for section in self.get_course(course_id):
-                if isinstance(section, str):
-                    logger.error(f"Error syncing section in {course_name}: {section}")
-                    continue
-                logger.debug("------SECTION-DATA------")
-                logger.debug(json.dumps(section))
-                section_node = course_node.add_child(
-                    section["name"], section["id"], "Section"
+        logger.info(f"Syncing {course_name}...")
+        assignments = self.get_assignment(course_id)
+        folders = self.get_folders_by_courses(course_id)
+
+        logger.debug("-----------------------")
+        logger.debug(f"------{semester_node.name} - {course_name}------")
+        logger.debug("------COURSE-DATA------")
+        logger.debug(json.dumps(course))
+        logger.debug("------ASSIGNMENT-DATA------")
+        logger.debug(json.dumps(assignments))
+        logger.debug("------FOLDER-DATA------")
+        logger.debug(json.dumps(folders))
+
+        for section in self.get_course(course_id):
+            if isinstance(section, str):
+                logger.error(f"Error syncing section in {course_name}: {section}")
+                continue
+            self._sync_section(section, course_node, course_id, assignments, folders)
+
+    def _sync_section(
+        self,
+        section: Any,
+        course_node: Node,
+        course_id: int,
+        assignments: Any,
+        folders: Any,
+    ) -> None:
+        logger.debug("------SECTION-DATA------")
+        logger.debug(json.dumps(section))
+        section_node = course_node.add_child(section["name"], section["id"], "Section")
+        for module in section["modules"]:
+            try:
+                self._sync_module(module, section_node, course_id, assignments, folders)
+            except Exception:
+                logger.exception(f"Failed to download the module {module}")
+
+    def _sync_module(
+        self,
+        module: Any,
+        section_node: Node,
+        course_id: int,
+        assignments: Any,
+        folders: Any,
+    ) -> None:
+        # Get Assignments
+        if module["modname"] == "assign" and self.config.get("used_modules", {}).get(
+            "assign", {}
+        ):
+            if assignments is None:
+                return
+            matching_ass = [
+                a for a in assignments.get("assignments") if a["cmid"] == module["id"]
+            ]
+            try:
+                [ass] = matching_ass
+            except ValueError:
+                return
+            assignment_id = ass["id"]
+            assignment_name = module["name"]
+            assignment_node = section_node.add_child(
+                assignment_name, assignment_id, "Assignment"
+            )
+
+            ass_contents = ass[
+                "introattachments"
+            ] + self.get_assignment_submission_files(assignment_id)
+            for c in ass_contents:
+                if c["filepath"] != "/":
+                    assignment_node.add_child(
+                        str(
+                            Path(
+                                urllib.parse.unquote(c["filepath"]),
+                                urllib.parse.unquote(c["filename"]),
+                            )
+                        ),
+                        c["fileurl"],
+                        "Assignment File",
+                        url=c["fileurl"],
+                    )
+                else:
+                    assignment_node.add_child(
+                        c["filename"],
+                        c["fileurl"],
+                        "Assignment File",
+                        url=c["fileurl"],
+                    )
+
+        # Get Resources or URLs
+        if module["modname"] in [
+            "resource",
+            "url",
+            "book",
+            "page",
+            "pdfannotator",
+        ]:
+            if module["modname"] == "resource" and not self.config.get(
+                "used_modules", {}
+            ).get("resource", {}):
+                return
+            for c in module.get("contents", []):
+                if c["fileurl"]:
+                    self.scan_url(
+                        c["fileurl"],
+                        section_node,
+                        course_id,
+                        module_title=module["name"],
+                    )
+
+        # Get Folders
+        if module["modname"] == "folder" and self.config.get("used_modules", {}).get(
+            "folder", {}
+        ):
+            folder_node = section_node.add_child(module["name"], module["id"], "Folder")
+
+            # Scan intro for links
+            rel_folder = [
+                f["intro"] for f in folders if f["coursemodule"] == module["id"]
+            ]
+            if rel_folder:
+                self.scan_markup(
+                    rel_folder[0],
+                    folder_node,
+                    course_id,
+                    module_title=module["name"],
                 )
-                for module in section["modules"]:
-                    try:
-                        # Get Assignments
-                        if module["modname"] == "assign" and self.config.get(
-                            "used_modules", {}
-                        ).get("assign", {}):
-                            if assignments is None:
-                                continue
-                            matching_ass = [
-                                a
-                                for a in assignments.get("assignments")
-                                if a["cmid"] == module["id"]
-                            ]
-                            try:
-                                [ass] = matching_ass
-                            except ValueError:
-                                continue
-                            assignment_id = ass["id"]
-                            assignment_name = module["name"]
-                            assignment_node = section_node.add_child(
-                                assignment_name, assignment_id, "Assignment"
+
+            for c in module.get("contents", []):
+                if c["filepath"] != "/":
+                    while c["filepath"][-1] == "/":
+                        c["filepath"] = c["filepath"][:-1]
+                    while c["filepath"][0] == "/":
+                        c["filepath"] = c["filepath"][1:]
+                    folder_node.add_child(
+                        str(
+                            Path(
+                                urllib.parse.unquote(c["filepath"]),
+                                urllib.parse.unquote(c["filename"]),
                             )
+                        ),
+                        c["fileurl"],
+                        "Folder File",
+                        url=c["fileurl"],
+                    )
+                else:
+                    folder_node.add_child(
+                        c["filename"],
+                        c["fileurl"],
+                        "Folder File",
+                        url=c["fileurl"],
+                    )
 
-                            ass_contents = ass[
-                                "introattachments"
-                            ] + self.get_assignment_submission_files(assignment_id)
-                            for c in ass_contents:
-                                if c["filepath"] != "/":
-                                    assignment_node.add_child(
-                                        str(
-                                            Path(
-                                                urllib.parse.unquote(c["filepath"]),
-                                                urllib.parse.unquote(c["filename"]),
-                                            )
-                                        ),
-                                        c["fileurl"],
-                                        "Assignment File",
-                                        url=c["fileurl"],
-                                    )
-                                else:
-                                    assignment_node.add_child(
-                                        c["filename"],
-                                        c["fileurl"],
-                                        "Assignment File",
-                                        url=c["fileurl"],
-                                    )
+        # Get embedded videos in pages or labels
+        if module["modname"] == "label" and self.config.get("used_modules", {}).get(
+            "url", {}
+        ):
+            self.scan_markup(
+                module.get("description", ""),
+                section_node,
+                course_id,
+                module_title=module["name"],
+            )
 
-                        # Get Resources or URLs
-                        if module["modname"] in [
-                            "resource",
-                            "url",
-                            "book",
-                            "page",
-                            "pdfannotator",
-                        ]:
-                            if module["modname"] == "resource" and not self.config.get(
-                                "used_modules", {}
-                            ).get("resource", {}):
-                                continue
-                            for c in module.get("contents", []):
-                                if c["fileurl"]:
-                                    self.scan_url(
-                                        c["fileurl"],
-                                        section_node,
-                                        course_id,
-                                        module_title=module["name"],
-                                    )
-
-                        # Get Folders
-                        if module["modname"] == "folder" and self.config.get(
-                            "used_modules", {}
-                        ).get("folder", {}):
-                            folder_node = section_node.add_child(
-                                module["name"], module["id"], "Folder"
-                            )
-
-                            # Scan intro for links
-                            rel_folder = [
-                                f["intro"]
-                                for f in folders
-                                if f["coursemodule"] == module["id"]
-                            ]
-                            if rel_folder:
-                                self.scan_markup(
-                                    rel_folder[0],
-                                    folder_node,
-                                    course_id,
-                                    module_title=module["name"],
-                                )
-
-                            for c in module.get("contents", []):
-                                if c["filepath"] != "/":
-                                    while c["filepath"][-1] == "/":
-                                        c["filepath"] = c["filepath"][:-1]
-                                    while c["filepath"][0] == "/":
-                                        c["filepath"] = c["filepath"][1:]
-                                    folder_node.add_child(
-                                        str(
-                                            Path(
-                                                urllib.parse.unquote(c["filepath"]),
-                                                urllib.parse.unquote(c["filename"]),
-                                            )
-                                        ),
-                                        c["fileurl"],
-                                        "Folder File",
-                                        url=c["fileurl"],
-                                    )
-                                else:
-                                    folder_node.add_child(
-                                        c["filename"],
-                                        c["fileurl"],
-                                        "Folder File",
-                                        url=c["fileurl"],
-                                    )
-
-                        # Get embedded videos in pages or labels
-                        if module["modname"] == "label" and self.config.get(
-                            "used_modules", {}
-                        ).get("url", {}):
-                            self.scan_markup(
-                                module.get("description", ""),
-                                section_node,
-                                course_id,
-                                module_title=module["name"],
-                            )
-
-                        # New OpenCast integration
-                        if module["modname"] == "lti" and self.config.get(
-                            "used_modules", {}
-                        ).get("url", {}).get("opencast", {}):
-                            info_url = f'https://moodle.rwth-aachen.de/mod/lti/launch.php?id={module["id"]}&triggerview=0'
-                            info_res = bs(
-                                self.session.get(info_url).text, features="html.parser"
-                            )
-                            # FIXME: For now we assume that all lti modules will lead to an opencast video
-                            engage_id = info_res.find("input", {"name": "custom_id"})
-                            name = info_res.find(
-                                "input", {"name": "resource_link_title"}
-                            )
-                            if not engage_id:
-                                logger.error("Failed to find custom_id on lti page.")
-                                logger.debug("------LTI-ERROR-HTML------")
-                                logger.debug(f"url: {info_url}")
-                                logger.debug(info_res)
-                            else:
-                                engage_id = engage_id.get("value")
-                                name = name.get("value")
-                                vid = self.get_opencast_url(
-                                    course_id,
-                                    f"https://engage.streaming.rwth-aachen.de/play/{engage_id}",
-                                )
-                                section_node.add_child(
-                                    name,
-                                    engage_id,
-                                    "Opencast",
-                                    url=vid,
-                                )
-                        # Integration for Quizzes
-                        if module["modname"] == "quiz" and self.config.get(
-                            "used_modules", {}
-                        ).get("url", {}).get("quiz", {}):
-                            info_url = f'https://moodle.rwth-aachen.de/mod/quiz/view.php?id={module["id"]}'
-                            info_res = bs(
-                                self.session.get(info_url).text, features="html.parser"
-                            )
-                            attempts = info_res.findAll(
-                                "a",
-                                {
-                                    "title": "Überprüfung der eigenen Antworten dieses Versuchs"
-                                },
-                            )
-                            attempt_cnt = 0
-                            for attempt in attempts:
-                                attempt_cnt += 1
-                                review_url = attempt.get("href")
-                                quiz_res = bs(
-                                    self.session.get(review_url).text,
-                                    features="html.parser",
-                                )
-                                name = (
-                                    quiz_res.find("title")
-                                    .get_text()
-                                    .replace(": Überprüfung des Testversuchs", "")
-                                    + ", Versuch "
-                                    + str(attempt_cnt)
-                                )
-                                section_node.add_child(
-                                    urllib.parse.unquote(name),
-                                    urllib.parse.urlsplit(review_url)[1],
-                                    "Quiz",
-                                    url=review_url,
-                                )
-
-                    except Exception:
-                        logger.exception(f"Failed to download the module {module}")
-
-        self.root_node.remove_children_nameclashes()
+        # New OpenCast integration
+        if module["modname"] == "lti" and self.config.get("used_modules", {}).get(
+            "url", {}
+        ).get("opencast", {}):
+            info_url = f'https://moodle.rwth-aachen.de/mod/lti/launch.php?id={module["id"]}&triggerview=0'
+            info_res = bs(self.session.get(info_url).text, features="html.parser")
+            # FIXME: For now we assume that all lti modules will lead to an opencast video
+            engage_id = info_res.find("input", {"name": "custom_id"})
+            name = info_res.find("input", {"name": "resource_link_title"})
+            if not engage_id:
+                logger.error("Failed to find custom_id on lti page.")
+                logger.debug("------LTI-ERROR-HTML------")
+                logger.debug(f"url: {info_url}")
+                logger.debug(info_res)
+            else:
+                engage_id = engage_id.get("value")
+                name = name.get("value")
+                vid = self.get_opencast_url(
+                    course_id,
+                    f"https://engage.streaming.rwth-aachen.de/play/{engage_id}",
+                )
+                section_node.add_child(
+                    name,
+                    engage_id,
+                    "Opencast",
+                    url=vid,
+                )
+        # Integration for Quizzes
+        if module["modname"] == "quiz" and self.config.get("used_modules", {}).get(
+            "url", {}
+        ).get("quiz", {}):
+            info_url = (
+                f'https://moodle.rwth-aachen.de/mod/quiz/view.php?id={module["id"]}'
+            )
+            info_res = bs(self.session.get(info_url).text, features="html.parser")
+            attempts = info_res.findAll(
+                "a",
+                {"title": "Überprüfung der eigenen Antworten dieses Versuchs"},
+            )
+            attempt_cnt = 0
+            for attempt in attempts:
+                attempt_cnt += 1
+                review_url = attempt.get("href")
+                quiz_res = bs(
+                    self.session.get(review_url).text,
+                    features="html.parser",
+                )
+                name = (
+                    quiz_res.find("title")
+                    .get_text()
+                    .replace(": Überprüfung des Testversuchs", "")
+                    + ", Versuch "
+                    + str(attempt_cnt)
+                )
+                section_node.add_child(
+                    urllib.parse.unquote(name),
+                    urllib.parse.urlsplit(review_url)[1],
+                    "Quiz",
+                    url=review_url,
+                )
 
     def download_all_files(self) -> None:
         if not self.session.wstoken or not self.opencast_session.wstoken:
@@ -399,6 +388,7 @@ class SyncMyMoodle:
         if not self.root_node.children:
             raise Exception("Root node has no children. Did you call sync()?")
 
+        self.root_node.remove_children_nameclashes()
         self._download_all_files(
             self.root_node, Path(self.config.get("basedir", Path.cwd())).expanduser()
         )
