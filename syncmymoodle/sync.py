@@ -15,6 +15,8 @@ from tqdm import tqdm
 from syncmymoodle.filetree import Node
 
 YOUTUBE_ID_LENGTH = 11
+SCIEBO_REGEX = re.compile("https://rwth-aachen.sciebo.de/s/[a-zA-Z0-9-]+")
+
 logger = logging.getLogger(__name__)
 
 
@@ -630,6 +632,21 @@ class SyncMyMoodle:
                     )
                 return
 
+        if self.config.get("used_modules", {}).get("url", {}).get("sciebo", {}):
+            if SCIEBO_REGEX.match(url):
+                response = self.session.get(url)
+                soup = bs(response.text, features="html.parser")
+                download_url = soup.find("input", {"name": "downloadURL"})
+                filename_input = soup.find("input", {"name": "filename"})
+                if download_url and filename_input:
+                    parent_node.add_child(
+                        filename_input["value"],
+                        download_url["value"],
+                        "Sciebo file",
+                        url=download_url["value"],
+                    )
+                return
+
         try:
             response = self.session.head(url, params=extra_params)
         except Exception:
@@ -725,9 +742,7 @@ class SyncMyMoodle:
 
         # https://rwth-aachen.sciebo.de/s/XXX
         if self.config.get("used_modules", {}).get("url", {}).get("sciebo", {}):
-            for vid in re.findall(
-                "https://rwth-aachen.sciebo.de/s/[a-zA-Z0-9-]+", markup
-            ):
+            for vid in SCIEBO_REGEX.findall(markup):
                 response = self.session.get(vid)
                 soup = bs(response.text, features="html.parser")
                 download_url = soup.find("input", {"name": "downloadURL"})
