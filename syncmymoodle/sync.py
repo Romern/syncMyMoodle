@@ -677,8 +677,6 @@ class SyncMyMoodle:
                     )
                 return
 
-        # TODO add early detection for some Opencast URLs
-        # see https://github.com/opencast/opencast/issues/1856
         try:
             response = await self.session.head(url, params=extra_params)
         except Exception:
@@ -687,8 +685,10 @@ class SyncMyMoodle:
             return
 
         if (
-            "Content-Type" in response.headers
-            and "text/html" not in response.headers["Content-Type"]
+            "text/html" not in response.headers.get("Content-Type", "")
+            # TODO add proper early detection for Opencast URLs
+            # see https://github.com/opencast/opencast/issues/1856
+            or "static/mh_default_org/api" in url
         ):
             # non html links, assume the filename is in the path
             filename = PurePosixPath(urllib.parse.urlsplit(url).path).name
