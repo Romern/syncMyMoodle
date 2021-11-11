@@ -5,7 +5,7 @@ import re
 import urllib.parse
 from http import HTTPStatus
 from pathlib import Path, PurePosixPath
-from typing import Any, Dict, List
+from typing import Any, Dict, List, TypeVar
 
 import httpx
 import pdfkit
@@ -18,6 +18,8 @@ from syncmymoodle.filetree import Node
 
 YOUTUBE_ID_LENGTH = 11
 SCIEBO_REGEX = re.compile("https://rwth-aachen.sciebo.de/s/[a-zA-Z0-9-]+")
+
+T = TypeVar("T", bound="SyncMyMoodle")
 
 logger = logging.getLogger(__name__)
 
@@ -35,6 +37,18 @@ class SyncMyMoodle:
         )
         self.opencast_session = AsyncMoodleClient("https://moodle.rwth-aachen.de", "")
         self.root_node = Node("", -1, "Root")
+
+    async def __aenter__(self: T) -> T:
+        await self.session.__aenter__()
+        await self.opencast_session.__aenter__()
+        return self
+
+    # TODO make type hints more precise
+    async def __aexit__(
+        self, exc_type: Any = None, exc_value: Any = None, traceback: Any = None
+    ) -> None:
+        await self.session.__aexit__()
+        await self.opencast_session.__aexit__()
 
     async def login(self) -> None:
         """Login to Moodle and RWTH SSH

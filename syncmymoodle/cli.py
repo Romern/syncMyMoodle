@@ -1,3 +1,4 @@
+import asyncio
 import getpass
 import json
 import logging
@@ -184,18 +185,20 @@ async def main() -> None:
         )
         sys.exit(1)
 
-    smm = SyncMyMoodle(config)
+    loop = asyncio.get_running_loop()
+    loop.slow_callback_duration = 0.5
 
-    logger.info("Logging in...")
-    await smm.login()
-    logger.info("Syncing file tree...")
-    await smm.sync()
+    async with SyncMyMoodle(config) as smm:
+        logger.info("Logging in...")
+        await smm.login()
+        logger.info("Syncing file tree...")
+        await smm.sync()
 
-    if args.dry_run:
-        logging.info("The following virtual filetree has been generated")
-        for file in smm.root_node.list_files():
-            print(file)
-        sys.exit(0)
+        if args.dry_run:
+            logging.info("The following virtual filetree has been generated")
+            for file in smm.root_node.list_files():
+                print(file)
+            sys.exit(0)
 
-    logger.info("Downloading files...")
-    await smm.download_all_files()
+        logger.info("Downloading files...")
+        await smm.download_all_files()
