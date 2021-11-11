@@ -465,7 +465,7 @@ class SyncMyMoodle:
         if dest.exists():
             return True
 
-        if dest.suffix in self.config.get("exclude_filetypes", []):
+        if dest.suffix[1:] in self.config.get("exclude_filetypes", []):
             return True
 
         resume_size = 0
@@ -619,10 +619,13 @@ class SyncMyMoodle:
         quiz_html = str(quiz_res)
         logger.info("Generating quiz-PDF for " + node.name + "... [Quiz]")
 
-        pdfkit.from_string(
+        loop = asyncio.get_running_loop()
+        await loop.run_in_executor(
+            None,  # use default loop executor
+            pdfkit.from_string,
             quiz_html,
             pdf_dest,
-            options={
+            {
                 "quiet": "",
                 "javascript-delay": "30000",
                 "disable-smart-shrinking": "",
