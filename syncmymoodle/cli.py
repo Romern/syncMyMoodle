@@ -3,6 +3,7 @@ import getpass
 import json
 import logging
 import os
+import pickle
 import shutil
 import sys
 from argparse import ArgumentParser
@@ -69,6 +70,11 @@ async def main() -> None:
         "--excludefiletypes",
         default=None,
         help='Exclude downloading files from urls with these extensions (comma seperated types, e.g. "mp4,mkv")',
+    )
+    parser.add_argument(
+        "--dump-filetree",
+        type=Path,
+        help="Dump the synced filetree to the given path and exit",
     )
     parser.add_argument(
         "--dry-run",
@@ -193,6 +199,11 @@ async def main() -> None:
         await smm.login()
         logger.info("Syncing file tree...")
         await smm.sync()
+
+        if args.dump_filetree:
+            with args.dump_filetree.open("wb") as output:
+                pickle.dump(smm.root_node, output)
+            sys.exit(0)
 
         if args.dry_run:
             logging.info("The following virtual filetree has been generated")
