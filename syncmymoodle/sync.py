@@ -438,36 +438,35 @@ class SyncMyMoodle:
         if not cur_node.children:
             targetfile = dest / cur_node.sanitized_name
             # We are in a leaf not which represents a downloadable node
-            if cur_node.url and not cur_node.is_downloaded:
+            if not cur_node.url or cur_node.is_downloaded:
+                return
+
+            try:
                 if cur_node.type == "Youtube":
                     try:
                         self.scan_and_download_youtube(cur_node, targetfile)
                         cur_node.is_downloaded = True
-                    except Exception:
-                        logger.exception(f"Failed to download the module {cur_node}")
+                    except youtube_dl.utils.YoutubeDLError:
                         logger.error(
-                            "This could be caused by an out of date youtube-dl version. Try upgrading youtube-dl through pip or your package manager."
+                            "This could be caused by an out of date youtube-dl version."
+                            " Try upgrading youtube-dl through pip or your package manager."
                         )
-                elif cur_node.type == "Opencast":
-                    try:
-                        await self.download_opencast_video(cur_node, targetfile)
-                        cur_node.is_downloaded = True
-                    except Exception:
-                        logger.exception(f"Failed to download the module {cur_node}")
+                        raise
                 elif cur_node.type == "Quiz":
                     try:
                         await self.download_quiz(cur_node, targetfile)
                         cur_node.is_downloaded = True
-                    except Exception:
-                        logger.exception(f"Failed to download the module {cur_node}")
-                        logger.warning("Is wkhtmltopdf correctly installed?")
+                    except OSError:
+                        logger.error("Is wkhtmltopdf correctly installed?")
+                        raise
+                elif cur_node.type == "Opencast":
+                    await self.download_opencast_video(cur_node, targetfile)
+                    cur_node.is_downloaded = True
                 else:
-                    try:
-                        await self.download_file(cur_node, targetfile)
-                        cur_node.is_downloaded = True
-                    except Exception:
-                        logger.exception(f"Failed to download the module {cur_node}")
-            return
+                    await self.download_file(cur_node, targetfile)
+                    cur_node.is_downloaded = True
+            except Exception:
+                logger.exception(f"Failed to download the module {cur_node} to {dest}")
 
         for child in cur_node.children:
             targetdir = dest / cur_node.sanitized_name
@@ -588,12 +587,11 @@ class SyncMyMoodle:
         return trackurl
 
     async def download_opencast_video(self, node: Node, dest: Path) -> bool:
+        if not node.name:
+            node.name = urllib.parse.unquote((node.url or "").split("/")[-1])
         if ".mp4" not in node.name:
-            if node.name:
-                node.name += ".mp4"
-            else:
-                node.name = urllib.parse.unquote((node.url or "").split("/")[-1])
-        return await self.download_file(node, dest.with_name(node.name))
+            node.name += ".mp4"
+        return await self.download_file(node, dest.with_name(node.sanitized_name))
 
     def scan_and_download_youtube(self, node: Node, dest: Path) -> bool:
         """Download Youtube-Videos using youtube_dl"""
