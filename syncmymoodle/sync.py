@@ -752,7 +752,7 @@ class SyncMyMoodle:
         videojs_source = tempsoup.select_one("video.video-js source")
         if videojs_source and videojs_source.get("src"):
             if not url:
-                logging.warning("Unable to get absolute url for videojs")
+                logger.warning("Unable to get absolute url for videojs")
             else:
                 absolute_url = urllib.parse.urlunsplit(
                     urllib.parse.urlsplit(url)._replace(path=videojs_source["src"])
@@ -781,7 +781,7 @@ class SyncMyMoodle:
                 try:
                     vid = await self.get_opencast_url(course_id, vid)
                 except RuntimeError:
-                    logging.warning(f"Error while trying to get video url from {vid}")
+                    logger.warning(f"Error while trying to get video url from {vid}")
                     continue
                 parent_node.add_child(
                     module_title or vid.split("/")[-1], vid, "Opencast", url=vid
