@@ -192,8 +192,8 @@ class SyncMyMoodle:
                 pickle.dump(self.session.cookies, f)
             return
         soup = bs(resp.text, features="html.parser")
-        csrf_token = soup.find("input",{"name": "csrf_token"})["value"]
         if soup.find("input", {"name": "RelayState"}) is None:
+            csrf_token = soup.find("input",{"name": "csrf_token"})["value"]
             data = {
                 "j_username": self.config["user"],
                 "j_password": self.config["password"],
