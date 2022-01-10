@@ -27,7 +27,8 @@ logger = logging.getLogger(__name__)
 async def main() -> None:
     parser = ArgumentParser(
         prog="python3 -m syncmymoodle",
-        description="Synchronization client for RWTH Moodle. All optional arguments override those in config.json.",
+        description="Synchronization client for RWTH Moodle.",
+        epilog="All optional arguments override those in config.json.",
     )
     if secretstorage:
         parser.add_argument(
@@ -213,3 +214,7 @@ async def main() -> None:
 
         logger.info("Downloading files...")
         await smm.download_all_files()
+
+
+def sync_main():
+    asyncio.run(main())
