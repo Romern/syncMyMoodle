@@ -19,5 +19,6 @@
         },
         "folder": true
     },
-    "exclude_filetypes": []
+    "exclude_filetypes": [],
+    "exclude_files": []
 }

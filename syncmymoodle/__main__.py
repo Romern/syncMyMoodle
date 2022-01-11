@@ -11,11 +11,15 @@ import pickle
 import re
 import shutil
 import urllib.parse
+from fnmatch import fnmatchcase
+import functools
+import operator
 from argparse import ArgumentParser
 from contextlib import closing
 from pathlib import Path
 from typing import List
 
+from braceexpand import braceexpand
 import pdfkit
 import requests
 import youtube_dl
@@ -767,6 +771,9 @@ class SyncMyMoodle:
         ] in self.config.get("exclude_filetypes", []):
             return True
 
+        if any(map(lambda pattern: fnmatchcase(node.name, pattern), self.config.get("exclude_files"))):
+            return True
+
         tmp_downloadpath = downloadpath.with_suffix(downloadpath.suffix + ".temp")
         if tmp_downloadpath.exists():
             resume_size = tmp_downloadpath.stat().st_size
@@ -1123,6 +1130,9 @@ def main():
         if args.excludefiletypes
         else config.get("exclude_filetypes", [])
     )
+
+    exclude_files = config.get("exclude_files", [])
+    config["exclude_files"] = functools.reduce(operator.iconcat, map(braceexpand, exclude_files), [])
 
     logging.basicConfig(level=args.loglevel)
 
