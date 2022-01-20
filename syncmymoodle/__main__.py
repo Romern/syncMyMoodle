@@ -18,7 +18,7 @@ from typing import List
 
 import pdfkit
 import requests
-import youtube_dl
+import yt_dlp
 from bs4 import BeautifulSoup as bs
 from tqdm import tqdm
 
@@ -716,7 +716,7 @@ class SyncMyMoodle:
                     except Exception:
                         logger.exception(f"Failed to download the module {cur_node}")
                         logger.error(
-                            "This could be caused by an out of date youtube-dl version. Try upgrading youtube-dl through pip or your package manager."
+                            "This could be caused by an out of date yt-dlp version. Try upgrading yt-dlp through pip or your package manager."
                         )
                 elif cur_node.type == "Opencast":
                     try:
@@ -858,7 +858,7 @@ class SyncMyMoodle:
         return self.download_file(node)
 
     def scanAndDownloadYouTube(self, node):
-        """Download Youtube-Videos using youtube_dl"""
+        """Download Youtube-Videos using yt_dlp"""
         path = self.get_sanitized_node_path(node.parent)
         link = node.url
         if path.exists():
@@ -871,7 +871,7 @@ class SyncMyMoodle:
             "retries": 15,
         }
         path.mkdir(parents=True, exist_ok=True)
-        with youtube_dl.YoutubeDL(ydl_opts) as ydl:
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             ydl.download([link])
         return True
 

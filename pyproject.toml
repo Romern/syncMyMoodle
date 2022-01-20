@@ -20,7 +20,7 @@ warn_unreachable = true
 [[tool.mypy.overrides]]
 module = [
     "bs4",
-    "youtube_dl",
+    "yt_dlp",
     "tqdm",
     "pdfkit",
     "secretstorage",
