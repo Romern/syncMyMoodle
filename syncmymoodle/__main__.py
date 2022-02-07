@@ -1139,6 +1139,8 @@ def main():
 
         connection = secretstorage.dbus_init()
         collection = secretstorage.get_default_collection(connection)
+        if collection.is_locked():
+            collection.unlock()
         attributes = {"application": "syncMyMoodle"}
         results = list(collection.search_items(attributes))
         if len(results) == 0:
@@ -1157,8 +1159,6 @@ def main():
             )
         else:
             item = results[0]
-        if item.is_locked():
-            item.unlock()
         if not config.get("user"):
             config["user"] = item.get_attributes().get("username")
         config["password"] = item.get_secret().decode("utf-8")
