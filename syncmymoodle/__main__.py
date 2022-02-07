@@ -1144,15 +1144,15 @@ def main():
         attributes = {"application": "syncMyMoodle"}
         results = list(collection.search_items(attributes))
         if len(results) == 0:
-            if args.password:
-                password = args.password
-            else:
-                password = getpass.getpass("Password:")
             if not args.user and not config.get("user"):
                 print(
                     "You need to provide your username in the config file or through --user!"
                 )
                 exit(1)
+            if args.password:
+                password = args.password
+            else:
+                password = getpass.getpass("Password:")
             attributes["username"] = config["user"]
             item = collection.create_item(
                 f'{config["user"]}@rwth-aachen.de', attributes, password
