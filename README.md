@@ -6,21 +6,27 @@ Downloads the following materials:
 
 * Assignment files, submissions and feedback
 * Resource files
-* Urls: OpenCast, Youtube and Sciebo videos/files, and all other non HTML files
+* URLs: OpenCast, Youtube and Sciebo videos/files, and all other non HTML files
 * Folders
 * Quizzes (**Disabled by default**)
 * Pages and Labels: Embedded Opencast and Youtube Videos
 
 ## Installation
 
-This software requires **Python version >= 3.6**.
+This software requires **Python 3.6 or higher**.
 
-### Installation using `pip` (recommended)
+### Using `pip` (recommended)
 
-The simples way to setup this app is to install it using pip.
-To isolate dependencies it is advised to use a virtual environment.
-For more information take a look at
+The simplest way to install *syncMyMoodle* is using pip.
+
+You're advised to use a virtual environment to make sure that
+its dependencies can't do anything evil on your machine.
+
+Please consult
 [the guide from the Python website](https://packaging.python.org/guides/installing-using-pip-and-virtual-environments/#creating-a-virtual-environment):
+for more information.
+
+Or, you can just use the following commands:
 
 ```bash
 python3 -m venv .venv
@@ -30,9 +36,10 @@ pip3 install syncmymoodle
 
 ### Manual installation
 
-If you like living on the bleeding edge you can also clone or download the source directly
-and setup everything manually.
-syncMyMoodle requires some dependencies which can be installed using `pip`
+If you are living on the bleeding edge, you can also download the source
+code directly and build everything by yourself.
+
+*syncMyMoodle* [dependencies] can be installed using `pip`
 or your distro's package manager (`apt`, `dnf`, `pacman`, etc.).
 
 To install the requirements using pip execute the following command from the repository root.
@@ -43,16 +50,11 @@ To install the requirements using pip execute the following command from the rep
 pip3 install .
 ```
 
-### Optional steps
-
-It is recommended to also install and use the optional
-[FreeDesktop.org Secret Service integration](#freedesktoporg-secret-service-integration)
-to store your password securely if your system supports it - if you're on Linux, it probably does!
-
 ## Configuration
 
 Copy `config.json.example` or the following text (minus the comments) to `config.json` in your current directory
-or alternatively to `~/.config/syncmymoodle/config.json` for configuring `syncmymoodle` user-wide.
+or to `~/.config/syncmymoodle/config.json` if you wish to configure `syncmymoodle` user-wide.
+
 Afterwards you can adjust the settings:
 
 ```js
@@ -81,7 +83,14 @@ Afterwards you can adjust the settings:
 }
 ```
 
-And your courses will be synced into the `basedir` you specified (default is the current directory).
+You can also use CLI parameters instead. This is covered extensively
+in the following section.
+
+Your courses will be synced in the `basedir` path that you specified.
+If you haven't done that, the current directory that you
+are running the script from will also be the directory where
+your files will be downloaded *by default*.
+
 Your cookies will be stored in a session file.
 
 ## CLI usage
@@ -123,9 +132,18 @@ optional arguments:
 
 ## FreeDesktop.org Secret Service integration
 
-If you have a FreeDesktop.org Secret Service integration compatible keyring installed,
-you can save your RWTH SSO credentials in it.
-You need to install syncMyMoodle with the `keyring` extra installed:
+You are advised to install and use the optional
+[FreeDesktop.org Secret Service integration](#freedesktoporg-secret-service-integration)
+to store your password securely if your system supports it - if you're on a modern
+Linux desktop-oriented distribution, it most probably does!
+
+If you have a FreeDesktop.org Secret Service integration compatible keyring
+installed, you can store your RWTH SSO credentials in it and use it with
+*syncMyMoodle*, which can be particularly useful if you do not like storing
+your passwords in plain text files.
+
+To do that, you will have to install *syncMyMoodle* with an extra `keyring`
+argument:
 
 ```bash
 pip3 install syncmymoodle[keyring]  # when installing from PyPi
@@ -133,6 +151,8 @@ pip3 install syncmymoodle[keyring]  # when installing from PyPi
 pip3 install .[keyring]  # when installing manually
 ```
 
-After you removed your password from the config file (delete the whole line in config.json),
-you will be prompted for your password when syncing for the first time.
-In subsequent runs, the credentials will be obtained automatically.
+You will be asked for your password when using *syncMyMoodle* for the first
+time, which you can supply as a parameter or in the configuration file.
+
+Your password will be stored and obtained automatically in the future.
+
