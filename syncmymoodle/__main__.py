@@ -753,6 +753,12 @@ class SyncMyMoodle:
             path = path[:-1]
         while path and path[0] == " ":
             path = path[1:]
+
+        # Folders downloaded from Moodle display amp; in places where an
+        # ampersand should be displayed instead. In the web UI, however, the
+        # ampersand is shown correctly, and we're trying to emulate that here.
+        path = path.replace('amp;', '&');
+
         return path
 
     def download_file(self, node):
