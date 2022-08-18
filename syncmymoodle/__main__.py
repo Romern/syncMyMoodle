@@ -753,6 +753,8 @@ class SyncMyMoodle:
             path = path[:-1]
         while path and path[0] == " ":
             path = path[1:]
+        # Downloaded directories with ampersands show 'amp;' instead of '&'
+        path = path.replace('amp;', '&');
         return path
 
     def download_file(self, node):
