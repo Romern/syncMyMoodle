@@ -81,28 +81,43 @@ deactivate  # leave virtual environment
 The following command line arguments are available:
 
 ```bash
-usage: syncMyMoodle.py [-h] [--secretservice] [--user USER] [--password PASSWORD] [--config CONFIG]
-                       [--cookiefile COOKIEFILE] [--courses COURSES] [--skipcourses SKIPCOURSES]
-                       [--semester SEMESTER] [--basedir BASEDIR] [--nolinks]
+usage: python3 -m syncmymoodle [-h] [--secretservice] [--user USER]
+                               [--password PASSWORD] [--config CONFIG]
+                               [--cookiefile COOKIEFILE] [--courses COURSES]
+                               [--skipcourses SKIPCOURSES]
+                               [--semester SEMESTER] [--basedir BASEDIR]
+                               [--nolinks]
+                               [--excludefiletypes EXCLUDEFILETYPES] [-v]
 
-Synchronization client for RWTH Moodle. All optional arguments override those in config.json.
+Synchronization client for RWTH Moodle. All optional arguments override those
+in config.json.
 
-optional arguments:
+options:
   -h, --help            show this help message and exit
-  --secretservice       Use FreeDesktop.org Secret Service as storage/retrival for username/passwords.
-  --user USER           Your RWTH SSO username
-  --password PASSWORD   Your RWTH SSO password
-  --config CONFIG       The path to the config file
+  --secretservice       use freedesktop.org's secret service integration for
+                        storing and retrieving account credentials
+  --user USER           set your RWTH Single Sign-On username
+  --password PASSWORD   set your RWTH Single Sign-On password
+  --config CONFIG       set your configuration file
   --cookiefile COOKIEFILE
-                        The location of the cookie file
-  --courses COURSES     Only these courses will be synced (comma seperated links) (if empty, all courses will be
-                        synced)
+                        set the location of a cookie file
+  --courses COURSES     specify the courses that should be synced using comma-
+                        separated links. Defaults to all courses, if no
+                        additional restrictions e.g. semester are defined.
   --skipcourses SKIPCOURSES
-                        These courses will NOT be synced (comma seperated links)
-  --semester SEMESTER   Only these semesters will be synced, of the form 20ws (comma seperated) (only used if
-                        [courses] is empty, if empty all semesters will be synced)
-  --basedir BASEDIR     The base directory where all files will be synced to
-  --nolinks             Wether to not inspect links embedded in pages
+                        exclude specific courses using comma-separated links.
+                        Defaults to None.
+  --semester SEMESTER   specify semesters to be synced e.g. `22s`, comma-
+                        separated. Defaults to all semesters, if no additional
+                        restrictions e.g. courses are defined.
+  --basedir BASEDIR     specify the directory where all files will be synced
+  --nolinks             define whether various links in moodle pages should
+                        also be inspected e.g. youtube videos, wikipedia
+                        articles
+  --excludefiletypes EXCLUDEFILETYPES
+                        specify whether specific file types should be
+                        excluded, comma-separated e.g. "mp4,mkv"
+  -v, --verbose         show information useful for debugging
 ```
 
 ### Configuration file
