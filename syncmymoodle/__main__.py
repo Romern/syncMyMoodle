@@ -602,7 +602,7 @@ class SyncMyMoodle:
                                     )
 
                         # Get embedded videos in pages or labels
-                        if module["modname"] in ["page", "label"] and self.config.get(
+                        if module["modname"] in ["page", "label", "h5pactivity"] and self.config.get(
                             "used_modules", {}
                         ).get("url", {}):
                             if module["modname"] == "page":
@@ -614,12 +614,34 @@ class SyncMyMoodle:
                                     single=True,
                                 )
                             else:
-                                self.scanForLinks(
-                                    module.get("description", ""),
-                                    section_node,
-                                    course_id,
-                                    module_title=module["name"],
+                                # "Interactive" h5p videos
+                                if module["modname"] == "h5pactivity":
+                                    html_url = f'https://moodle.rwth-aachen.de/mod/h5pactivity/view.php?id={module["id"]}'
+                                    html = bs(
+                                        self.session.get(html_url).text, features="html.parser"
+                                    )
+                                    # Get h5p iframe
+                                    iframe = html.find("iframe")
+                                    iframe_html = str(bs(
+                                        self.session.get(iframe.attrs["src"]).text, features="html.parser"
+                                    ))
+                                    # Moodle devs dont know how to use CDATA correctly, so we need to remove all backslashes
+                                    sanitized_html = iframe_html.replace("\\","")
+
+                                    self.scanForLinks(
+                                        sanitized_html,
+                                        section_node,
+                                        course_id,
+                                        module_title=module["modname"],
+                                        single=True,
                                 )
+                                else:
+                                    self.scanForLinks(
+                                        module.get("description", ""),
+                                        section_node,
+                                        course_id,
+                                        module_title=module["name"],
+                                    )
 
                         # New OpenCast integration
                         if module["modname"] == "lti" and self.config.get(
@@ -915,7 +937,7 @@ class SyncMyMoodle:
         self, text, parent_node, course_id, module_title=None, single=False
     ):
         # A single link is supplied and the contents of it are checked
-        if single:
+        if single and module_title != "h5pactivity":
             try:
                 text = text.replace("webservice/pluginfile.php", "pluginfile.php")
                 response = self.session.head(text)
