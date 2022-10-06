@@ -602,9 +602,11 @@ class SyncMyMoodle:
                                     )
 
                         # Get embedded videos in pages or labels
-                        if module["modname"] in ["page", "label", "h5pactivity"] and self.config.get(
-                            "used_modules", {}
-                        ).get("url", {}):
+                        if module["modname"] in [
+                            "page",
+                            "label",
+                            "h5pactivity",
+                        ] and self.config.get("used_modules", {}).get("url", {}):
                             if module["modname"] == "page":
                                 self.scanForLinks(
                                     module["url"],
@@ -618,15 +620,19 @@ class SyncMyMoodle:
                                 if module["modname"] == "h5pactivity":
                                     html_url = f'https://moodle.rwth-aachen.de/mod/h5pactivity/view.php?id={module["id"]}'
                                     html = bs(
-                                        self.session.get(html_url).text, features="html.parser"
+                                        self.session.get(html_url).text,
+                                        features="html.parser",
                                     )
                                     # Get h5p iframe
                                     iframe = html.find("iframe")
-                                    iframe_html = str(bs(
-                                        self.session.get(iframe.attrs["src"]).text, features="html.parser"
-                                    ))
+                                    iframe_html = str(
+                                        bs(
+                                            self.session.get(iframe.attrs["src"]).text,
+                                            features="html.parser",
+                                        )
+                                    )
                                     # Moodle devs dont know how to use CDATA correctly, so we need to remove all backslashes
-                                    sanitized_html = iframe_html.replace("\\","")
+                                    sanitized_html = iframe_html.replace("\\", "")
 
                                     self.scanForLinks(
                                         sanitized_html,
@@ -634,7 +640,7 @@ class SyncMyMoodle:
                                         course_id,
                                         module_title=module["modname"],
                                         single=True,
-                                )
+                                    )
                                 else:
                                     self.scanForLinks(
                                         module.get("description", ""),
