@@ -615,16 +615,16 @@ class SyncMyMoodle:
                                     module_title=module["name"],
                                     single=True,
                                 )
-                            else:
-                                # "Interactive" h5p videos
-                                if module["modname"] == "h5pactivity":
-                                    html_url = f'https://moodle.rwth-aachen.de/mod/h5pactivity/view.php?id={module["id"]}'
-                                    html = bs(
-                                        self.session.get(html_url).text,
-                                        features="html.parser",
-                                    )
-                                    # Get h5p iframe
-                                    iframe = html.find("iframe")
+                            # "Interactive" h5p videos
+                            elif module["modname"] == "h5pactivity":
+                                html_url = f'https://moodle.rwth-aachen.de/mod/h5pactivity/view.php?id={module["id"]}'
+                                html = bs(
+                                    self.session.get(html_url).text,
+                                    features="html.parser",
+                                )
+                                # Get h5p iframe
+                                iframe = html.find("iframe")
+                                if iframe != None:
                                     iframe_html = str(
                                         bs(
                                             self.session.get(iframe.attrs["src"]).text,
@@ -633,21 +633,24 @@ class SyncMyMoodle:
                                     )
                                     # Moodle devs dont know how to use CDATA correctly, so we need to remove all backslashes
                                     sanitized_html = iframe_html.replace("\\", "")
-
-                                    self.scanForLinks(
-                                        sanitized_html,
-                                        section_node,
-                                        course_id,
-                                        module_title=module["modname"],
-                                        single=True,
-                                    )
                                 else:
-                                    self.scanForLinks(
-                                        module.get("description", ""),
-                                        section_node,
-                                        course_id,
-                                        module_title=module["name"],
-                                    )
+                                    # H5P outside iframes
+                                    sanitized_html = html.replace("\\", "")
+
+                                self.scanForLinks(
+                                    sanitized_html,
+                                    section_node,
+                                    course_id,
+                                    module_title=module["modname"],
+                                    single=True,
+                                )
+                            else:
+                                self.scanForLinks(
+                                    module.get("description", ""),
+                                    section_node,
+                                    course_id,
+                                    module_title=module["name"],
+                                )
 
                         # New OpenCast integration
                         if module["modname"] == "lti" and self.config.get(
