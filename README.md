@@ -6,21 +6,27 @@ Downloads the following materials:
 
 * Assignment files, submissions and feedback
 * Resource files
-* Urls: OpenCast, Youtube and Sciebo videos/files, and all other non HTML files
+* URLs: OpenCast, Youtube and Sciebo videos/files, and all other non HTML files
 * Folders
 * Quizzes (**Disabled by default**)
 * Pages and Labels: Embedded Opencast and Youtube Videos
 
 ## Installation
 
-This software requires **Python version >= 3.6**.
+This software requires **Python 3.6 or higher**.
 
-### Installation using `pip` (recommended)
+### Using `pip` (recommended)
 
-The simples way to setup this app is to install it using pip.
-To isolate dependencies it is advised to use a virtual environment.
-For more information take a look at
-[the guide from the Python website](https://packaging.python.org/guides/installing-using-pip-and-virtual-environments/#creating-a-virtual-environment):
+The simplest way to install *syncMyMoodle* is using pip.
+
+You're advised to use a virtual environment to make sure that
+its dependencies can't do anything evil on your machine.
+
+Please consult
+[the guide from the Python website](https://packaging.python.org/guides/installing-using-pip-and-virtual-environments/#creating-a-virtual-environment)
+for more information.
+
+If you just want to get the job done, just use the following commands:
 
 ```bash
 python3 -m venv .venv
@@ -30,9 +36,10 @@ pip3 install syncmymoodle
 
 ### Manual installation
 
-If you like living on the bleeding edge you can also clone or download the source directly
-and setup everything manually.
-syncMyMoodle requires some dependencies which can be installed using `pip`
+If you are living on the bleeding edge, you can also download the source
+code directly and build everything by yourself.
+
+*syncMyMoodle*'s dependencies can be installed using `pip`
 or your distro's package manager (`apt`, `dnf`, `pacman`, etc.).
 
 To install the requirements using pip execute the following command from the repository root.
@@ -43,17 +50,83 @@ To install the requirements using pip execute the following command from the rep
 pip3 install .
 ```
 
-### Optional steps
-
-It is recommended to also install and use the optional
-[FreeDesktop.org Secret Service integration](#freedesktoporg-secret-service-integration)
-to store your password securely if your system supports it - if you're on Linux, it probably does!
-
 ## Configuration
 
+You can use *syncMyMoodle* with command line arguments or using a configuration
+file. Which one is the best? Well, the answer mostly depends on how and how
+often you are using it.
+
+If you use it often, it may be best to set up a configuration file so that you
+won't have to keep entering the same settings options over and over again.
+If you are on Windows, want to automatically conduct backups, or use the tool
+irregularly, you may want to use the command line arguments for the sake
+of simplicity.
+
+### Command line arguments
+
+#### Using pip
+
+Use `python3 -m syncmymoodle` and use the command line arguments.
+
+#### Manual installation
+
+```bash
+source .venv/bin/activate  # if you installed using virtual environment
+python3 -m syncmymoodle
+deactivate  # leave virtual environment
+```
+
+#### Arguments
+
+The following command line arguments are available:
+
+```bash
+usage: python3 -m syncmymoodle [-h] [--secretservice] [--user USER]
+                               [--password PASSWORD] [--config CONFIG]
+                               [--cookiefile COOKIEFILE] [--courses COURSES]
+                               [--skipcourses SKIPCOURSES]
+                               [--semester SEMESTER] [--basedir BASEDIR]
+                               [--nolinks]
+                               [--excludefiletypes EXCLUDEFILETYPES] [-v]
+
+Synchronization client for RWTH Moodle. All optional arguments override those
+in config.json.
+
+options:
+  -h, --help            show this help message and exit
+  --secretservice       use freedesktop.org's secret service integration for
+                        storing and retrieving account credentials
+  --user USER           set your RWTH Single Sign-On username
+  --password PASSWORD   set your RWTH Single Sign-On password
+  --config CONFIG       set your configuration file
+  --cookiefile COOKIEFILE
+                        set the location of a cookie file
+  --courses COURSES     specify the courses that should be synced using comma-
+                        separated links. Defaults to all courses, if no
+                        additional restrictions e.g. semester are defined.
+  --skipcourses SKIPCOURSES
+                        exclude specific courses using comma-separated links.
+                        Defaults to None.
+  --semester SEMESTER   specify semesters to be synced e.g. `22s`, comma-
+                        separated. Defaults to all semesters, if no additional
+                        restrictions e.g. courses are defined.
+  --basedir BASEDIR     specify the directory where all files will be synced
+  --nolinks             define whether various links in moodle pages should
+                        also be inspected e.g. youtube videos, wikipedia
+                        articles
+  --excludefiletypes EXCLUDEFILETYPES
+                        specify whether specific file types should be
+                        excluded, comma-separated e.g. "mp4,mkv"
+  -v, --verbose         show information useful for debugging
+```
+
+### Configuration file
+
 Copy `config.json.example` or the following text (minus the comments) to `config.json` in your current directory
-or alternatively to `~/.config/syncmymoodle/config.json` for configuring `syncmymoodle` user-wide.
-Afterwards you can adjust the settings:
+or to `~/.config/syncmymoodle/config.json` if you wish to configure `syncmymoodle` user-wide.
+
+Here's an overview of the file with some additional remarks as to what each
+configuration does:
 
 ```js
 {
@@ -81,51 +154,27 @@ Afterwards you can adjust the settings:
 }
 ```
 
-And your courses will be synced into the `basedir` you specified (default is the current directory).
-Your cookies will be stored in a session file.
-
-## CLI usage
-
-Run:
-
-```bash
-source .venv/bin/activate  # if you installed using virtual environment
-python3 -m syncmymoodle
-deactivate  # leave virtual environment
-```
-
-You can override the fields in the config file by using command line arguments:
-
-```bash
-usage: syncMyMoodle.py [-h] [--secretservice] [--user USER] [--password PASSWORD] [--config CONFIG]
-                       [--cookiefile COOKIEFILE] [--courses COURSES] [--skipcourses SKIPCOURSES]
-                       [--semester SEMESTER] [--basedir BASEDIR] [--nolinks]
-
-Synchronization client for RWTH Moodle. All optional arguments override those in config.json.
-
-optional arguments:
-  -h, --help            show this help message and exit
-  --secretservice       Use FreeDesktop.org Secret Service as storage/retrival for username/passwords.
-  --user USER           Your RWTH SSO username
-  --password PASSWORD   Your RWTH SSO password
-  --config CONFIG       The path to the config file
-  --cookiefile COOKIEFILE
-                        The location of the cookie file
-  --courses COURSES     Only these courses will be synced (comma seperated links) (if empty, all courses will be
-                        synced)
-  --skipcourses SKIPCOURSES
-                        These courses will NOT be synced (comma seperated links)
-  --semester SEMESTER   Only these semesters will be synced, of the form 20ws (comma seperated) (only used if
-                        [courses] is empty, if empty all semesters will be synced)
-  --basedir BASEDIR     The base directory where all files will be synced to
-  --nolinks             Wether to not inspect links embedded in pages
-```
+Command line arguments have a higher priority than configuration files.
+You can override any of the options that you have configured in the file
+using command line arguments.
 
 ## FreeDesktop.org Secret Service integration
 
-If you have a FreeDesktop.org Secret Service integration compatible keyring installed,
-you can save your RWTH SSO credentials in it.
-You need to install syncMyMoodle with the `keyring` extra installed:
+*This section is intended for Linux desktop users, as well as users of certain
+Unix-like operating systems (FreeBSD, OpenBSD, NetBSD).*
+
+You are advised to install and use the optional
+[FreeDesktop.org Secret Service integration](#freedesktoporg-secret-service-integration)
+to store your password securely if your system supports it - if you're on a modern
+Linux desktop-oriented distribution, it most probably does!
+
+If you have a FreeDesktop.org Secret Service integration compatible keyring
+installed, you can store your RWTH SSO credentials in it and use it with
+*syncMyMoodle*, which can be particularly useful if you do not like storing
+your passwords in plain text files.
+
+To do that, you will have to install *syncMyMoodle* with an extra `keyring`
+argument:
 
 ```bash
 pip3 install syncmymoodle[keyring]  # when installing from PyPi
@@ -133,6 +182,9 @@ pip3 install syncmymoodle[keyring]  # when installing from PyPi
 pip3 install .[keyring]  # when installing manually
 ```
 
-After you removed your password from the config file (delete the whole line in config.json),
-you will be prompted for your password when syncing for the first time.
-In subsequent runs, the credentials will be obtained automatically.
+You will be asked for your password when using *syncMyMoodle* for the first
+time, which you can supply as a parameter or in the configuration file.
+
+If everything went alright, you won't need to enter your password again
+in the future, as it will be obtained automatically and securely from
+the Secret Service Integration.

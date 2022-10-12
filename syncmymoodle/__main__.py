@@ -753,6 +753,12 @@ class SyncMyMoodle:
             path = path[:-1]
         while path and path[0] == " ":
             path = path[1:]
+
+        # Folders downloaded from Moodle display amp; in places where an
+        # ampersand should be displayed instead. In the web UI, however, the
+        # ampersand is shown correctly, and we're trying to emulate that here.
+        path = path.replace("amp;", "&")
+
         return path
 
     def download_file(self, node):
@@ -1017,55 +1023,62 @@ def main():
         prog="python3 -m syncmymoodle",
         description="Synchronization client for RWTH Moodle. All optional arguments override those in config.json.",
     )
+
     if secretstorage:
         parser.add_argument(
             "--secretservice",
             action="store_true",
-            help="Use FreeDesktop.org Secret Service as storage/retrival for username/passwords.",
+            help="use freedesktop.org's secret service integration for storing and retrieving account credentials",
         )
-    parser.add_argument("--user", default=None, help="Your RWTH SSO username")
-    parser.add_argument("--password", default=None, help="Your RWTH SSO password")
-    parser.add_argument("--config", default=None, help="The path to the config file")
+
     parser.add_argument(
-        "--cookiefile", default=None, help="The location of the cookie file"
+        "--user", default=None, help="set your RWTH Single Sign-On username"
+    )
+    parser.add_argument(
+        "--password", default=None, help="set your RWTH Single Sign-On password"
+    )
+    parser.add_argument("--config", default=None, help="set your configuration file")
+    parser.add_argument(
+        "--cookiefile", default=None, help="set the location of a cookie file"
     )
     parser.add_argument(
         "--courses",
         default=None,
-        help="Only these courses will be synced (comma seperated links) (if empty, all courses will be synced)",
+        help="specify the courses that should be synced using comma-separated links. Defaults to all courses, if no additional restrictions e.g. semester are defined.",
     )
     parser.add_argument(
         "--skipcourses",
         default=None,
-        help="These courses will NOT be synced (comma seperated links)",
+        help="exclude specific courses using comma-separated links. Defaults to None.",
     )
     parser.add_argument(
         "--semester",
         default=None,
-        help="Only these semesters will be synced, of the form 20ws (comma seperated) (only used if [courses] is empty, if empty all semesters will be synced)",
+        help="specify semesters to be synced e.g. `22s`, comma-separated. Defaults to all semesters, if no additional restrictions e.g. courses are defined.",
     )
     parser.add_argument(
         "--basedir",
         default=None,
-        help="The base directory where all files will be synced to",
+        help="specify the directory where all files will be synced",
     )
     parser.add_argument(
         "--nolinks",
         action="store_true",
-        help="Wether to not inspect links embedded in pages",
+        help="define whether various links in moodle pages should also be inspected e.g. youtube videos, wikipedia articles",
     )
     parser.add_argument(
         "--excludefiletypes",
         default=None,
-        help='Exclude downloading files from urls with these extensions (comma seperated types, e.g. "mp4,mkv")',
+        help='specify whether specific file types should be excluded, comma-separated e.g. "mp4,mkv"',
     )
     parser.add_argument(
+        "-v",
         "--verbose",
         action="store_const",
         dest="loglevel",
         const=logging.INFO,
         default=logging.WARNING,
-        help="Verbose output for debugging.",
+        help="show information useful for debugging",
     )
     args = parser.parse_args()
 
@@ -1144,15 +1157,15 @@ def main():
         attributes = {"application": "syncMyMoodle"}
         results = list(collection.search_items(attributes))
         if len(results) == 0:
-            if args.password:
-                password = args.password
-            else:
-                password = getpass.getpass("Password:")
             if not args.user and not config.get("user"):
                 print(
                     "You need to provide your username in the config file or through --user!"
                 )
                 exit(1)
+            if args.password:
+                password = args.password
+            else:
+                password = getpass.getpass("Password:")
             attributes["username"] = config["user"]
             item = collection.create_item(
                 f'{config["user"]}@rwth-aachen.de', attributes, password
