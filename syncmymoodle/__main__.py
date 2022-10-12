@@ -635,14 +635,14 @@ class SyncMyMoodle:
                                     sanitized_html = iframe_html.replace("\\", "")
                                 else:
                                     # H5P outside iframes
-                                    sanitized_html = html.replace("\\", "")
+                                    sanitized_html = str(html).replace("\\", "")
 
                                 self.scanForLinks(
                                     sanitized_html,
                                     section_node,
                                     course_id,
                                     module_title=module["modname"],
-                                    single=True,
+                                    single=False,
                                 )
                             else:
                                 self.scanForLinks(
@@ -946,7 +946,7 @@ class SyncMyMoodle:
         self, text, parent_node, course_id, module_title=None, single=False
     ):
         # A single link is supplied and the contents of it are checked
-        if single and module_title != "h5pactivity":
+        if single:
             try:
                 text = text.replace("webservice/pluginfile.php", "pluginfile.php")
                 response = self.session.head(text)
@@ -1001,18 +1001,18 @@ class SyncMyMoodle:
 
         # Youtube videos
         if self.config.get("used_modules", {}).get("url", {}).get("youtube", {}):
-            if single and "youtube.com" in text or "youtu.be" in text:
+            if "youtube.com" in text or "youtu.be" in text:
                 youtube_links = [
                     u[0]
+                    # finds youtube.com, youtu.be and embed links
                     for u in re.findall(
                         r"(https?://(www\.)?(youtube\.com/(watch\?[a-zA-Z0-9_=&-]*v=|embed/)|youtu.be/).{11})",
                         text,
                     )
                 ]
             else:
-                youtube_links = re.findall(
-                    "https://www.youtube.com/embed/[a-zA-Z0-9_-]{11}", text
-                )
+                youtube_links = []
+
             for link in youtube_links:
                 parent_node.add_child(
                     f"Youtube: {module_title or link}", link, "Youtube", url=link
