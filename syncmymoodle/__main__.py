@@ -1159,6 +1159,7 @@ def main():
             )
         else:
             item = results[0]
+            item.unlock()
         if not config.get("user"):
             config["user"] = item.get_attributes().get("username")
         config["password"] = item.get_secret().decode("utf-8")
