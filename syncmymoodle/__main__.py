@@ -602,9 +602,15 @@ class SyncMyMoodle:
                                     )
 
                         # Get embedded videos in pages or labels
-                        if module["modname"] in ["page", "label"] and self.config.get(
-                            "used_modules", {}
-                        ).get("url", {}):
+                        if (
+                            module["modname"]
+                            in [
+                                "page",
+                                "label",
+                                "h5pactivity",
+                            ]
+                            and self.config.get("used_modules", {}).get("url", {})
+                        ):
                             if module["modname"] == "page":
                                 self.scanForLinks(
                                     module["url"],
@@ -612,6 +618,35 @@ class SyncMyMoodle:
                                     course_id,
                                     module_title=module["name"],
                                     single=True,
+                                )
+                            # "Interactive" h5p videos
+                            elif module["modname"] == "h5pactivity":
+                                html_url = f'https://moodle.rwth-aachen.de/mod/h5pactivity/view.php?id={module["id"]}'
+                                html = bs(
+                                    self.session.get(html_url).text,
+                                    features="html.parser",
+                                )
+                                # Get h5p iframe
+                                iframe = html.find("iframe")
+                                if iframe != None:
+                                    iframe_html = str(
+                                        bs(
+                                            self.session.get(iframe.attrs["src"]).text,
+                                            features="html.parser",
+                                        )
+                                    )
+                                    # Moodle devs dont know how to use CDATA correctly, so we need to remove all backslashes
+                                    sanitized_html = iframe_html.replace("\\", "")
+                                else:
+                                    # H5P outside iframes
+                                    sanitized_html = str(html).replace("\\", "")
+
+                                self.scanForLinks(
+                                    sanitized_html,
+                                    section_node,
+                                    course_id,
+                                    module_title=module["modname"],
+                                    single=False,
                                 )
                             else:
                                 self.scanForLinks(
@@ -970,18 +1005,14 @@ class SyncMyMoodle:
 
         # Youtube videos
         if self.config.get("used_modules", {}).get("url", {}).get("youtube", {}):
-            if single and "youtube.com" in text or "youtu.be" in text:
-                youtube_links = [
-                    u[0]
-                    for u in re.findall(
-                        r"(https?://(www\.)?(youtube\.com/(watch\?[a-zA-Z0-9_=&-]*v=|embed/)|youtu.be/).{11})",
-                        text,
-                    )
-                ]
-            else:
-                youtube_links = re.findall(
-                    "https://www.youtube.com/embed/[a-zA-Z0-9_-]{11}", text
+            youtube_links = [
+                u[0]
+                # finds youtube.com, youtu.be and embed links
+                for u in re.findall(
+                    r"(https?://(www\.)?(youtube\.com/(watch\?[a-zA-Z0-9_=&-]*v=|embed/)|youtu.be/).{11})",
+                    text,
                 )
+            ]
             for link in youtube_links:
                 parent_node.add_child(
                     f"Youtube: {module_title or link}", link, "Youtube", url=link
