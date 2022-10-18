@@ -602,11 +602,15 @@ class SyncMyMoodle:
                                     )
 
                         # Get embedded videos in pages or labels
-                        if module["modname"] in [
-                            "page",
-                            "label",
-                            "h5pactivity",
-                        ] and self.config.get("used_modules", {}).get("url", {}):
+                        if (
+                            module["modname"]
+                            in [
+                                "page",
+                                "label",
+                                "h5pactivity",
+                            ]
+                            and self.config.get("used_modules", {}).get("url", {})
+                        ):
                             if module["modname"] == "page":
                                 self.scanForLinks(
                                     module["url"],
@@ -1001,18 +1005,14 @@ class SyncMyMoodle:
 
         # Youtube videos
         if self.config.get("used_modules", {}).get("url", {}).get("youtube", {}):
-            if "youtube.com" in text or "youtu.be" in text:
-                youtube_links = [
-                    u[0]
-                    # finds youtube.com, youtu.be and embed links
-                    for u in re.findall(
-                        r"(https?://(www\.)?(youtube\.com/(watch\?[a-zA-Z0-9_=&-]*v=|embed/)|youtu.be/).{11})",
-                        text,
-                    )
-                ]
-            else:
-                youtube_links = []
-
+            youtube_links = [
+                u[0]
+                # finds youtube.com, youtu.be and embed links
+                for u in re.findall(
+                    r"(https?://(www\.)?(youtube\.com/(watch\?[a-zA-Z0-9_=&-]*v=|embed/)|youtu.be/).{11})",
+                    text,
+                )
+            ]
             for link in youtube_links:
                 parent_node.add_child(
                     f"Youtube: {module_title or link}", link, "Youtube", url=link
