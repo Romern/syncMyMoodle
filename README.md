@@ -151,6 +151,7 @@ configuration does:
         "folder": true, //Folders
     },
     "exclude_filetypes": [] //Exclude specific filetypes, e.g. ["mp4","mkv"] do disable downloading most videos
+    "exlcude_files": [] // Exclude specific files using UNIX filename pattern matching (e.g. "Lecture{video,zoom}*.{mp4,mkv}")
 }
 ```
 

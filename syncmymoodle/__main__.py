@@ -13,6 +13,7 @@ import shutil
 import urllib.parse
 from argparse import ArgumentParser
 from contextlib import closing
+from fnmatch import fnmatchcase
 from pathlib import Path
 from typing import List
 
@@ -808,6 +809,12 @@ class SyncMyMoodle:
         ] in self.config.get("exclude_filetypes", []):
             return True
 
+        if any(
+            fnmatchcase(node.name, pattern)
+            for pattern in self.config.get("exclude_files")
+        ):
+            return True
+
         tmp_downloadpath = downloadpath.with_suffix(downloadpath.suffix + ".temp")
         if tmp_downloadpath.exists():
             resume_size = tmp_downloadpath.stat().st_size
@@ -1167,6 +1174,8 @@ def main():
         if args.excludefiletypes
         else config.get("exclude_filetypes", [])
     )
+
+    config["exclude_files"] = config.get("exclude_files", [])
 
     logging.basicConfig(level=args.loglevel)
 
