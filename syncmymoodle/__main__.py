@@ -11,15 +11,12 @@ import pickle
 import re
 import shutil
 import urllib.parse
-from fnmatch import fnmatchcase
-import functools
-import operator
 from argparse import ArgumentParser
 from contextlib import closing
+from fnmatch import fnmatchcase
 from pathlib import Path
 from typing import List
 
-from braceexpand import braceexpand
 import pdfkit
 import requests
 import youtube_dl
@@ -197,12 +194,12 @@ class SyncMyMoodle:
             return
         soup = bs(resp.text, features="html.parser")
         if soup.find("input", {"name": "RelayState"}) is None:
-            csrf_token = soup.find("input",{"name": "csrf_token"})["value"]
+            csrf_token = soup.find("input", {"name": "csrf_token"})["value"]
             data = {
                 "j_username": self.config["user"],
                 "j_password": self.config["password"],
                 "_eventId_proceed": "",
-                'csrf_token': csrf_token
+                "csrf_token": csrf_token,
             }
             resp2 = self.session.post(resp.url, data=data)
             soup = bs(resp2.text, features="html.parser")
@@ -771,7 +768,10 @@ class SyncMyMoodle:
         ] in self.config.get("exclude_filetypes", []):
             return True
 
-        if any(map(lambda pattern: fnmatchcase(node.name, pattern), self.config.get("exclude_files"))):
+        if any(
+            fnmatchcase(node.name, pattern)
+            for pattern in self.config.get("exclude_files")
+        ):
             return True
 
         tmp_downloadpath = downloadpath.with_suffix(downloadpath.suffix + ".temp")
@@ -1131,8 +1131,7 @@ def main():
         else config.get("exclude_filetypes", [])
     )
 
-    exclude_files = config.get("exclude_files", [])
-    config["exclude_files"] = functools.reduce(operator.iconcat, map(braceexpand, exclude_files), [])
+    config["exclude_files"] = config.get("exclude_files", [])
 
     logging.basicConfig(level=args.loglevel)
 
