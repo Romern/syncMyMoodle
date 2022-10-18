@@ -1175,11 +1175,11 @@ def main():
             if item.is_locked():
                 """
                 item.unlock() returns true if the promt has been dismissed, therefore we
-                'busy-wait' for false. 
+                'busy-wait' for false.
                 """
                 while item.unlock():
                     print("Please confirm to unlock the password if prompted!")
-                    pass 
+                    pass
         if not config.get("user"):
             config["user"] = item.get_attributes().get("username")
         config["password"] = item.get_secret().decode("utf-8")
