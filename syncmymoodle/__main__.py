@@ -15,7 +15,7 @@ from argparse import ArgumentParser
 from contextlib import closing
 from fnmatch import fnmatchcase
 from pathlib import Path
-from typing import List
+from typing import TYPE_CHECKING, List
 
 import pdfkit
 import requests
@@ -26,7 +26,11 @@ from tqdm import tqdm
 try:
     import secretstorage
 except ImportError:
-    secretstorage = None  # type: ignore
+    if not TYPE_CHECKING:
+        # An ignore hint does not work as it would be marked as superfluous
+        # by mypy if secretstorage is installed.
+        # Therefore we result to the TYPE_CHECKING constant
+        secretstorage = None
 
 YOUTUBE_ID_LENGTH = 11
 
