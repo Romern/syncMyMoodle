@@ -26,7 +26,7 @@ from tqdm import tqdm
 try:
     import secretstorage
 except ImportError:
-    secretstorage = None
+    secretstorage = None  # type: ignore
 
 YOUTUBE_ID_LENGTH = 11
 
@@ -603,15 +603,11 @@ class SyncMyMoodle:
                                     )
 
                         # Get embedded videos in pages or labels
-                        if (
-                            module["modname"]
-                            in [
-                                "page",
-                                "label",
-                                "h5pactivity",
-                            ]
-                            and self.config.get("used_modules", {}).get("url", {})
-                        ):
+                        if module["modname"] in [
+                            "page",
+                            "label",
+                            "h5pactivity",
+                        ] and self.config.get("used_modules", {}).get("url", {}):
                             if module["modname"] == "page":
                                 self.scanForLinks(
                                     module["url"],
@@ -629,7 +625,7 @@ class SyncMyMoodle:
                                 )
                                 # Get h5p iframe
                                 iframe = html.find("iframe")
-                                if iframe != None:
+                                if iframe is not None:
                                     iframe_html = str(
                                         bs(
                                             self.session.get(iframe.attrs["src"]).text,
