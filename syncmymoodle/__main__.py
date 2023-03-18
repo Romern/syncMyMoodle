@@ -178,8 +178,13 @@ class SyncMyMoodle:
 
     def login(self):
         def get_session_key(soup):
-            session_key = soup.find("a", {"data-title": "logout,moodle"})["href"]
-            return re.findall("sesskey=([a-zA-Z0-9]*)", session_key)[0]
+            try:
+                session_key = soup.find("input", {"name": "sesskey"})["value"]
+            except TypeError:
+                logger.critical("Can't retrieve session key")
+                logger.info(soup)
+                exit(1)
+            return session_key
 
         self.session = requests.Session()
         cookie_file = Path(self.config.get("cookie_file", "./session"))
