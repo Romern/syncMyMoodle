@@ -10,6 +10,7 @@ import os
 import pickle
 import re
 import shutil
+import sys
 import urllib.parse
 from argparse import ArgumentParser
 from contextlib import closing
@@ -183,7 +184,7 @@ class SyncMyMoodle:
             except TypeError:
                 logger.critical("Can't retrieve session key")
                 logger.info(soup)
-                exit(1)
+                sys.exit(1)
             return session_key
 
         self.session = requests.Session()
@@ -218,7 +219,7 @@ class SyncMyMoodle:
             )
             logger.info("-------Login-Error-Soup--------")
             logger.info(soup)
-            exit(1)
+            sys.exit(1)
         data = {
             "RelayState": soup.find("input", {"name": "RelayState"})["value"],
             "SAMLResponse": soup.find("input", {"name": "SAMLResponse"})["value"],
@@ -325,7 +326,7 @@ class SyncMyMoodle:
             logger.critical(
                 f"Error while getting userid and access key: {json.dumps(resp.json(), indent=4)}"
             )
-            exit(1)
+            sys.exit(1)
         self.user_id = resp.json()["userid"]
         self.user_private_access_key = resp.json()["userprivateaccesskey"]
         return self.user_id, self.user_private_access_key
@@ -1193,7 +1194,7 @@ def main():
     if secretstorage and config.get("use_secret_service"):
         if config.get("password"):
             logger.critical("You need to remove your password from your config file!")
-            exit(1)
+            sys.exit(1)
 
         connection = secretstorage.dbus_init()
         collection = secretstorage.get_default_collection(connection)
@@ -1206,7 +1207,7 @@ def main():
                 print(
                     "You need to provide your username in the config file or through --user!"
                 )
-                exit(1)
+                sys.exit(1)
             if args.password:
                 password = args.password
             else:
@@ -1233,7 +1234,7 @@ def main():
         logger.critical(
             "You need to specify your username and password in the config file or as an argument!"
         )
-        exit(1)
+        sys.exit(1)
 
     smm = SyncMyMoodle(config)
 
