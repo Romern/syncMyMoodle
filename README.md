@@ -130,28 +130,28 @@ configuration does:
 
 ```js
 {
-    "selected_courses": [], //Only these courses will be synced, of the form "https://moodle.rwth-aachen.de/course/view.php?id=XXXXX" (if empty, all courses will be synced)
-    "skip_courses": [], //Skip these courses
-    "only_sync_semester": [], //Only these semesters will be synced, of the form 20ws (only used if selected_courses is empty, if empty all semesters will be synced)
-    "user": "", //Your RWTH SSO username
-    "password": "", //Your RWTH SSO password (not needed if you use secret service)
-    "basedir": "./", //The base directory where all files will be synced to
-    "cookie_file": "./session", //The location of the cookie file,
-    "use_secret_service": false, //Use the secret service integration (requires the secretstorage pip module)
-    "no_links": false, //Skip links embedded in pages. This would disable OpenCast links for example
-    "used_modules": { //Disable downloading certain modules
-        "assign": true, //Assignments
-        "resource": true, //Resources
+    "selected_courses": [], // Only the specified courses (e.g. ["https://moodle.rwth-aachen.de/course/view.php?id=XXXXX"], separated using commas) will be synced
+    "skip_courses": [], // Exclude the specified courses. `selected_courses` overrides this option.
+    "only_sync_semester": [], // Only the specified semesters (e.g. ["23ss", "22ws"]) will be synced. `selected_courses` overrides this option.
+    "user": "", // RWTH SSO username
+    "password": "", // RWTH SSO password
+    "basedir": "./", // The base directory where all your files will be synced to
+    "cookie_file": "./session", // The location of the session/cookie file, which can be used instead of a password.
+    "use_secret_service": false, // Use the Secret Service integration (see README), instead of a password or a cookie file.
+    "no_links": false, // Skip links embedded in pages. Warning: This *will* prevent Onlycast videos from being downloaded.
+    "used_modules": { // Disable downloading certain modules.
+        "assign": true, // Assignments
+        "resource": true, // Resources
         "url": {
-            "youtube": true, //Youtube Links/Embeds
-            "opencast": true, //Opencast Links/Embeds
-            "sciebo": true, //Sciebo Links/Embeds
-            "quiz": false //Quiz Links
+            "youtube": true, // Include YouTube Links/Embeds
+            "opencast": true, // Include Opencast Links/Embeds
+            "sciebo": true, // Include Sciebo Links/Embeds
+            "quiz": false // Include Quiz Links
         },
-        "folder": true, //Folders
+        "folder": true, // Include folders
     },
-    "exclude_filetypes": [] //Exclude specific filetypes, e.g. ["mp4","mkv"] do disable downloading most videos
-    "exlcude_files": [] // Exclude specific files using UNIX filename pattern matching (e.g. "Lecture{video,zoom}*.{mp4,mkv}")
+    "exclude_filetypes": [], // Exclude specific filetypes (e.g. ["mp4", "mkv"]) to disable downloading most videos
+    "exclude_files": [] // Exclude specific files using UNIX filename pattern matching (e.g. "Lecture{video,zoom}*.{mp4,mkv}")
 }
 ```
 
