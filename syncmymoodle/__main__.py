@@ -179,7 +179,7 @@ class SyncMyMoodle:
 
     def login(self):
         def get_session_key(soup):
-            script = soup.find("script", string=lambda text: text and 'sesskey' in text)
+            script = soup.find("script", string=lambda text: text and "sesskey" in text)
             js_text = script.text
             match = re.search(r'"sesskey":"(.*?)"', js_text)
             if match:
@@ -187,8 +187,6 @@ class SyncMyMoodle:
             else:
                 logger.critical("Can't retrieve session key from JavaScript config")
                 exit(1)
-
-
 
         self.session = requests.Session()
         cookie_file = Path(self.config.get("cookie_file", "./session"))
