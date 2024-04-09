@@ -148,7 +148,7 @@ configuration does:
             "sciebo": true, // Include Sciebo Links/Embeds
             "quiz": false // Include Quiz Links
         },
-        "folder": true, // Include folders
+        "folder": true // Include folders
     },
     "exclude_filetypes": [], // Exclude specific filetypes (e.g. ["mp4", "mkv"]) to disable downloading most videos
     "exclude_files": [] // Exclude specific files using UNIX filename pattern matching (e.g. "Lecture{video,zoom}*.{mp4,mkv}")
