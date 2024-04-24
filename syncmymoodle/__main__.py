@@ -924,6 +924,7 @@ class SyncMyMoodle:
             "ignoreerrors": True,
             "nooverwrites": True,
             "retries": 15,
+            "match_filter": yt_dlp.match_filter_func("!is_live"),
         }
         path.mkdir(parents=True, exist_ok=True)
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
