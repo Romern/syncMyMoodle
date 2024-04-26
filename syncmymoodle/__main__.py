@@ -197,7 +197,7 @@ class SyncMyMoodle:
         resp = self.session.get(
             "https://moodle.rwth-aachen.de/auth/shibboleth/index.php"
         )
-        if "https://moodle.rwth-aachen.de/" in resp.url:
+        if resp.url.startswith("https://moodle.rwth-aachen.de/my/"):
             soup = bs(resp.text, features="html.parser")
             self.session_key = get_session_key(soup)
             with cookie_file.open("wb") as f:
