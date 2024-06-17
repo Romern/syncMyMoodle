@@ -1074,13 +1074,13 @@ class SyncMyMoodle:
 
                 # get baseauthentication secret
                 baseAuthSecret = base64.b64encode(
-                    (sharingToken + ":null").encode()
+                    f"{sharingToken}:null".encode()
                 ).decode()
                 logger.info(f"BaseAuthSecret: {baseAuthSecret}")
 
                 # get auth header
                 auth_header = {
-                    "Authorization": "Basic " + baseAuthSecret,
+                    "Authorization": f"Basic {baseAuthSecret}",
                     "requesttoken": requestToken,
                 }
 
