@@ -16,8 +16,8 @@ from argparse import ArgumentParser
 from contextlib import closing
 from fnmatch import fnmatchcase
 from pathlib import Path
-from typing import TYPE_CHECKING, List
 from time import sleep
+from typing import TYPE_CHECKING, List
 
 import pdfkit
 import requests
@@ -235,7 +235,7 @@ class SyncMyMoodle:
             }
 
             resp3 = self.session.post(resp2.url, data=totp_selection_data)
-            
+
             soup = bs(resp3.text, features="html.parser")
             if soup.find(id="fudis_otp_input") is None:
                 logger.critical(
@@ -256,7 +256,7 @@ class SyncMyMoodle:
 
             resp4 = self.session.post(resp3.url, data=totp_login_data)
 
-            sleep(1) # if we go too fast, we might have our connection closed
+            sleep(1)  # if we go too fast, we might have our connection closed
             soup = bs(resp4.text, features="html.parser")
         if soup.find("input", {"name": "RelayState"}) is None:
             logger.critical(
