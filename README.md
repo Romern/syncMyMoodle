@@ -82,7 +82,7 @@ The following command line arguments are available:
 
 ```bash
 usage: python3 -m syncmymoodle [-h] [--secretservice] [--user USER]
-                               [--password PASSWORD] [--config CONFIG]
+                               [--password PASSWORD] [--totp TOTP] [--config CONFIG]
                                [--cookiefile COOKIEFILE] [--courses COURSES]
                                [--skipcourses SKIPCOURSES]
                                [--semester SEMESTER] [--basedir BASEDIR]
@@ -98,6 +98,7 @@ options:
                         storing and retrieving account credentials
   --user USER           set your RWTH Single Sign-On username
   --password PASSWORD   set your RWTH Single Sign-On password
+  --totp TOTP           set your RWTH Single Sign-On TOTP provider
   --config CONFIG       set your configuration file
   --cookiefile COOKIEFILE
                         set the location of a cookie file
@@ -135,6 +136,7 @@ configuration does:
     "only_sync_semester": [], // Only the specified semesters (e.g. ["23ss", "22ws"]) will be synced. `selected_courses` overrides this option.
     "user": "", // RWTH SSO username
     "password": "", // RWTH SSO password
+    "totp": "", // RWTH SSO TOTP "Serial Number", format: TOTP0000000A
     "basedir": "./", // The base directory where all your files will be synced to
     "cookie_file": "./session", // The location of the session/cookie file, which can be used instead of a password.
     "use_secret_service": false, // Use the Secret Service integration (see README), instead of a password or a cookie file.

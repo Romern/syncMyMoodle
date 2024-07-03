@@ -4,6 +4,7 @@
     "only_sync_semester": [],
     "user": "",
     "password": "",
+    "totp": "",
     "basedir": "./",
     "cookie_file": "./session",
     "use_secret_service": false,

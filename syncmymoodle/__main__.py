@@ -17,6 +17,7 @@ from contextlib import closing
 from fnmatch import fnmatchcase
 from pathlib import Path
 from typing import TYPE_CHECKING, List
+from time import sleep
 
 import pdfkit
 import requests
@@ -206,14 +207,57 @@ class SyncMyMoodle:
         soup = bs(resp.text, features="html.parser")
         if soup.find("input", {"name": "RelayState"}) is None:
             csrf_token = soup.find("input", {"name": "csrf_token"})["value"]
-            data = {
+            login_data = {
                 "j_username": self.config["user"],
                 "j_password": self.config["password"],
                 "_eventId_proceed": "",
                 "csrf_token": csrf_token,
             }
-            resp2 = self.session.post(resp.url, data=data)
+            resp2 = self.session.post(resp.url, data=login_data)
+
             soup = bs(resp2.text, features="html.parser")
+
+            if soup.find(id="fudis_selected_token_ids_input") is None:
+                logger.critical(
+                    "Failed to login! Maybe your login-info was wrong or the RWTH-Servers have difficulties, see https://maintenance.rz.rwth-aachen.de/ticket/status/messages . For more info use the --verbose argument."
+                )
+                logger.info("-------Login-Error-Soup--------")
+                logger.info(soup)
+                sys.exit(1)
+
+            csrf_token = soup.find("input", {"name": "csrf_token"})["value"]
+
+            print("Setting TOTP generator")
+            totp_selection_data = {
+                "fudis_selected_token_ids_input": self.config["totp"],
+                "_eventId_proceed": "",
+                "csrf_token": csrf_token,
+            }
+
+            resp3 = self.session.post(resp2.url, data=totp_selection_data)
+            
+            soup = bs(resp3.text, features="html.parser")
+            if soup.find(id="fudis_otp_input") is None:
+                logger.critical(
+                    "Failed to select TOTP generator! Maybe your TOTP serial number is wrong or the RWTH-Servers have difficulties, see https://maintenance.rz.rwth-aachen.de/ticket/status/messages . For more info use the --verbose argument."
+                )
+                logger.info("-------Login-Error-Soup--------")
+                logger.info(soup)
+                sys.exit(1)
+
+            csrf_token = soup.find("input", {"name": "csrf_token"})["value"]
+
+            totp_input = input(f"Enter TOTP for generator {self.config["totp"]}:\n")
+            totp_login_data = {
+                "fudis_otp_input": totp_input,
+                "_eventId_proceed": "",
+                "csrf_token": csrf_token,
+            }
+
+            resp4 = self.session.post(resp3.url, data=totp_login_data)
+
+            sleep(1) # if we go too fast, we might have our connection closed
+            soup = bs(resp4.text, features="html.parser")
         if soup.find("input", {"name": "RelayState"}) is None:
             logger.critical(
                 "Failed to login! Maybe your login-info was wrong or the RWTH-Servers have difficulties, see https://maintenance.rz.rwth-aachen.de/ticket/status/messages . For more info use the --verbose argument."
@@ -1083,6 +1127,9 @@ def main():
     parser.add_argument(
         "--password", default=None, help="set your RWTH Single Sign-On password"
     )
+    parser.add_argument(
+        "--totp", default=None, help="set your RWTH Single Sign-On TOTP provider"
+    )
     parser.add_argument("--config", default=None, help="set your configuration file")
     parser.add_argument(
         "--cookiefile", default=None, help="set the location of a cookie file"
@@ -1152,6 +1199,7 @@ def main():
 
     config["user"] = args.user or config.get("user")
     config["password"] = args.password or config.get("password")
+    config["totp"] = args.totp or config.get("totp")
     config["cookie_file"] = args.cookiefile or config.get("cookie_file", "./session")
     config["selected_courses"] = (
         args.courses.split(",") if args.courses else config.get("selected_courses", [])
@@ -1235,6 +1283,12 @@ def main():
     if not config.get("user") or not config.get("password"):
         logger.critical(
             "You need to specify your username and password in the config file or as an argument!"
+        )
+        sys.exit(1)
+
+    if not config.get("totp"):
+        logger.critical(
+            "You need to specify your totp generator in the config file or as an argument!"
         )
         sys.exit(1)
 
