@@ -247,7 +247,7 @@ class SyncMyMoodle:
 
             csrf_token = soup.find("input", {"name": "csrf_token"})["value"]
 
-            totp_input = input(f"Enter TOTP for generator {self.config["totp"]}:\n")
+            totp_input = input(f"Enter TOTP for generator {self.config['totp']}:\n")
             totp_login_data = {
                 "fudis_otp_input": totp_input,
                 "_eventId_proceed": "",
