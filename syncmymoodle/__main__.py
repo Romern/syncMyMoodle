@@ -19,7 +19,11 @@ from pathlib import Path
 from time import sleep
 from typing import TYPE_CHECKING, List
 
-import pdfkit
+try:
+    import pdfkit
+except ImportError:
+    pdfkit = None
+
 import requests
 import yt_dlp
 from bs4 import BeautifulSoup as bs
@@ -1236,6 +1240,10 @@ def main():
     config["exclude_files"] = config.get("exclude_files", [])
 
     logging.basicConfig(level=args.loglevel)
+
+    if pdfkit is None and config["used_modules"]["url"]["quiz"]:
+        config["used_modules"]["url"]["quiz"] = False
+        logger.warning("pdfkit is not installed. Quiz-PDFs are NOT generated")
 
     if not shutil.which("wkhtmltopdf") and config["used_modules"]["url"]["quiz"]:
         config["used_modules"]["url"]["quiz"] = False
