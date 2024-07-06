@@ -1128,7 +1128,9 @@ def main():
         "--password", default=None, help="set your RWTH Single Sign-On password"
     )
     parser.add_argument(
-        "--totp", default=None, help="set your RWTH Single Sign-On TOTP provider's serial number (see https://idm.rwth-aachen.de/selfservice/MFATokenManager)"
+        "--totp",
+        default=None,
+        help="set your RWTH Single Sign-On TOTP provider's serial number (see https://idm.rwth-aachen.de/selfservice/MFATokenManager)",
     )
     parser.add_argument("--config", default=None, help="set your configuration file")
     parser.add_argument(
