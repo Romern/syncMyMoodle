@@ -19,7 +19,7 @@ from argparse import ArgumentParser
 from contextlib import closing
 from fnmatch import fnmatchcase
 from pathlib import Path
-from typing import TYPE_CHECKING, List
+from typing import List
 
 try:
     import pdfkit
