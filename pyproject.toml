@@ -23,6 +23,6 @@ module = [
     "yt_dlp",
     "tqdm",
     "pdfkit",
-    "secretstorage",
+    "keyring",
 ]
 ignore_missing_imports = true

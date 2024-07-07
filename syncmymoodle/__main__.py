@@ -32,13 +32,9 @@ from bs4 import BeautifulSoup as bs
 from tqdm import tqdm
 
 try:
-    import secretstorage
+    import keyring
 except ImportError:
-    if not TYPE_CHECKING:
-        # An ignore hint does not work as it would be marked as superfluous
-        # by mypy if secretstorage is installed.
-        # Therefore we result to the TYPE_CHECKING constant
-        secretstorage = None
+    keyring = None
 
 YOUTUBE_ID_LENGTH = 11
 
@@ -1144,11 +1140,11 @@ def main():
         description="Synchronization client for RWTH Moodle. All optional arguments override those in config.json.",
     )
 
-    if secretstorage:
+    if keyring:
         parser.add_argument(
             "--secretservice",
             action="store_true",
-            help="use freedesktop.org's secret service integration for storing and retrieving account credentials",
+            help="use system's keyring for storing and retrieving account credentials",
         )
 
     parser.add_argument(
@@ -1249,7 +1245,7 @@ def main():
     )
     config["basedir"] = args.basedir or config.get("basedir", "./")
     config["use_secret_service"] = (
-        args.secretservice if secretstorage else None
+        args.secretservice if keyring else None
     ) or config.get("use_secret_service")
     config["skip_courses"] = (
         args.skipcourses.split(",")
@@ -1283,44 +1279,44 @@ def main():
             "You do not have wkhtmltopdf in your path. Quiz-PDFs are NOT generated"
         )
 
-    if secretstorage and config.get("use_secret_service"):
+    if keyring and config.get("use_secret_service"):
         if config.get("password"):
             logger.critical("You need to remove your password from your config file!")
             sys.exit(1)
 
-        connection = secretstorage.dbus_init()
-        collection = secretstorage.get_default_collection(connection)
-        if collection.is_locked():
-            collection.unlock()
-        attributes = {"application": "syncMyMoodle"}
-        results = list(collection.search_items(attributes))
-        if len(results) == 0:
-            if not args.user and not config.get("user"):
-                print(
-                    "You need to provide your username in the config file or through --user!"
-                )
-                sys.exit(1)
+        if config.get("totpsecret"):
+            logger.critical("You need to remove your totpsecret from your config file!")
+            sys.exit(1)
+
+        if not args.user and not config.get("user"):
+            print(
+                "You need to provide your username in the config file or through --user!"
+            )
+            sys.exit(1)
+
+        if not args.totp and not config.get("totp"):
+            print(
+                "You need to provide your TOTP provider in the config file or through --totp!"
+            )
+            sys.exit(1)
+
+        config["password"] = keyring.get_password("syncmymoodle", config.get("user"))
+        if config["password"] is None:
             if args.password:
                 password = args.password
             else:
                 password = getpass.getpass("Password:")
-            attributes["username"] = config["user"]
-            item = collection.create_item(
-                f'{config["user"]}@rwth-aachen.de', attributes, password
-            )
-        else:
-            item = results[0]
-            if item.is_locked():
-                """
-                item.unlock() returns true if the promt has been dismissed, therefore we
-                'busy-wait' for false.
-                """
-                while item.unlock():
-                    print("Please confirm to unlock the password if prompted!")
-                    pass
-        if not config.get("user"):
-            config["user"] = item.get_attributes().get("username")
-        config["password"] = item.get_secret().decode("utf-8")
+            keyring.set_password("syncmymoodle", config.get("user"), password)
+            config["password"] = password
+
+        config["totpsecret"] = keyring.get_password("syncmymoodle", config.get("totp"))
+        if config["totpsecret"] is None:
+            if args.totpsecret:
+                totpsecret = args.totpsecret
+            else:
+                totpsecret = getpass.getpass("TOTP-Secret:")
+            keyring.set_password("syncmymoodle", config.get("totp"), totpsecret)
+            config["totpsecret"] = totpsecret
 
     if not config.get("user") or not config.get("password"):
         logger.critical(
