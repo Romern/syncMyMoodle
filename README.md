@@ -82,7 +82,7 @@ The following command line arguments are available:
 
 ```bash
 usage: python3 -m syncmymoodle [-h] [--secretservice] [--user USER]
-                               [--password PASSWORD] [--totp TOTP] [--config CONFIG]
+                               [--password PASSWORD] [--totp TOTP] [--totpsecret TOTPSECRET] [--config CONFIG]
                                [--cookiefile COOKIEFILE] [--courses COURSES]
                                [--skipcourses SKIPCOURSES]
                                [--semester SEMESTER] [--basedir BASEDIR]
@@ -101,6 +101,8 @@ options:
   --totp TOTP           set your RWTH Single Sign-On TOTP provider's serial
                         number (see
                         https://idm.rwth-aachen.de/selfservice/MFATokenManager)
+  --totpsecret TOTPSECRET
+                        (optional) set your RWTH Single Sign-On TOTP provider Secret
   --config CONFIG       set your configuration file
   --cookiefile COOKIEFILE
                         set the location of a cookie file
@@ -139,6 +141,7 @@ configuration does:
     "user": "", // RWTH SSO username
     "password": "", // RWTH SSO password
     "totp": "", // RWTH SSO TOTP "Serial Number", format: TOTP0000000A, see https://idm.rwth-aachen.de/selfservice/MFATokenManager
+    "totpsecret": "", // The TOTP Secret for your TOTP generator (optional)
     "basedir": "./", // The base directory where all your files will be synced to
     "cookie_file": "./session", // The location of the session/cookie file, which can be used instead of a password.
     "use_secret_service": false, // Use the Secret Service integration (see README), instead of a password or a cookie file.

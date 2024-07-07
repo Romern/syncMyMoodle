@@ -3,6 +3,7 @@
 import base64
 import getpass
 import hashlib
+import hmac
 import http.client
 import json
 import logging
@@ -10,13 +11,14 @@ import os
 import pickle
 import re
 import shutil
+import struct
 import sys
+import time
 import urllib.parse
 from argparse import ArgumentParser
 from contextlib import closing
 from fnmatch import fnmatchcase
 from pathlib import Path
-from time import sleep
 from typing import TYPE_CHECKING, List
 
 try:
@@ -41,6 +43,26 @@ except ImportError:
 YOUTUBE_ID_LENGTH = 11
 
 logger = logging.getLogger(__name__)
+
+
+"""
+To add TOTP functionality without adding external dependencies.
+Code taken from:
+https://github.com/susam/mintotp
+"""
+
+
+def hotp(key, counter, digits=6, digest="sha1"):
+    key = base64.b32decode(key.upper() + "=" * ((8 - len(key)) % 8))
+    counter = struct.pack(">Q", counter)
+    mac = hmac.new(key, counter, digest).digest()
+    offset = mac[-1] & 0x0F
+    binary = struct.unpack(">L", mac[offset : offset + 4])[0] & 0x7FFFFFFF
+    return str(binary)[-digits:].zfill(digits)
+
+
+def totp(key, time_step=30, digits=6, digest="sha1"):
+    return hotp(key, int(time.time() / time_step), digits, digest)
 
 
 class Node:
@@ -250,8 +272,12 @@ class SyncMyMoodle:
                 sys.exit(1)
 
             csrf_token = soup.find("input", {"name": "csrf_token"})["value"]
+            if not self.config.get("totpsecret"):
+                totp_input = input(f"Enter TOTP for generator {self.config['totp']}:\n")
+            else:
+                totp_input = totp(self.config.get("totpsecret"))
+                print(f"Generated TOTP from provided secret: {totp_input}")
 
-            totp_input = input(f"Enter TOTP for generator {self.config['totp']}:\n")
             totp_login_data = {
                 "fudis_otp_input": totp_input,
                 "_eventId_proceed": "",
@@ -260,7 +286,7 @@ class SyncMyMoodle:
 
             resp4 = self.session.post(resp3.url, data=totp_login_data)
 
-            sleep(1)  # if we go too fast, we might have our connection closed
+            time.sleep(1)  # if we go too fast, we might have our connection closed
             soup = bs(resp4.text, features="html.parser")
         if soup.find("input", {"name": "RelayState"}) is None:
             logger.critical(
@@ -1136,6 +1162,9 @@ def main():
         default=None,
         help="set your RWTH Single Sign-On TOTP provider's serial number (see https://idm.rwth-aachen.de/selfservice/MFATokenManager)",
     )
+    parser.add_argument(
+        "--totpsecret", default=None, help="set your RWTH Single Sign-On Secret"
+    )
     parser.add_argument("--config", default=None, help="set your configuration file")
     parser.add_argument(
         "--cookiefile", default=None, help="set the location of a cookie file"
@@ -1206,6 +1235,7 @@ def main():
     config["user"] = args.user or config.get("user")
     config["password"] = args.password or config.get("password")
     config["totp"] = args.totp or config.get("totp")
+    config["totpsecret"] = args.totpsecret or config.get("totpsecret")
     config["cookie_file"] = args.cookiefile or config.get("cookie_file", "./session")
     config["selected_courses"] = (
         args.courses.split(",") if args.courses else config.get("selected_courses", [])
@@ -1298,7 +1328,7 @@ def main():
 
     if not config.get("totp"):
         logger.critical(
-            "You need to specify your totp generator in the config file or as an argument!"
+            "You need to specify your TOTP generator in the config file or as an argument!"
         )
         sys.exit(1)
 
