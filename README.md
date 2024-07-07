@@ -96,6 +96,8 @@ options:
   -h, --help            show this help message and exit
   --secretservice       use system's secret service integration for storing and
                         retrieving account credentials
+  --secretservicetotpsecret
+                        Save TOTP secret in keyring
   --user USER           set your RWTH Single Sign-On username
   --password PASSWORD   set your RWTH Single Sign-On password
   --totp TOTP           set your RWTH Single Sign-On TOTP provider's serial
@@ -145,6 +147,7 @@ configuration does:
     "basedir": "./", // The base directory where all your files will be synced to
     "cookie_file": "./session", // The location of the session/cookie file, which can be used instead of a password.
     "use_secret_service": false, // Use the system keyring (see README), instead of a password.
+    "secret_service_store_totp_secret": false, // Store the TOTP secret in the system keyring.
     "no_links": false, // Skip links embedded in pages. Warning: This *will* prevent Onlycast videos from being downloaded.
     "used_modules": { // Disable downloading certain modules.
         "assign": true, // Assignments

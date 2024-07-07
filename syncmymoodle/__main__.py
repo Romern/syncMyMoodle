@@ -1144,7 +1144,12 @@ def main():
         parser.add_argument(
             "--secretservice",
             action="store_true",
-            help="use system's keyring for storing and retrieving account credentials",
+            help="Use system's keyring for storing and retrieving account credentials",
+        )
+        parser.add_argument(
+            "--secretservicetotpsecret",
+            action="store_true",
+            help="Save TOTP secret in keyring",
         )
 
     parser.add_argument(
@@ -1247,6 +1252,9 @@ def main():
     config["use_secret_service"] = (
         args.secretservice if keyring else None
     ) or config.get("use_secret_service")
+    config["secret_service_store_totp_secret"] = (
+        args.secretservicetotpsecret if keyring else None
+    ) or config.get("secret_service_store_totp_secret")
     config["skip_courses"] = (
         args.skipcourses.split(",")
         if args.skipcourses
@@ -1284,7 +1292,7 @@ def main():
             logger.critical("You need to remove your password from your config file!")
             sys.exit(1)
 
-        if config.get("totpsecret"):
+        if config.get("secret_service_store_totp_secret") and config.get("totpsecret"):
             logger.critical("You need to remove your totpsecret from your config file!")
             sys.exit(1)
 
@@ -1294,7 +1302,11 @@ def main():
             )
             sys.exit(1)
 
-        if not args.totp and not config.get("totp"):
+        if (
+            config.get("secretservicetotpsecret")
+            and not args.totp
+            and not config.get("totp")
+        ):
             print(
                 "You need to provide your TOTP provider in the config file or through --totp!"
             )
@@ -1309,14 +1321,17 @@ def main():
             keyring.set_password("syncmymoodle", config.get("user"), password)
             config["password"] = password
 
-        config["totpsecret"] = keyring.get_password("syncmymoodle", config.get("totp"))
-        if config["totpsecret"] is None:
-            if args.totpsecret:
-                totpsecret = args.totpsecret
-            else:
-                totpsecret = getpass.getpass("TOTP-Secret:")
-            keyring.set_password("syncmymoodle", config.get("totp"), totpsecret)
-            config["totpsecret"] = totpsecret
+        if config.get("secret_service_store_totp_secret"):
+            config["totpsecret"] = keyring.get_password(
+                "syncmymoodle", config.get("totp")
+            )
+            if config["totpsecret"] is None:
+                if args.totpsecret:
+                    totpsecret = args.totpsecret
+                else:
+                    totpsecret = getpass.getpass("TOTP-Secret:")
+                keyring.set_password("syncmymoodle", config.get("totp"), totpsecret)
+                config["totpsecret"] = totpsecret
 
     if not config.get("user") or not config.get("password"):
         logger.critical(
