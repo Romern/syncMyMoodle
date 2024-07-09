@@ -82,7 +82,7 @@ The following command line arguments are available:
 
 ```bash
 usage: python3 -m syncmymoodle [-h] [--secretservice] [--user USER]
-                               [--password PASSWORD] [--totp TOTP] [--config CONFIG]
+                               [--password PASSWORD] [--totp TOTP] [--totpsecret TOTPSECRET] [--config CONFIG]
                                [--cookiefile COOKIEFILE] [--courses COURSES]
                                [--skipcourses SKIPCOURSES]
                                [--semester SEMESTER] [--basedir BASEDIR]
@@ -94,13 +94,17 @@ in config.json.
 
 options:
   -h, --help            show this help message and exit
-  --secretservice       use freedesktop.org's secret service integration for
-                        storing and retrieving account credentials
+  --secretservice       use system's secret service integration for storing and
+                        retrieving account credentials
+  --secretservicetotpsecret
+                        Save TOTP secret in keyring
   --user USER           set your RWTH Single Sign-On username
   --password PASSWORD   set your RWTH Single Sign-On password
   --totp TOTP           set your RWTH Single Sign-On TOTP provider's serial
                         number (see
                         https://idm.rwth-aachen.de/selfservice/MFATokenManager)
+  --totpsecret TOTPSECRET
+                        (optional) set your RWTH Single Sign-On TOTP provider Secret
   --config CONFIG       set your configuration file
   --cookiefile COOKIEFILE
                         set the location of a cookie file
@@ -139,9 +143,11 @@ configuration does:
     "user": "", // RWTH SSO username
     "password": "", // RWTH SSO password
     "totp": "", // RWTH SSO TOTP "Serial Number", format: TOTP0000000A, see https://idm.rwth-aachen.de/selfservice/MFATokenManager
+    "totpsecret": "", // The TOTP Secret for your TOTP generator (optional)
     "basedir": "./", // The base directory where all your files will be synced to
     "cookie_file": "./session", // The location of the session/cookie file, which can be used instead of a password.
-    "use_secret_service": false, // Use the Secret Service integration (see README), instead of a password or a cookie file.
+    "use_secret_service": false, // Use the system keyring (see README), instead of a password.
+    "secret_service_store_totp_secret": false, // Store the TOTP secret in the system keyring.
     "no_links": false, // Skip links embedded in pages. Warning: This *will* prevent Onlycast videos from being downloaded.
     "used_modules": { // Disable downloading certain modules.
         "assign": true, // Assignments
@@ -163,20 +169,27 @@ Command line arguments have a higher priority than configuration files.
 You can override any of the options that you have configured in the file
 using command line arguments.
 
-## FreeDesktop.org Secret Service integration
+### TOTP
 
-*This section is intended for Linux desktop users, as well as users of certain
-Unix-like operating systems (FreeBSD, OpenBSD, NetBSD).*
+From the RWTH IDM service you will get a TOTP secret which will be used to
+generate OTP tokens. The serial number of the TOTP, which can be seen in the 
+[RWTH IDM Token Manager](https://idm.rwth-aachen.de/selfservice/MFATokenManager),
+has to be provided using the `--totp` option or the JSON entry of the same name.
+It usually has the format `TOTP12345678`.
 
-You are advised to install and use the optional
-[FreeDesktop.org Secret Service integration](#freedesktoporg-secret-service-integration)
-to store your password securely if your system supports it - if you're on a modern
-Linux desktop-oriented distribution, it most probably does!
+The TOTP secret can be specified using the `--totpsecret` option or the JSON 
+entry of the same name. It can be found in the `otpauth://` link in the secret
+argument.
 
-If you have a FreeDesktop.org Secret Service integration compatible keyring
-installed, you can store your RWTH SSO credentials in it and use it with
-*syncMyMoodle*, which can be particularly useful if you do not like storing
-your passwords in plain text files.
+## Keyring Integration
+
+You are advised to install and use the optional Keyring integration
+to store your password securely if your system supports it, see the 
+[projects page](https://github.com/jaraco/keyring) for all supported systems.
+
+If you have a compatible keyring installed, you can store your RWTH SSO 
+credentials in it and use it with *syncMyMoodle*, which can be particularly 
+useful if you do not like storing your passwords in plain text files.
 
 To do that, you will have to install *syncMyMoodle* with an extra `keyring`
 argument:
@@ -187,8 +200,9 @@ pip3 install syncmymoodle[keyring]  # when installing from PyPi
 pip3 install .[keyring]  # when installing manually
 ```
 
-You will be asked for your password when using *syncMyMoodle* for the first
-time, which you can supply as a parameter or in the configuration file.
+You will be asked for your password and TOTP secret when using 
+*syncMyMoodle* for the first time, which you can supply as a parameter or 
+in the configuration file.
 
 If everything went alright, you won't need to enter your password again
 in the future, as it will be obtained automatically and securely from

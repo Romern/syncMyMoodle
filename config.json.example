@@ -5,9 +5,11 @@
     "user": "",
     "password": "",
     "totp": "",
+    "totpsecret": "",
     "basedir": "./",
     "cookie_file": "./session",
     "use_secret_service": false,
+    "secret_service_store_totp_secret": false,
     "no_links": false,
     "used_modules": {
         "assign": true,

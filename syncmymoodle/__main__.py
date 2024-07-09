@@ -3,6 +3,7 @@
 import base64
 import getpass
 import hashlib
+import hmac
 import http.client
 import json
 import logging
@@ -10,14 +11,15 @@ import os
 import pickle
 import re
 import shutil
+import struct
 import sys
+import time
 import urllib.parse
 from argparse import ArgumentParser
 from contextlib import closing
 from fnmatch import fnmatchcase
 from pathlib import Path
-from time import sleep
-from typing import TYPE_CHECKING, List
+from typing import List
 
 try:
     import pdfkit
@@ -30,17 +32,33 @@ from bs4 import BeautifulSoup as bs
 from tqdm import tqdm
 
 try:
-    import secretstorage
+    import keyring
 except ImportError:
-    if not TYPE_CHECKING:
-        # An ignore hint does not work as it would be marked as superfluous
-        # by mypy if secretstorage is installed.
-        # Therefore we result to the TYPE_CHECKING constant
-        secretstorage = None
+    keyring = None
 
 YOUTUBE_ID_LENGTH = 11
 
 logger = logging.getLogger(__name__)
+
+
+"""
+To add TOTP functionality without adding external dependencies.
+Code taken from:
+https://github.com/susam/mintotp
+"""
+
+
+def hotp(key, counter, digits=6, digest="sha1"):
+    key = base64.b32decode(key.upper() + "=" * ((8 - len(key)) % 8))
+    counter = struct.pack(">Q", counter)
+    mac = hmac.new(key, counter, digest).digest()
+    offset = mac[-1] & 0x0F
+    binary = struct.unpack(">L", mac[offset : offset + 4])[0] & 0x7FFFFFFF
+    return str(binary)[-digits:].zfill(digits)
+
+
+def totp(key, time_step=30, digits=6, digest="sha1"):
+    return hotp(key, int(time.time() / time_step), digits, digest)
 
 
 class Node:
@@ -250,8 +268,12 @@ class SyncMyMoodle:
                 sys.exit(1)
 
             csrf_token = soup.find("input", {"name": "csrf_token"})["value"]
+            if not self.config.get("totpsecret"):
+                totp_input = input(f"Enter TOTP for generator {self.config['totp']}:\n")
+            else:
+                totp_input = totp(self.config.get("totpsecret"))
+                print(f"Generated TOTP from provided secret: {totp_input}")
 
-            totp_input = input(f"Enter TOTP for generator {self.config['totp']}:\n")
             totp_login_data = {
                 "fudis_otp_input": totp_input,
                 "_eventId_proceed": "",
@@ -260,7 +282,7 @@ class SyncMyMoodle:
 
             resp4 = self.session.post(resp3.url, data=totp_login_data)
 
-            sleep(1)  # if we go too fast, we might have our connection closed
+            time.sleep(1)  # if we go too fast, we might have our connection closed
             soup = bs(resp4.text, features="html.parser")
         if soup.find("input", {"name": "RelayState"}) is None:
             logger.critical(
@@ -1118,11 +1140,16 @@ def main():
         description="Synchronization client for RWTH Moodle. All optional arguments override those in config.json.",
     )
 
-    if secretstorage:
+    if keyring:
         parser.add_argument(
             "--secretservice",
             action="store_true",
-            help="use freedesktop.org's secret service integration for storing and retrieving account credentials",
+            help="Use system's keyring for storing and retrieving account credentials",
+        )
+        parser.add_argument(
+            "--secretservicetotpsecret",
+            action="store_true",
+            help="Save TOTP secret in keyring",
         )
 
     parser.add_argument(
@@ -1135,6 +1162,11 @@ def main():
         "--totp",
         default=None,
         help="set your RWTH Single Sign-On TOTP provider's serial number (see https://idm.rwth-aachen.de/selfservice/MFATokenManager)",
+    )
+    parser.add_argument(
+        "--totpsecret",
+        default=None,
+        help="(optional) set your RWTH Single Sign-On TOTP provider Secret",
     )
     parser.add_argument("--config", default=None, help="set your configuration file")
     parser.add_argument(
@@ -1206,6 +1238,7 @@ def main():
     config["user"] = args.user or config.get("user")
     config["password"] = args.password or config.get("password")
     config["totp"] = args.totp or config.get("totp")
+    config["totpsecret"] = args.totpsecret or config.get("totpsecret")
     config["cookie_file"] = args.cookiefile or config.get("cookie_file", "./session")
     config["selected_courses"] = (
         args.courses.split(",") if args.courses else config.get("selected_courses", [])
@@ -1217,8 +1250,11 @@ def main():
     )
     config["basedir"] = args.basedir or config.get("basedir", "./")
     config["use_secret_service"] = (
-        args.secretservice if secretstorage else None
+        args.secretservice if keyring else None
     ) or config.get("use_secret_service")
+    config["secret_service_store_totp_secret"] = (
+        args.secretservicetotpsecret if keyring else None
+    ) or config.get("secret_service_store_totp_secret")
     config["skip_courses"] = (
         args.skipcourses.split(",")
         if args.skipcourses
@@ -1251,44 +1287,51 @@ def main():
             "You do not have wkhtmltopdf in your path. Quiz-PDFs are NOT generated"
         )
 
-    if secretstorage and config.get("use_secret_service"):
+    if keyring and config.get("use_secret_service"):
         if config.get("password"):
             logger.critical("You need to remove your password from your config file!")
             sys.exit(1)
 
-        connection = secretstorage.dbus_init()
-        collection = secretstorage.get_default_collection(connection)
-        if collection.is_locked():
-            collection.unlock()
-        attributes = {"application": "syncMyMoodle"}
-        results = list(collection.search_items(attributes))
-        if len(results) == 0:
-            if not args.user and not config.get("user"):
-                print(
-                    "You need to provide your username in the config file or through --user!"
-                )
-                sys.exit(1)
+        if config.get("secret_service_store_totp_secret") and config.get("totpsecret"):
+            logger.critical("You need to remove your totpsecret from your config file!")
+            sys.exit(1)
+
+        if not args.user and not config.get("user"):
+            print(
+                "You need to provide your username in the config file or through --user!"
+            )
+            sys.exit(1)
+
+        if (
+            config.get("secretservicetotpsecret")
+            and not args.totp
+            and not config.get("totp")
+        ):
+            print(
+                "You need to provide your TOTP provider in the config file or through --totp!"
+            )
+            sys.exit(1)
+
+        config["password"] = keyring.get_password("syncmymoodle", config.get("user"))
+        if config["password"] is None:
             if args.password:
                 password = args.password
             else:
                 password = getpass.getpass("Password:")
-            attributes["username"] = config["user"]
-            item = collection.create_item(
-                f'{config["user"]}@rwth-aachen.de', attributes, password
+            keyring.set_password("syncmymoodle", config.get("user"), password)
+            config["password"] = password
+
+        if config.get("secret_service_store_totp_secret"):
+            config["totpsecret"] = keyring.get_password(
+                "syncmymoodle", config.get("totp")
             )
-        else:
-            item = results[0]
-            if item.is_locked():
-                """
-                item.unlock() returns true if the promt has been dismissed, therefore we
-                'busy-wait' for false.
-                """
-                while item.unlock():
-                    print("Please confirm to unlock the password if prompted!")
-                    pass
-        if not config.get("user"):
-            config["user"] = item.get_attributes().get("username")
-        config["password"] = item.get_secret().decode("utf-8")
+            if config["totpsecret"] is None:
+                if args.totpsecret:
+                    totpsecret = args.totpsecret
+                else:
+                    totpsecret = getpass.getpass("TOTP-Secret:")
+                keyring.set_password("syncmymoodle", config.get("totp"), totpsecret)
+                config["totpsecret"] = totpsecret
 
     if not config.get("user") or not config.get("password"):
         logger.critical(
@@ -1298,7 +1341,7 @@ def main():
 
     if not config.get("totp"):
         logger.critical(
-            "You need to specify your totp generator in the config file or as an argument!"
+            "You need to specify your TOTP generator in the config file or as an argument!"
         )
         sys.exit(1)
 
