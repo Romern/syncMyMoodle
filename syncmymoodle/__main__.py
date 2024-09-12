@@ -227,6 +227,9 @@ class SyncMyMoodle:
                 pickle.dump(self.session.cookies, f)
             return
         soup = bs(resp.text, features="html.parser")
+        if "Wartungsarbeiten" in resp.text:
+            logger.critical(soup.find("body").text)
+            sys.exit()
         if soup.find("input", {"name": "RelayState"}) is None:
             csrf_token = soup.find("input", {"name": "csrf_token"})["value"]
             login_data = {
