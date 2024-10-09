@@ -1457,7 +1457,9 @@ class SyncMyMoodle:
 
         # https://rwth-aachen.sciebo.de/s/XXX
         if self.config.get("used_modules", {}).get("url", {}).get("sciebo", {}):
-            sciebo_links = set(re.findall("https://rwth-aachen.sciebo.de/s/[a-zA-Z0-9-]+", text))
+            sciebo_links = set(
+                re.findall("https://rwth-aachen.sciebo.de/s/[a-zA-Z0-9-]+", text)
+            )
             sciebo_url = "https://rwth-aachen.sciebo.de"
             webdav_location = "/public.php/webdav/"
             for link in sciebo_links:
