@@ -963,8 +963,7 @@ class SyncMyMoodle:
 
         # Collect tracks from all mediapackages
         mediapackages = [
-            track["mediapackage"]["media"]["track"]
-            for track in episodejson["result"]
+            track["mediapackage"]["media"]["track"] for track in episodejson["result"]
         ]
 
         # TODO, handle multiple mediapackages (videos? could be seperate presenter and screencap)
@@ -975,7 +974,9 @@ class SyncMyMoodle:
             [
                 (t["url"], t["video"]["resolution"])
                 for t in tracks
-                if t["mimetype"] == "video/mp4" and "transport" not in t and "video" in t
+                if t["mimetype"] == "video/mp4"
+                and "transport" not in t
+                and "video" in t
             ],
             key=lambda x: int(x[1].split("x")[0]),  # Sort by width (e.g., "1920x1080")
         )
