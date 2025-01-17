@@ -961,17 +961,25 @@ class SyncMyMoodle:
         episodejson = f"https://engage.streaming.rwth-aachen.de/search/episode.json?id={linkid.groups()[0]}"
         episodejson = json.loads(self.session.get(episodejson).text)
 
-        tracks = episodejson["search-results"]["result"]["mediapackage"]["media"][
-            "track"
+        # Collect tracks from all mediapackages
+        mediapackages = [
+            track["mediapackage"]["media"]["track"]
+            for track in episodejson["result"]
         ]
+
+        # TODO, handle multiple mediapackages (videos? could be seperate presenter and screencap)
+        tracks = mediapackages[0]
+
+        # Filter and sort tracks by resolution (width)
         tracks = sorted(
             [
                 (t["url"], t["video"]["resolution"])
                 for t in tracks
-                if t["mimetype"] == "video/mp4" and "transport" not in t
+                if  t["mimetype"] == "video/mp4" and "transport" not in t and "video" in t
             ],
-            key=(lambda x: int(x[1].split("x")[0])),
+            key=lambda x: int(x[1].split("x")[0]),  # Sort by width (e.g., "1920x1080")
         )
+
         # only choose mp4s provided with plain https (no transport key), and use the one with the highest resolution (sorted by width) (could also use bitrate)
         finaltrack = tracks[-1]
 
