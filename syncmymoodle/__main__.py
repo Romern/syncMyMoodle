@@ -230,9 +230,13 @@ class SyncMyMoodle:
         # Create a separate soup for maintenance detection
         soup_check = bs(resp.text, features="html.parser")
 
-        # Remove known info banners
+        # Remove known info banners by class
         for banner in soup_check.select(".themeboostunioninfobanner"):
             banner.decompose()
+
+        # Also remove Bootstrap-style alert boxes marked as informational alerts
+        for alert in soup_check.select('div.alert[role="alert"]'):
+            alert.decompose()
 
         # Extract body text after cleanup
         body_text = soup_check.find("body").get_text(separator=" ", strip=True)
