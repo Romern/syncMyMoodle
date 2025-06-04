@@ -2,6 +2,9 @@ config.json
 downloaded_modules.json
 session
 
+# Pycharm
+.idea
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]

@@ -226,10 +226,26 @@ class SyncMyMoodle:
             with cookie_file.open("wb") as f:
                 pickle.dump(self.session.cookies, f)
             return
-        soup = bs(resp.text, features="html.parser")
-        if "Wartungsarbeiten" in resp.text:
-            logger.critical(soup.find("body").text)
+
+        # Create a separate soup for maintenance detection
+        soup_check = bs(resp.text, features="html.parser")
+
+        # Remove known info banners
+        for banner in soup_check.select(".themeboostunioninfobanner"):
+            banner.decompose()
+
+        # Extract body text after cleanup
+        body_text = soup_check.find("body").get_text(separator=" ", strip=True)
+
+        # Check for maintenance notice
+        if "Wartungsarbeiten" in body_text:
+            logger.critical(
+                "Detected Maintenance mode! If this is an error, please report it on GitHub."
+            )
+            logger.info("Cleaned page body:\n%s", body_text)
             sys.exit()
+
+        soup = bs(resp.text, features="html.parser")
         if soup.find("input", {"name": "RelayState"}) is None:
             csrf_token = soup.find("input", {"name": "csrf_token"})["value"]
             login_data = {
