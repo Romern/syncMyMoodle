@@ -1,16 +1,52 @@
 [build-system]
-requires = [
-    "setuptools>=46.4.0",
-    "wheel"
-]
+requires = ["setuptools>=61", "wheel"]
 build-backend = "setuptools.build_meta"
+
+[project]
+name = "syncMyMoodle"
+version = "0.2.3.post1"
+description = "Synchronization client for RWTH Moodle"
+readme = "README.md"
+requires-python = ">=3.6"
+license = { text = "GPL-3.0-only" }
+authors = [
+  { name = "Nils Kattenbeck", email = "nilskemail+pypi@gmail.com" }
+]
+keywords = ["moodle", "sync", "rwth", "cli"]
+classifiers = [
+  "Programming Language :: Python :: 3",
+  "License :: OSI Approved :: GNU General Public License v3 (GPLv3)",
+  "Operating System :: OS Independent",
+  "Development Status :: 5 - Production/Stable"
+]
+scripts = { syncmymoodle = "syncmymoodle.__main__:main" }
+
+urls = { "Homepage" = "https://github.com/Romern/syncMyMoodle", "Bug Tracker" = "https://github.com/Romern/syncMyMoodle/issues" }
+
+dependencies = [
+  "requests>=2.0.0",
+  "beautifulsoup4>=4.0.0",
+  "yt-dlp>=2021.12.27",
+  "tqdm>=4.0.0"
+]
+
+[project.optional-dependencies]
+quiz = ["pdfkit>=0.6.0"]
+keyring = ["keyring>=20.0.0"]
+test = [
+  "black",
+  "isort",
+  "flake8",
+  "flake8-bugbear",
+  "mypy",
+  "types-requests"
+]
 
 [tool.isort]
 profile = "black"
 
 [tool.mypy]
 warn_unused_configs = true
-
 warn_redundant_casts = true
 warn_unused_ignores = true
 warn_no_return = true
@@ -19,10 +55,15 @@ warn_unreachable = true
 
 [[tool.mypy.overrides]]
 module = [
-    "bs4",
-    "yt_dlp",
-    "tqdm",
-    "pdfkit",
-    "keyring",
+  "bs4",
+  "yt_dlp",
+  "tqdm",
+  "pdfkit",
+  "keyring",
 ]
 ignore_missing_imports = true
+
+[tool.flake8]
+max-line-length = 88
+select = ["C", "E", "F", "W", "B", "B901"]
+extend-ignore = ["E203", "E501", "W503"]
