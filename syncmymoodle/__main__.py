@@ -70,6 +70,7 @@ class Node:
         parent,
         url=None,
         additional_info=None,
+        timemodified=None,
         is_downloaded=False,
     ):
         self.name = name
@@ -81,6 +82,7 @@ class Node:
         self.additional_info = (
             additional_info  # Currently only used for course_id in opencast
         )
+        self.timemodified = timemodified
         self.is_downloaded = (
             is_downloaded  # Can also be used to exclude files from being downloaded
         )
@@ -88,7 +90,7 @@ class Node:
     def __repr__(self):
         return f"Node(name={self.name}, id={self.id}, url={self.url}, type={self.type})"
 
-    def add_child(self, name, id, type, url=None, additional_info=None):
+    def add_child(self, name, id, type, url=None, additional_info=None, timemodified=None):
         if url:
             url = url.replace("?forcedownload=1", "").replace(
                 "mod_page/content/3", "mod_page/content"
@@ -99,7 +101,7 @@ class Node:
         if url and any([True for c in self.children if c.url == url]):
             return None
 
-        temp = Node(name, id, type, self, url=url, additional_info=additional_info)
+        temp = Node(name, id, type, self, url=url, additional_info=additional_info, timemodified=timemodified)
         self.children.append(temp)
         return temp
 
@@ -111,6 +113,17 @@ class Node:
             cur = cur.parent
         return ret
 
+    def go_to_path(self, target_path):
+        target_node = [self]
+        for path_child in target_path:
+            if path_child == '':
+                continue
+            try:
+                target_node.append([node_child for node_child in target_node[-1].children if node_child.name == path_child][0])
+            except IndexError:
+                raise Exception("The path is not found in this root node. Wrong path?")
+        return target_node[-1]
+    
     def remove_children_nameclashes(self):
         # Check for duplicate filenames
 
@@ -197,6 +210,21 @@ class SyncMyMoodle:
         self.wstoken = None
         self.user_id = None
         self.root_node = None
+        root_node_cache_file = Path(self.config.get("root_node_cache_file", "./cached_root_node"))
+        if root_node_cache_file.exists():
+            with root_node_cache_file.open("rb") as f:
+                try:
+                    self.cached_root_node = pickle.load(f)
+                except EOFError:
+                    self.cached_root_node = None
+                    print("Error loading root_node cache.")
+        else:
+            self.cached_root_node = None
+
+    def cache_root_node(self):
+        root_node_cache_file = Path(self.config.get("root_node_cache_file", "./cached_root_node"))
+        with root_node_cache_file.open("wb") as f:
+            pickle.dump(self.root_node, f)
 
     # RWTH SSO Login
 
@@ -697,6 +725,7 @@ class SyncMyMoodle:
                                         c["fileurl"],
                                         "Folder File",
                                         url=c["fileurl"],
+                                        timemodified=c["timemodified"]
                                     )
                                 else:
                                     folder_node.add_child(
@@ -704,6 +733,7 @@ class SyncMyMoodle:
                                         c["fileurl"],
                                         "Folder File",
                                         url=c["fileurl"],
+                                        timemodified=c["timemodified"]
                                     )
 
                         # Get embedded videos in pages or labels
@@ -902,7 +932,10 @@ class SyncMyMoodle:
         downloadpath = self.get_sanitized_node_path(node)
 
         if downloadpath.exists():
-            return True
+            if not self.config.get("updatefiles"):
+                return True
+            elif self.cached_root_node is not None and node.timemodified == self.cached_root_node.go_to_path(node.get_path()).timemodified:
+                return True
 
         if len(node.name.split(".")) > 0 and node.name.split(".")[
             -1
@@ -1205,6 +1238,9 @@ def main():
         "--cookiefile", default=None, help="set the location of a cookie file"
     )
     parser.add_argument(
+        "--rootnodecachefile", default=None, help="set the location of a root node cache file"
+    )
+    parser.add_argument(
         "--courses",
         default=None,
         help="specify the courses that should be synced using comma-separated links. Defaults to all courses, if no additional restrictions e.g. semester are defined.",
@@ -1233,6 +1269,11 @@ def main():
         "--excludefiletypes",
         default=None,
         help='specify whether specific file types should be excluded, comma-separated e.g. "mp4,mkv"',
+    )
+    parser.add_argument(
+        "--updatefiles",
+        action="store_true",
+        help="define whether modified files with the same name/path should be redownloaded",
     )
     parser.add_argument(
         "-v",
@@ -1272,6 +1313,7 @@ def main():
     config["totp"] = args.totp or config.get("totp")
     config["totpsecret"] = args.totpsecret or config.get("totpsecret")
     config["cookie_file"] = args.cookiefile or config.get("cookie_file", "./session")
+    config["root_node_cache_file"] = args.rootnodecachefile or config.get("root_node_cache_file", "./cached_root_node")
     config["selected_courses"] = (
         args.courses.split(",") if args.courses else config.get("selected_courses", [])
     )
@@ -1306,6 +1348,8 @@ def main():
     )
 
     config["exclude_files"] = config.get("exclude_files", [])
+    
+    config["updatefiles"] = args.updatefiles or config.get("update_files")
 
     logging.basicConfig(level=args.loglevel)
 
@@ -1387,6 +1431,8 @@ def main():
     smm.sync()
     print("Downloading files...")
     smm.download_all_files()
+    print("Saving root node as cache...")
+    smm.cache_root_node()
 
 
 if __name__ == "__main__":

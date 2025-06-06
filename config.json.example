@@ -8,6 +8,7 @@
     "totpsecret": "",
     "basedir": "./",
     "cookie_file": "./session",
+    "root_node_cache_file": "./cached_root_node",
     "use_secret_service": false,
     "secret_service_store_totp_secret": false,
     "no_links": false,
@@ -23,5 +24,6 @@
         "folder": true
     },
     "exclude_filetypes": [],
-    "exclude_files": []
+    "exclude_files": [],
+    "update_files": true
 }
