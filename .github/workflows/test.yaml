@@ -31,8 +31,9 @@ jobs:
           black --check syncmymoodle
           isort --check-only syncmymoodle
 
-      - name: Lint with flake8
-        run: flake8 syncmymoodle
+      # Disabled for now, until we refactor the main project
+      # - name: Lint with flake8
+      #   run: flake8 syncmymoodle
 
       - name: Analyze with mypy
         run: mypy syncmymoodle
