@@ -147,9 +147,7 @@ class Node:
                     ][0]
                 )
             except IndexError:
-                raise Exception(
-                    "The path is not found in this root node. Wrong path?"
-                )
+                raise Exception("The path is not found in this root node. Wrong path?")
         return target_node[-1]
 
     def remove_children_nameclashes(self):
@@ -1510,7 +1508,9 @@ def main():
         "--cookiefile", default=None, help="set the location of a cookie file"
     )
     parser.add_argument(
-        "--rootnodecachefile", default=None, help="set the location of a root node cache file"
+        "--rootnodecachefile",
+        default=None,
+        help="set the location of a root node cache file",
     )
     parser.add_argument(
         "--courses",
@@ -1595,7 +1595,9 @@ def main():
     config["totp"] = args.totp or config.get("totp")
     config["totpsecret"] = args.totpsecret or config.get("totpsecret")
     config["cookie_file"] = args.cookiefile or config.get("cookie_file", "./session")
-    config["root_node_cache_file"] = args.rootnodecachefile or config.get("root_node_cache_file", "./cached_root_node")
+    config["root_node_cache_file"] = args.rootnodecachefile or config.get(
+        "root_node_cache_file", "./cached_root_node"
+    )
     config["selected_courses"] = (
         args.courses.split(",") if args.courses else config.get("selected_courses", [])
     )
@@ -1630,8 +1632,8 @@ def main():
     )
     config["exclude_files"] = config.get("exclude_files", [])
     config["updatefiles"] = args.updatefiles or config.get("update_files", False)
-    config["update_files_conflict"] = (
-        args.updatefilesconflict or config.get("update_files_conflict", "rename")
+    config["update_files_conflict"] = args.updatefilesconflict or config.get(
+        "update_files_conflict", "rename"
     )
 
     logging.basicConfig(level=args.loglevel)
