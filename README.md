@@ -13,7 +13,7 @@ Downloads the following materials:
 
 ## Installation
 
-This software requires **Python 3.6 or higher**.
+This software requires **Python 3.11 or higher**.
 
 ### Using `pip` (recommended)
 
@@ -81,13 +81,15 @@ deactivate  # leave virtual environment
 The following command line arguments are available:
 
 ```bash
-usage: python3 -m syncmymoodle [-h] [--secretservice] [--user USER]
-                               [--password PASSWORD] [--totp TOTP] [--totpsecret TOTPSECRET] [--config CONFIG]
-                               [--cookiefile COOKIEFILE] [--courses COURSES]
-                               [--skipcourses SKIPCOURSES]
+usage: python3 -m syncmymoodle [-h] [--secretservice] [--secretservicetotpsecret]
+                               [--user USER] [--password PASSWORD]
+                               [--totp TOTP] [--totpsecret TOTPSECRET]
+                               [--config CONFIG] [--cookiefile COOKIEFILE]
+                               [--courses COURSES] [--skipcourses SKIPCOURSES]
                                [--semester SEMESTER] [--basedir BASEDIR]
                                [--nolinks]
-                               [--excludefiletypes EXCLUDEFILETYPES] [-v]
+                               [--excludefiletypes EXCLUDEFILETYPES]
+                               [--updatefiles] [-v]
 
 Synchronization client for RWTH Moodle. All optional arguments override those
 in config.json.
@@ -124,6 +126,13 @@ options:
   --excludefiletypes EXCLUDEFILETYPES
                         specify whether specific file types should be
                         excluded, comma-separated e.g. "mp4,mkv"
+  --updatefiles         define whether modified files with the same name/path
+                        should be redownloaded
+  --updatefilesconflict {rename,keep,overwrite}
+                        define how to handle locally modified files when
+                        updating: 'rename' (default) moves the old file aside,
+                        'keep' skips the update, 'overwrite' replaces the
+                        local file
   -v, --verbose         show information useful for debugging
 ```
 
@@ -161,7 +170,9 @@ configuration does:
         "folder": true // Include folders
     },
     "exclude_filetypes": [], // Exclude specific filetypes (e.g. ["mp4", "mkv"]) to disable downloading most videos
-    "exclude_files": [] // Exclude specific files using UNIX filename pattern matching (e.g. "Lecture{video,zoom}*.{mp4,mkv}")
+    "exclude_files": [], // Exclude specific files using UNIX filename pattern matching (e.g. "Lecture{video,zoom}*.{mp4,mkv}")
+    "update_files": true, // If true, existing files are redownloaded only when Moodle reports that they were modified (requires a cached root node from a previous run).
+    "update_files_conflict": "rename" // How to handle locally modified files when Moodle has a newer version: "rename" (default, move to <name>.syncconflict.<hash>), "keep" (skip update), or "overwrite" (replace local file).
 }
 ```
 

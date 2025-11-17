@@ -66,11 +66,12 @@ class Node:
         self,
         name,
         id,
-        type,
+        type,  # noqa: A003 - keep original name for compatibility
         parent,
         url=None,
         additional_info=None,
         timemodified=None,
+        etag=None,
         is_downloaded=False,
     ):
         self.name = name
@@ -83,6 +84,7 @@ class Node:
             additional_info  # Currently only used for course_id in opencast
         )
         self.timemodified = timemodified
+        self.etag = etag
         self.is_downloaded = (
             is_downloaded  # Can also be used to exclude files from being downloaded
         )
@@ -90,7 +92,16 @@ class Node:
     def __repr__(self):
         return f"Node(name={self.name}, id={self.id}, url={self.url}, type={self.type})"
 
-    def add_child(self, name, id, type, url=None, additional_info=None, timemodified=None):
+    def add_child(
+        self,
+        name,
+        id,
+        type,
+        url=None,
+        additional_info=None,
+        timemodified=None,
+        etag=None,
+    ):
         if url:
             url = url.replace("?forcedownload=1", "").replace(
                 "mod_page/content/3", "mod_page/content"
@@ -101,7 +112,16 @@ class Node:
         if url and any([True for c in self.children if c.url == url]):
             return None
 
-        temp = Node(name, id, type, self, url=url, additional_info=additional_info, timemodified=timemodified)
+        temp = Node(
+            name,
+            id,
+            type,
+            self,
+            url=url,
+            additional_info=additional_info,
+            timemodified=timemodified,
+            etag=etag,
+        )
         self.children.append(temp)
         return temp
 
@@ -116,14 +136,22 @@ class Node:
     def go_to_path(self, target_path):
         target_node = [self]
         for path_child in target_path:
-            if path_child == '':
+            if path_child == "":
                 continue
             try:
-                target_node.append([node_child for node_child in target_node[-1].children if node_child.name == path_child][0])
+                target_node.append(
+                    [
+                        node_child
+                        for node_child in target_node[-1].children
+                        if node_child.name == path_child
+                    ][0]
+                )
             except IndexError:
-                raise Exception("The path is not found in this root node. Wrong path?")
+                raise Exception(
+                    "The path is not found in this root node. Wrong path?"
+                )
         return target_node[-1]
-    
+
     def remove_children_nameclashes(self):
         # Check for duplicate filenames
 
@@ -210,21 +238,144 @@ class SyncMyMoodle:
         self.wstoken = None
         self.user_id = None
         self.root_node = None
-        root_node_cache_file = Path(self.config.get("root_node_cache_file", "./cached_root_node"))
-        if root_node_cache_file.exists():
-            with root_node_cache_file.open("rb") as f:
-                try:
-                    self.cached_root_node = pickle.load(f)
-                except EOFError:
-                    self.cached_root_node = None
-                    print("Error loading root_node cache.")
-        else:
-            self.cached_root_node = None
+        # Per-course caches: mapping from course directory path to cached
+        # course root node loaded from `.syncmymoodle_cache`.
+        self._course_caches = {}
 
     def cache_root_node(self):
-        root_node_cache_file = Path(self.config.get("root_node_cache_file", "./cached_root_node"))
-        with root_node_cache_file.open("wb") as f:
-            pickle.dump(self.root_node, f)
+        """Persist per-course caches into .syncmymoodle_cache files.
+
+        Each course directory beneath basedir receives its own cache file
+        containing the course subtree, which makes caching less brittle than
+        a single global root cache.
+        """
+        if not self.root_node:
+            return
+
+        for semester_node in self.root_node.children:
+            if semester_node.type != "Semester":
+                continue
+            for course_node in semester_node.children:
+                if course_node.type != "Course":
+                    continue
+                course_path = self.get_sanitized_node_path(course_node)
+                course_path.mkdir(parents=True, exist_ok=True)
+                cache_path = course_path / ".syncmymoodle_cache"
+                with cache_path.open("wb") as f:
+                    pickle.dump(course_node, f)
+
+    def _ensure_timemodified_attribute(self, node):
+        # Old cached root nodes might not have the timemodified attribute yet.
+        if not hasattr(node, "timemodified"):
+            node.timemodified = None
+        if not hasattr(node, "etag"):
+            node.etag = None
+        for child in getattr(node, "children", []):
+            self._ensure_timemodified_attribute(child)
+
+    def _get_course_node(self, node: Node) -> Node:
+        """Return the enclosing course node for the given node."""
+        cur = node
+        while cur is not None and cur.parent is not None:
+            if cur.type == "Course":
+                return cur
+            cur = cur.parent
+        raise Exception("Node is not part of a course subtree")
+
+    def _get_course_cache_root(self, course_node: Node):
+        """Load and return the cached course root for the given course node."""
+        course_path = self.get_sanitized_node_path(course_node)
+        if course_path in self._course_caches:
+            return self._course_caches[course_path]
+
+        cache_path = course_path / ".syncmymoodle_cache"
+        if not cache_path.exists():
+            return None
+
+        with cache_path.open("rb") as f:
+            try:
+                cached_course_root = pickle.load(f)
+                self._ensure_timemodified_attribute(cached_course_root)
+            except EOFError:
+                return None
+
+        self._course_caches[course_path] = cached_course_root
+        return cached_course_root
+
+    def _get_old_node_for(self, node: Node):
+        """Return the cached node for this node from the course cache, if any."""
+        try:
+            course_node = self._get_course_node(node)
+        except Exception:
+            return None
+
+        cached_course_root = self._get_course_cache_root(course_node)
+        if cached_course_root is None:
+            return None
+
+        full_path = node.get_path()
+        course_path = course_node.get_path()
+        # Compute the path segments beneath the course root
+        rel_segments = full_path[len(course_path) :]
+        if not rel_segments:
+            return cached_course_root
+
+        try:
+            return cached_course_root.go_to_path(rel_segments)
+        except Exception:
+            return None
+
+    def _make_conflict_path(self, path: Path) -> Path:
+        """Return a unique path for storing a locally modified file."""
+        suffix = path.suffix
+        stem = path.stem
+
+        # Derive a short hash from the current contents to make the filename
+        # stable and recognizable while remaining reasonably unique.
+        hash_str = "unknown"
+        try:
+            with path.open("rb") as f:
+                digest = hashlib.file_digest(f, "sha1")
+                hash_str = digest.hexdigest()[:8]
+        except FileNotFoundError:
+            hash_str = "missing"
+
+        conflict_path = path.with_name(f"{stem}.syncconflict.{hash_str}{suffix}")
+        index = 1
+        while conflict_path.exists():
+            conflict_path = path.with_name(
+                f"{stem}.syncconflict.{hash_str}.{index}{suffix}"
+            )
+            index += 1
+        return conflict_path
+
+    def _local_file_matches_etag(self, path: Path, etag: str) -> bool:
+        """Return True if the local file content matches the given ETag hash.
+
+        We currently support strong ETags that contain a plain hex digest for
+        MD5 (32 chars), SHA1 (40 chars) or SHA256 (64 chars). Other formats are
+        ignored and treated as non-matching.
+        """
+        # Extract a plausible hex digest from the ETag value, ignoring weak
+        # prefixes (W/) and surrounding quotes or algorithm markers.
+        match = re.search(r"([0-9a-fA-F]{32,64})", etag)
+        if not match:
+            return False
+        hex_str = match.group(1).lower()
+
+        algo = None
+        if len(hex_str) == 32:
+            algo = "md5"
+        elif len(hex_str) == 40:
+            algo = "sha1"
+        elif len(hex_str) == 64:
+            algo = "sha256"
+        else:
+            return False
+
+        with path.open("rb") as f:
+            digest = hashlib.file_digest(f, algo)
+            return digest.hexdigest() == hex_str
 
     # RWTH SSO Login
 
@@ -661,6 +812,7 @@ class SyncMyMoodle:
                                         c["fileurl"],
                                         "Assignment File",
                                         url=c["fileurl"],
+                                        timemodified=c.get("timemodified"),
                                     )
                                 else:
                                     assignment_node.add_child(
@@ -668,6 +820,7 @@ class SyncMyMoodle:
                                         c["fileurl"],
                                         "Assignment File",
                                         url=c["fileurl"],
+                                        timemodified=c.get("timemodified"),
                                     )
 
                         # Get Resources or URLs
@@ -725,7 +878,7 @@ class SyncMyMoodle:
                                         c["fileurl"],
                                         "Folder File",
                                         url=c["fileurl"],
-                                        timemodified=c["timemodified"]
+                                        timemodified=c.get("timemodified"),
                                     )
                                 else:
                                     folder_node.add_child(
@@ -733,7 +886,7 @@ class SyncMyMoodle:
                                         c["fileurl"],
                                         "Folder File",
                                         url=c["fileurl"],
-                                        timemodified=c["timemodified"]
+                                        timemodified=c.get("timemodified"),
                                     )
 
                         # Get embedded videos in pages or labels
@@ -931,11 +1084,112 @@ class SyncMyMoodle:
         """Download file with progress bar if it isn't already downloaded"""
         downloadpath = self.get_sanitized_node_path(node)
 
+        # Decide whether we need to (re-)download the file at all
+        cached_timemodified = None
+        old_node = None
         if downloadpath.exists():
             if not self.config.get("updatefiles"):
                 return True
-            elif self.cached_root_node is not None and node.timemodified == self.cached_root_node.go_to_path(node.get_path()).timemodified:
-                return True
+
+            # Try to find a cached node for this file from the per-course cache.
+            old_node = self._get_old_node_for(node)
+            if old_node is not None:
+                cached_timemodified = getattr(old_node, "timemodified", None)
+                # If Moodle did not change the file, skip re-download
+                if node.timemodified == cached_timemodified:
+                    return True
+
+            # At this point, either there is no cache for this course/path, or
+            # Moodle reports a different modification time. This means the
+            # remote file might have changed.
+
+            # Check for potential local modifications since the last sync to avoid
+            # silently overwriting user changes.
+            conflict_mode = self.config.get("update_files_conflict", "rename")
+            if conflict_mode not in {"rename", "keep", "none", "overwrite"}:
+                conflict_mode = "rename"
+
+            local_conflict = False
+            old_etag = getattr(old_node, "etag", None) if old_node is not None else None
+            if old_etag:
+                # Prefer using the old ETag (hash) to detect whether the local file
+                # still matches the previously downloaded version.
+                try:
+                    if not self._local_file_matches_etag(downloadpath, old_etag):
+                        local_conflict = True
+                except Exception:
+                    # If we cannot safely compare using the ETag, fall back to the
+                    # timestamp-based heuristic below.
+                    local_conflict = False
+
+            if not old_etag:
+                if cached_timemodified is not None:
+                    # Fallback: compare local mtime with the previous Moodle timestamp.
+                    try:
+                        local_mtime = int(downloadpath.stat().st_mtime)
+                        if local_mtime != int(cached_timemodified):
+                            local_conflict = True
+                    except (OSError, ValueError):
+                        local_conflict = True
+                else:
+                    # No previous cache for this file. Before treating this as a
+                    # conflict, try to detect if the local file already matches
+                    # the *current* Moodle content via the ETag.
+                    remote_etag = None
+                    try:
+                        head_resp = self.session.head(node.url, allow_redirects=True)
+                        remote_etag = head_resp.headers.get("ETag")
+                    except Exception:
+                        remote_etag = None
+
+                    if remote_etag and self._local_file_matches_etag(
+                        downloadpath, remote_etag
+                    ):
+                        node.etag = remote_etag
+                        if getattr(node, "timemodified", None) is not None:
+                            try:
+                                ts = int(node.timemodified)
+                                os.utime(downloadpath, (ts, ts))
+                            except (OSError, OverflowError, ValueError):
+                                pass
+                        # Local file matches current Moodle content, so no conflict.
+                        return True
+
+                    # Without a previous Moodle timestamp or ETag match we cannot
+                    # reliably tell if the local file was changed by the user, so
+                    # treat this as a potential conflict.
+                    local_conflict = True
+
+            if local_conflict:
+                if conflict_mode in {"keep", "none"}:
+                    # Keep the locally modified file and skip updating from Moodle
+                    logger.info(
+                        "Detected local changes for %s, skipping Moodle update "
+                        "due to update_files_conflict=%s",
+                        downloadpath,
+                        conflict_mode,
+                    )
+                    return True
+                if conflict_mode == "rename":
+                    # Move the locally modified file out of the way before download
+                    conflict_path = self._make_conflict_path(downloadpath)
+                    try:
+                        downloadpath.rename(conflict_path)
+                        logger.warning(
+                            "Detected local changes for %s, moving to %s before "
+                            "downloading updated file from Moodle",
+                            downloadpath,
+                            conflict_path,
+                        )
+                    except OSError:
+                        logger.exception(
+                            "Failed to move locally modified file %s to %s, "
+                            "skipping Moodle update to avoid data loss",
+                            downloadpath,
+                            conflict_path,
+                        )
+                        return True
+                # conflict_mode == "overwrite": fall through and overwrite
 
         if len(node.name.split(".")) > 0 and node.name.split(".")[
             -1
@@ -959,6 +1213,7 @@ class SyncMyMoodle:
         with closing(
             self.session.get(node.url, headers=header, stream=True)
         ) as response:
+            etag_header = response.headers.get("ETag")
             print(f"Downloading {downloadpath} [{node.type}]")
             total_size_in_bytes = (
                 int(response.headers.get("content-length", 0)) + resume_size
@@ -973,6 +1228,23 @@ class SyncMyMoodle:
                     file.write(data)
             progress_bar.close()
             tmp_downloadpath.rename(downloadpath)
+            # Align the local mtime with Moodle's timemodified to detect local
+            # changes on subsequent runs.
+            if getattr(node, "timemodified", None) is not None:
+                try:
+                    ts = int(node.timemodified)
+                    os.utime(downloadpath, (ts, ts))
+                except (OSError, OverflowError, ValueError):
+                    # If updating timestamps fails, fall back to the current time.
+                    pass
+            # Persist the ETag of the downloaded file on the node so it can be
+            # used on the next run to detect local modifications.
+            if etag_header is not None:
+                try:
+                    node.etag = etag_header
+                except Exception:
+                    # If for some reason we cannot set it, just ignore.
+                    pass
             return True
 
     def getOpenCastRealURL(self, additional_info, url):
@@ -1276,6 +1548,16 @@ def main():
         help="define whether modified files with the same name/path should be redownloaded",
     )
     parser.add_argument(
+        "--updatefilesconflict",
+        choices=["rename", "keep", "overwrite"],
+        default=None,
+        help=(
+            "define how to handle locally modified files when updating: "
+            "'rename' (default) moves the old file aside, 'keep' skips the "
+            "update, 'overwrite' replaces the local file"
+        ),
+    )
+    parser.add_argument(
         "-v",
         "--verbose",
         action="store_const",
@@ -1346,10 +1628,11 @@ def main():
         if args.excludefiletypes
         else config.get("exclude_filetypes", [])
     )
-
     config["exclude_files"] = config.get("exclude_files", [])
-    
-    config["updatefiles"] = args.updatefiles or config.get("update_files")
+    config["updatefiles"] = args.updatefiles or config.get("update_files", False)
+    config["update_files_conflict"] = (
+        args.updatefilesconflict or config.get("update_files_conflict", "rename")
+    )
 
     logging.basicConfig(level=args.loglevel)
 
