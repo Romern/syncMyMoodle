@@ -1260,7 +1260,7 @@ class SyncMyMoodle:
         tmp_downloadpath = downloadpath.with_suffix(downloadpath.suffix + ".temp")
         if tmp_downloadpath.exists():
             resume_size = tmp_downloadpath.stat().st_size
-            header = {"Range": f"bytes= {resume_size}-"}
+            header = {"Range": f"bytes={resume_size}-"}
         else:
             resume_size = 0
             header = dict()
@@ -1272,14 +1272,23 @@ class SyncMyMoodle:
         ) as response:
             etag_header = response.headers.get("ETag")
             print(f"Downloading {downloadpath} [{node.type}]")
-            total_size_in_bytes = (
-                int(response.headers.get("content-length", 0)) + resume_size
+            # If we attempted to resume but the server did not honor the Range
+            # header (status != 206), fallback to a full download and ignore
+            # the existing partial file to avoid corrupting PDFs or other
+            # content by appending a second full copy.
+            if resume_size and response.status_code != 206:
+                resume_size = 0
+                tmp_downloadpath.unlink(missing_ok=True)
+
+            total_size_in_bytes = int(response.headers.get("content-length", 0)) + max(
+                resume_size, 0
             )
             progress_bar = tqdm(total=total_size_in_bytes, unit="iB", unit_scale=True)
             if resume_size:
                 progress_bar.update(resume_size)
             downloadpath.parent.mkdir(parents=True, exist_ok=True)
-            with tmp_downloadpath.open("ab") as file:
+            mode = "ab" if resume_size else "wb"
+            with tmp_downloadpath.open(mode) as file:
                 for data in response.iter_content(self.block_size):
                     progress_bar.update(len(data))
                     file.write(data)
