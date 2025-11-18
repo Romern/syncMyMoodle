@@ -7,7 +7,7 @@ name = "syncMyMoodle"
 version = "0.2.3.post1"
 description = "Synchronization client for RWTH Moodle"
 readme = "README.md"
-requires-python = ">=3.6"
+requires-python = ">=3.11"
 license = { text = "GPL-3.0-only" }
 authors = [
   { name = "Nils Kattenbeck", email = "nilskemail+pypi@gmail.com" }
