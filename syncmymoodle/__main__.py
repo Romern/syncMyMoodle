@@ -1463,27 +1463,44 @@ class SyncMyMoodle:
             sciebo_url = "https://rwth-aachen.sciebo.de"
             webdav_location = "/public.php/webdav/"
             for link in sciebo_links:
-                logging.info(f"Found Sciebo Link: {link}")
+                logger.info(f"Found Sciebo Link: {link}")
 
                 # get the download page
-                response = self.session.get(link)
+                try:
+                    response = self.session.get(link)
+                except Exception:
+                    logger.exception("Failed to fetch Sciebo link %s", link)
+                    continue
 
                 # parse html code
                 soup = bs(response.text, features="html.parser")
 
                 # get the requesttoken
-                requestToken = soup.head["data-requesttoken"]
-                logger.info(f"RequestToken: {requestToken}")
+                requestToken = (
+                    soup.head.get("data-requesttoken") if soup.head is not None else None
+                )
+                if not requestToken:
+                    logger.warning(
+                        "Sciebo: missing request token for link %s, skipping", link
+                    )
+                    continue
+                logger.info("Sciebo request token: %s", requestToken)
 
-                # print the property value of the input tag with the name sharingToken
-                sharingToken = soup.find("input", {"name": "sharingToken"})["value"]
-                logger.info(f"SharingToken: {sharingToken}")
+                # get the property value of the input tag with the name sharingToken
+                sharing_input = soup.find("input", {"name": "sharingToken"})
+                if not sharing_input or not sharing_input.get("value"):
+                    logger.warning(
+                        "Sciebo: missing sharingToken for link %s, skipping", link
+                    )
+                    continue
+                sharingToken = sharing_input["value"]
+                logger.info("Sciebo sharingToken: %s", sharingToken)
 
                 # get baseauthentication secret
                 baseAuthSecret = base64.b64encode(
                     f"{sharingToken}:null".encode()
                 ).decode()
-                logger.info(f"BaseAuthSecret: {baseAuthSecret}")
+                logger.info("Sciebo base auth secret derived")
 
                 # get auth header
                 auth_header = {
@@ -1491,9 +1508,12 @@ class SyncMyMoodle:
                     "requesttoken": requestToken,
                 }
 
-                parent_node = parent_node.add_child(
+                sciebo_root = parent_node.add_child(
                     f"sciebo-{sharingToken}", None, "Sciebo Folder"
                 )
+                if sciebo_root is None:
+                    # Duplicate folder/link, nothing more to do here
+                    continue
 
                 # recursive function to get all files in the sciebo folder
                 def get_sciebo_files(
@@ -1501,9 +1521,26 @@ class SyncMyMoodle:
                 ):
 
                     # request the URL with the PROPFIND method and the header
-                    response = self.session.request(
-                        "PROPFIND", sciebo_url + href, headers=auth_header
-                    )
+                    try:
+                        response = self.session.request(
+                            "PROPFIND", sciebo_url + href, headers=auth_header
+                        )
+                    except Exception:
+                        logger.exception(
+                            "Sciebo PROPFIND failed for href %s (share %s)",
+                            href,
+                            sharingToken,
+                        )
+                        return
+
+                    if not (200 <= response.status_code < 300):
+                        logger.warning(
+                            "Sciebo PROPFIND returned status %s for href %s (share %s)",
+                            response.status_code,
+                            href,
+                            sharingToken,
+                        )
+                        return
 
                     # parse the response
                     soup = bs(response.text, features="xml")
@@ -1514,11 +1551,12 @@ class SyncMyMoodle:
 
                         if new_href == href:
                             logger.info(
-                                f"Skipping {new_href} because it is the current folder"
+                                "Sciebo: skipping %s because it is the current folder",
+                                new_href,
                             )
                             continue
 
-                        logger.info(f"response: {response.find('d:href').text}")
+                        logger.info("Sciebo response href: %s", new_href)
                         # get the displayname of the response
                         displayname = (
                             new_href.split("/")[-2]
@@ -1552,7 +1590,7 @@ class SyncMyMoodle:
                             )
 
                 get_sciebo_files(
-                    webdav_location, parent_node, sharingToken, auth_header
+                    webdav_location, sciebo_root, sharingToken, auth_header
                 )
 
 
