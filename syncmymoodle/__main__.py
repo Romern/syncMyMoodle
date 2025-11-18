@@ -80,9 +80,9 @@ class Node:
         self.type = type
         self.parent = parent
         self.children: List[Node] = []
-        self.additional_info = (
-            additional_info  # Currently only used for course_id in opencast
-        )
+        # Currently only used for course_id in opencast, auth header in sciebo,
+        # and may be extended for other module-specific data.
+        self.additional_info = additional_info
         self.timemodified = timemodified
         self.etag = etag
         self.is_downloaded = (
@@ -239,6 +239,10 @@ class SyncMyMoodle:
         # Per-course caches: mapping from course directory path to cached
         # course root node loaded from `.syncmymoodle_cache`.
         self._course_caches = {}
+        # Track repeated Opencast errors so we can hint at the RWTH
+        # status page without spamming messages
+        self._opencast_error_count = 0
+        self._opencast_status_hint_logged = False
 
     def cache_root_node(self):
         """Persist per-course caches into .syncmymoodle_cache files.
@@ -375,6 +379,26 @@ class SyncMyMoodle:
             digest = hashlib.file_digest(f, algo)
             return digest.hexdigest() == hex_str
 
+    def _log_opencast_backend_issue(self, response_body: str | None = None) -> None:
+        """Log additional context for repeated Opencast backend issues.
+
+        We keep the response body at INFO level (only shown with --verbose) and
+        emit a hint to the RWTH ITC status page once the error
+        counter exceeds a small threshold.
+        """
+        self._opencast_error_count += 1
+
+        if response_body:
+            logger.info(f"Opencast response body (truncated): {response_body[:1000]}")
+
+        if self._opencast_error_count >= 5 and not self._opencast_status_hint_logged:
+            logger.warning(
+                "Multiple Opencast backend errors occurred. Please check the RWTH "
+                "ITC status page before reporting an issue on GitHub: "
+                "https://maintenance.itc.rwth-aachen.de/ticket/status/messages/499"
+            )
+            self._opencast_status_hint_logged = True
+
     # RWTH SSO Login
 
     def login(self):
@@ -398,14 +422,14 @@ class SyncMyMoodle:
             "https://moodle.rwth-aachen.de/auth/shibboleth/index.php"
         )
         if resp.url.startswith("https://moodle.rwth-aachen.de/my/"):
-            soup = bs(resp.text, features="html.parser")
+            soup = bs(resp.text, features="lxml")
             self.session_key = get_session_key(soup)
             with cookie_file.open("wb") as f:
                 pickle.dump(self.session.cookies, f)
             return
 
         # Create a separate soup for maintenance detection
-        soup_check = bs(resp.text, features="html.parser")
+        soup_check = bs(resp.text, features="lxml")
 
         # Remove known info banners by class
         for banner in soup_check.select(".themeboostunioninfobanner"):
@@ -423,10 +447,10 @@ class SyncMyMoodle:
             logger.critical(
                 "Detected Maintenance mode! If this is an error, please report it on GitHub."
             )
-            logger.info("Cleaned page body:\n%s", body_text)
+            logger.info(f"Cleaned page body:\n{body_text}")
             sys.exit()
 
-        soup = bs(resp.text, features="html.parser")
+        soup = bs(resp.text, features="lxml")
         if soup.find("input", {"name": "RelayState"}) is None:
             csrf_token = soup.find("input", {"name": "csrf_token"})["value"]
             login_data = {
@@ -437,7 +461,7 @@ class SyncMyMoodle:
             }
             resp2 = self.session.post(resp.url, data=login_data)
 
-            soup = bs(resp2.text, features="html.parser")
+            soup = bs(resp2.text, features="lxml")
 
             if soup.find(id="fudis_selected_token_ids_input") is None:
                 logger.critical(
@@ -458,7 +482,7 @@ class SyncMyMoodle:
 
             resp3 = self.session.post(resp2.url, data=totp_selection_data)
 
-            soup = bs(resp3.text, features="html.parser")
+            soup = bs(resp3.text, features="lxml")
             if soup.find(id="fudis_otp_input") is None:
                 logger.critical(
                     "Failed to select TOTP generator! Maybe your TOTP serial number is wrong or the RWTH-Servers have difficulties, see https://maintenance.rz.rwth-aachen.de/ticket/status/messages . For more info use the --verbose argument."
@@ -483,7 +507,7 @@ class SyncMyMoodle:
             resp4 = self.session.post(resp3.url, data=totp_login_data)
 
             time.sleep(1)  # if we go too fast, we might have our connection closed
-            soup = bs(resp4.text, features="html.parser")
+            soup = bs(resp4.text, features="lxml")
         if soup.find("input", {"name": "RelayState"}) is None:
             logger.critical(
                 "Failed to login! Maybe your login-info was wrong or the RWTH-Servers have difficulties, see https://maintenance.rz.rwth-aachen.de/ticket/status/messages . For more info use the --verbose argument."
@@ -499,7 +523,7 @@ class SyncMyMoodle:
             "https://moodle.rwth-aachen.de/Shibboleth.sso/SAML2/POST", data=data
         )
         with cookie_file.open("wb") as f:
-            soup = bs(resp.text, features="html.parser")
+            soup = bs(resp.text, features="lxml")
             self.session_key = get_session_key(soup)
             pickle.dump(self.session.cookies, f)
 
@@ -906,7 +930,7 @@ class SyncMyMoodle:
                                 html_url = f'https://moodle.rwth-aachen.de/mod/h5pactivity/view.php?id={module["id"]}'
                                 html = bs(
                                     self.session.get(html_url).text,
-                                    features="html.parser",
+                                    features="lxml",
                                 )
                                 # Get h5p iframe
                                 iframe = html.find("iframe")
@@ -914,7 +938,7 @@ class SyncMyMoodle:
                                     iframe_html = str(
                                         bs(
                                             self.session.get(iframe.attrs["src"]).text,
-                                            features="html.parser",
+                                            features="lxml",
                                         )
                                     )
                                     # Moodle devs dont know how to use CDATA correctly, so we need to remove all backslashes
@@ -944,7 +968,7 @@ class SyncMyMoodle:
                         ).get("url", {}).get("opencast", {}):
                             info_url = f'https://moodle.rwth-aachen.de/mod/lti/launch.php?id={module["id"]}&triggerview=0'
                             info_res = bs(
-                                self.session.get(info_url).text, features="html.parser"
+                                self.session.get(info_url).text, features="lxml"
                             )
                             # FIXME: For now we assume that all lti modules will lead to an opencast video
                             engage_id = info_res.find("input", {"name": "custom_id"})
@@ -976,7 +1000,7 @@ class SyncMyMoodle:
                         ).get("url", {}).get("quiz", {}):
                             info_url = f'https://moodle.rwth-aachen.de/mod/quiz/view.php?id={module["id"]}'
                             info_res = bs(
-                                self.session.get(info_url).text, features="html.parser"
+                                self.session.get(info_url).text, features="lxml"
                             )
                             attempts = info_res.findAll(
                                 "a",
@@ -990,7 +1014,7 @@ class SyncMyMoodle:
                                 review_url = attempt.get("href")
                                 quiz_res = bs(
                                     self.session.get(review_url).text,
-                                    features="html.parser",
+                                    features="lxml",
                                 )
                                 name = (
                                     quiz_res.find("title")
@@ -1082,6 +1106,17 @@ class SyncMyMoodle:
         """Download file with progress bar if it isn't already downloaded"""
         downloadpath = self.get_sanitized_node_path(node)
 
+        # If we already downloaded this path during the current run, skip any
+        # further processing. This avoids duplicate downloads and spurious
+        # conflicts when the same remote file appears multiple times in the
+        # node tree (e.g. Sciebo links reused in a course).
+        if hasattr(self, "_downloaded_paths"):
+            if downloadpath in self._downloaded_paths:
+                return True
+        else:
+            # Initialise on first use to keep __init__ simple.
+            self._downloaded_paths = set()
+
         # Decide whether we need to (re-)download the file at all
         cached_timemodified = None
         old_node = None
@@ -1093,9 +1128,23 @@ class SyncMyMoodle:
             old_node = self._get_old_node_for(node)
             if old_node is not None:
                 cached_timemodified = getattr(old_node, "timemodified", None)
-                # If Moodle did not change the file, skip re-download
+                old_etag = getattr(old_node, "etag", None)
+                # If Moodle did not change the file, skip re-download.
                 if node.timemodified == cached_timemodified:
                     return True
+                # For Sciebo, we use the etag from the previous run as the
+                # remote version marker. If it matches the current etag from
+                # the PROPFIND response, the remote file has not changed.
+                if (
+                    cached_timemodified is None
+                    and old_etag
+                    and getattr(node, "etag", None) == old_etag
+                ):
+                    # Additionally, on the first run with a cache, the local file
+                    # may already match this etag (e.g. previously downloaded
+                    # manually). If so, we can safely skip any download.
+                    if self._local_file_matches_etag(downloadpath, old_etag):
+                        return True
 
             # At this point, either there is no cache for this course/path, or
             # Moodle reports a different modification time. This means the
@@ -1130,19 +1179,27 @@ class SyncMyMoodle:
                     except (OSError, ValueError):
                         local_conflict = True
                 else:
-                    # No previous cache for this file. Before treating this as a
-                    # conflict, try to detect if the local file already matches
-                    # the *current* Moodle content via the ETag.
-                    remote_etag = None
-                    try:
-                        head_resp = self.session.head(node.url, allow_redirects=True)
-                        remote_etag = head_resp.headers.get("ETag")
-                    except Exception:
-                        remote_etag = None
+                    # No previous etag and no previous timemodified: this usually
+                    # means the file existed before we ever cached it. Before we
+                    # treat this as a conflict, try to see if the local file
+                    # already matches the *current* remote content using the
+                    # ETag from either the Sciebo PROPFIND or a Moodle HEAD
+                    # request.
+                    remote_etag = getattr(node, "etag", None)
+                    if remote_etag is None and node.url:
+                        try:
+                            head_resp = self.session.head(
+                                node.url, allow_redirects=True
+                            )
+                            remote_etag = head_resp.headers.get("ETag")
+                        except Exception:
+                            remote_etag = None
 
                     if remote_etag and self._local_file_matches_etag(
                         downloadpath, remote_etag
                     ):
+                        # Local file already equals the current remote content,
+                        # so there is no conflict and no need to download again.
                         node.etag = remote_etag
                         if getattr(node, "timemodified", None) is not None:
                             try:
@@ -1150,12 +1207,12 @@ class SyncMyMoodle:
                                 os.utime(downloadpath, (ts, ts))
                             except (OSError, OverflowError, ValueError):
                                 pass
-                        # Local file matches current Moodle content, so no conflict.
                         return True
 
-                    # Without a previous Moodle timestamp or ETag match we cannot
-                    # reliably tell if the local file was changed by the user, so
-                    # treat this as a potential conflict.
+                    # At this point we know the local file differs from the
+                    # current remote version (or we couldn't verify), and we
+                    # have no prior cached state. Treat this as a potential
+                    # conflict to avoid silently overwriting user changes.
                     local_conflict = True
 
             if local_conflict:
@@ -1203,24 +1260,35 @@ class SyncMyMoodle:
         tmp_downloadpath = downloadpath.with_suffix(downloadpath.suffix + ".temp")
         if tmp_downloadpath.exists():
             resume_size = tmp_downloadpath.stat().st_size
-            header = {"Range": f"bytes= {resume_size}-"}
+            header = {"Range": f"bytes={resume_size}-"}
         else:
             resume_size = 0
             header = dict()
+        if node.type.lower() == "sciebo file":
+            header = {**header, **node.additional_info}
 
         with closing(
             self.session.get(node.url, headers=header, stream=True)
         ) as response:
             etag_header = response.headers.get("ETag")
             print(f"Downloading {downloadpath} [{node.type}]")
-            total_size_in_bytes = (
-                int(response.headers.get("content-length", 0)) + resume_size
+            # If we attempted to resume but the server did not honor the Range
+            # header (status != 206), fallback to a full download and ignore
+            # the existing partial file to avoid corrupting PDFs or other
+            # content by appending a second full copy.
+            if resume_size and response.status_code != 206:
+                resume_size = 0
+                tmp_downloadpath.unlink(missing_ok=True)
+
+            total_size_in_bytes = int(response.headers.get("content-length", 0)) + max(
+                resume_size, 0
             )
             progress_bar = tqdm(total=total_size_in_bytes, unit="iB", unit_scale=True)
             if resume_size:
                 progress_bar.update(resume_size)
             downloadpath.parent.mkdir(parents=True, exist_ok=True)
-            with tmp_downloadpath.open("ab") as file:
+            mode = "ab" if resume_size else "wb"
+            with tmp_downloadpath.open(mode) as file:
                 for data in response.iter_content(self.block_size):
                     progress_bar.update(len(data))
                     file.write(data)
@@ -1243,6 +1311,8 @@ class SyncMyMoodle:
                 except Exception:
                     # If for some reason we cannot set it, just ignore.
                     pass
+            # Remember that we downloaded this path during the current run.
+            self._downloaded_paths.add(downloadpath)
             return True
 
     def getOpenCastRealURL(self, additional_info, url):
@@ -1262,7 +1332,7 @@ class SyncMyMoodle:
 
         # submit engage authentication info
         try:
-            engageDataSoup = bs(response.json()[0]["data"], features="html.parser")
+            engageDataSoup = bs(response.json()[0]["data"], features="lxml")
         except Exception as e:
             logger.exception("Failed to parse Opencast response!")
             logger.info("------Opencast-Error------")
@@ -1280,9 +1350,37 @@ class SyncMyMoodle:
             "https://engage.streaming.rwth-aachen.de/play/([a-z0-9-]{36})$", url
         )
         if not linkid:
+            logger.warning(f"Opencast: could not extract episode id from url {url}")
             return False
-        episodejson = f"https://engage.streaming.rwth-aachen.de/search/episode.json?id={linkid.groups()[0]}"
-        episodejson = json.loads(self.session.get(episodejson).text)
+
+        episode_url = (
+            "https://engage.streaming.rwth-aachen.de/search/episode.json"
+            f"?id={linkid.groups()[0]}"
+        )
+        try:
+            episode_response = self.session.get(episode_url)
+        except Exception:
+            logger.exception(
+                "Opencast: failed to fetch episode metadata from %s", episode_url
+            )
+            self._log_opencast_backend_issue(None)
+            return False
+
+        if not (200 <= episode_response.status_code < 300):
+            logger.error(
+                "Opencast: episode.json returned status %s for %s",
+                episode_response.status_code,
+                episode_url,
+            )
+            self._log_opencast_backend_issue(episode_response.text)
+            return False
+
+        try:
+            episodejson = episode_response.json()
+        except ValueError:
+            logger.error("Opencast: failed to decode JSON from %s", episode_url)
+            self._log_opencast_backend_issue(episode_response.text)
+            return False
 
         # Collect tracks from all mediapackages
         mediapackages = [
@@ -1343,7 +1441,7 @@ class SyncMyMoodle:
         if (path / f"{node.name}.pdf").exists():
             return True
 
-        quiz_res = bs(self.session.get(node.url).text, features="html.parser")
+        quiz_res = bs(self.session.get(node.url).text, features="lxml")
 
         # i need to hide the left nav element because its obscuring the quiz in the resulting pdf
         for nav in quiz_res.findAll("div", {"id": "nav-drawer"}):
@@ -1393,7 +1491,7 @@ class SyncMyMoodle:
                     return
                 elif not self.config.get("nolinks"):
                     response = self.session.get(text)
-                    tempsoup = bs(response.text, features="html.parser")
+                    tempsoup = bs(response.text, features="lxml")
                     videojs = tempsoup.select_one(".video-js")
                     if videojs:
                         videojs = videojs.select_one("source")
@@ -1455,18 +1553,187 @@ class SyncMyMoodle:
 
         # https://rwth-aachen.sciebo.de/s/XXX
         if self.config.get("used_modules", {}).get("url", {}).get("sciebo", {}):
-            sciebo_links = re.findall(
-                "https://rwth-aachen.sciebo.de/s/[a-zA-Z0-9-]+", text
+            sciebo_links = set(
+                re.findall("https://rwth-aachen.sciebo.de/s/[a-zA-Z0-9-]+", text)
             )
-            for vid in sciebo_links:
-                response = self.session.get(vid)
-                soup = bs(response.text, features="html.parser")
-                url = soup.find("input", {"name": "downloadURL"})
-                filename = soup.find("input", {"name": "filename"})
-                if url and filename:
-                    parent_node.add_child(
-                        filename["value"], url["value"], "Sciebo file", url=url["value"]
+            sciebo_url = "https://rwth-aachen.sciebo.de"
+            webdav_location = "/public.php/webdav/"
+            for link in sciebo_links:
+                logger.info(f"Found Sciebo Link: {link}")
+
+                # get the download page
+                try:
+                    response = self.session.get(link)
+                except Exception:
+                    logger.exception(f"Failed to fetch Sciebo link {link}")
+                    continue
+
+                # parse html code
+                soup = bs(response.text, features="lxml")
+
+                # get the requesttoken
+                requestToken = (
+                    soup.head.get("data-requesttoken")
+                    if soup.head is not None
+                    else None
+                )
+                if not requestToken:
+                    logger.warning(
+                        "Sciebo: missing request token for link %s, skipping", link
                     )
+                    continue
+                logger.info(f"Sciebo request token: {requestToken}")
+
+                # get the property value of the input tag with the name sharingToken
+                sharing_input = soup.find("input", {"name": "sharingToken"})
+                if not sharing_input or not sharing_input.get("value"):
+                    logger.warning(
+                        "Sciebo: missing sharingToken for link %s, skipping", link
+                    )
+                    continue
+                sharingToken = sharing_input["value"]
+                logger.info(f"Sciebo sharingToken: {sharingToken}")
+
+                # get baseauthentication secret
+                baseAuthSecret = base64.b64encode(
+                    f"{sharingToken}:null".encode()
+                ).decode()
+                logger.info("Sciebo base auth secret derived")
+
+                # get auth header
+                auth_header = {
+                    "Authorization": f"Basic {baseAuthSecret}",
+                    "requesttoken": requestToken,
+                }
+
+                sciebo_root = parent_node.add_child(
+                    f"sciebo-{sharingToken}", None, "Sciebo Folder"
+                )
+                if sciebo_root is None:
+                    # Duplicate folder/link, nothing more to do here
+                    continue
+
+                # recursive function to get all files in the sciebo folder
+                def get_sciebo_files(
+                    href: str, parent_node: Node, sharingToken: str, auth_header: dict
+                ):
+
+                    # request the URL with the PROPFIND method and a body that
+                    # also asks Sciebo/Nextcloud to include content checksums
+                    # (oc:checksums) for each item. These checksums are stable
+                    # content hashes (e.g. SHA1) and allow us to safely compare
+                    # local files against the current remote content without
+                    # relying on ETags.
+                    propfind_body = """<?xml version="1.0" encoding="UTF-8"?>
+<d:propfind xmlns:d="DAV:" xmlns:oc="http://owncloud.org/ns">
+  <d:prop>
+    <d:getlastmodified/>
+    <d:getetag/>
+    <oc:checksums/>
+  </d:prop>
+</d:propfind>"""
+                    headers = {
+                        **auth_header,
+                        "Depth": "1",
+                        "Content-Type": "application/xml",
+                    }
+                    try:
+                        propfind_response = self.session.request(
+                            "PROPFIND",
+                            sciebo_url + href,
+                            headers=headers,
+                            data=propfind_body,
+                        )
+                    except Exception:
+                        logger.exception(
+                            "Sciebo PROPFIND failed for href %s (share %s)",
+                            href,
+                            sharingToken,
+                        )
+                        return
+
+                    if not (200 <= propfind_response.status_code < 300):
+                        logger.warning(
+                            "Sciebo PROPFIND returned status %s for href %s (share %s)",
+                            propfind_response.status_code,
+                            href,
+                            sharingToken,
+                        )
+                        return
+
+                    # parse the response
+                    soup_xml = bs(propfind_response.text, features="xml")
+
+                    for resp in soup_xml.find_all("d:response"):
+                        # get the href of the response
+                        href_tag = resp.find("d:href")
+                        if href_tag is None or not href_tag.text:
+                            continue
+                        new_href = href_tag.text
+
+                        if new_href == href:
+                            logger.info(
+                                "Sciebo: skipping %s because it is the current folder",
+                                new_href,
+                            )
+                            continue
+
+                        # Extract a stable content hash for this item. Prefer the
+                        # SHA1 checksum from oc:checksums if available; fall back
+                        # to the raw ETag otherwise.
+                        etag_value = None
+                        prop = resp.find("d:prop")
+                        if prop is not None:
+                            checksums_tag = prop.find("oc:checksums")
+                            if checksums_tag is not None:
+                                for cs in checksums_tag.find_all("oc:checksum"):
+                                    text = (cs.text or "").strip()
+                                    if text.upper().startswith("SHA1:"):
+                                        etag_value = text.split(":", 1)[1]
+                                        break
+
+                            if etag_value is None:
+                                etag_tag = prop.find("d:getetag")
+                                if etag_tag and etag_tag.text:
+                                    etag_value = etag_tag.text.strip()
+
+                        logger.info(f"Sciebo response href: {new_href}")
+                        # get the displayname of the response
+                        displayname = (
+                            new_href.split("/")[-2]
+                            if new_href.endswith("/")
+                            else new_href.split("/")[-1]
+                        )
+                        displayname = (
+                            f"sciebo-{sharingToken}"
+                            if displayname == "webdav"
+                            else displayname
+                        )
+
+                        # check if the response is a folder
+                        if new_href.endswith("/"):
+                            # create a new node for the folder
+                            folder_node = parent_node.add_child(
+                                displayname, None, "Sciebo Folder", etag=etag_value
+                            )
+                            # recursive call to get all files in the folder
+                            get_sciebo_files(
+                                new_href, folder_node, sharingToken, auth_header
+                            )
+                        else:
+                            # create a new node for the file
+                            parent_node.add_child(
+                                displayname,
+                                None,
+                                "Sciebo File",
+                                url=sciebo_url + new_href,
+                                additional_info=auth_header,
+                                etag=etag_value,
+                            )
+
+                get_sciebo_files(
+                    webdav_location, sciebo_root, sharingToken, auth_header
+                )
 
 
 def main():
@@ -1718,6 +1985,19 @@ def main():
     smm.download_all_files()
     print("Saving root node as cache...")
     smm.cache_root_node()
+
+    # If we saw multiple Opencast backend errors send a reminder
+    # to check the RWTH ITC status page before filing a bug.
+    try:
+        if smm._opencast_error_count >= 5:
+            logger.warning(
+                "Multiple Opencast backend errors occurred. Please check the RWTH "
+                "ITC status page before reporting an issue on GitHub: "
+                "https://maintenance.itc.rwth-aachen.de/ticket/status/messages/499"
+            )
+    except Exception:
+        # Never let summary logging break the main flow.
+        pass
 
 
 if __name__ == "__main__":
