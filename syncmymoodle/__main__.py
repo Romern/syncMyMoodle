@@ -389,14 +389,9 @@ class SyncMyMoodle:
         self._opencast_error_count += 1
 
         if response_body:
-            logger.info(
-                f"Opencast response body (truncated): {response_body[:1000]}"
-            )
+            logger.info(f"Opencast response body (truncated): {response_body[:1000]}")
 
-        if (
-            self._opencast_error_count >= 5
-            and not self._opencast_status_hint_logged
-        ):
+        if self._opencast_error_count >= 5 and not self._opencast_status_hint_logged:
             logger.warning(
                 "Multiple Opencast backend errors occurred. Please check the RWTH "
                 "ITC status page before reporting an issue on GitHub: "
@@ -1374,9 +1369,7 @@ class SyncMyMoodle:
         try:
             episodejson = episode_response.json()
         except ValueError:
-            logger.error(
-                "Opencast: failed to decode JSON from %s", episode_url
-            )
+            logger.error("Opencast: failed to decode JSON from %s", episode_url)
             self._log_opencast_backend_issue(episode_response.text)
             return False
 
@@ -1571,7 +1564,9 @@ class SyncMyMoodle:
 
                 # get the requesttoken
                 requestToken = (
-                    soup.head.get("data-requesttoken") if soup.head is not None else None
+                    soup.head.get("data-requesttoken")
+                    if soup.head is not None
+                    else None
                 )
                 if not requestToken:
                     logger.warning(
@@ -1635,7 +1630,10 @@ class SyncMyMoodle:
                     }
                     try:
                         propfind_response = self.session.request(
-                            "PROPFIND", sciebo_url + href, headers=headers, data=propfind_body
+                            "PROPFIND",
+                            sciebo_url + href,
+                            headers=headers,
+                            data=propfind_body,
                         )
                     except Exception:
                         logger.exception(
