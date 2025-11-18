@@ -21,10 +21,11 @@ close to tagging so new merges don't overwrite your edits.
 
 1. Build sdist + wheel via `python -m build`.
 2. Push both archives to TestPyPI and PyPI using Trusted Publishing (OIDC).
-3. Publish the curated release draft and upload the built artifacts to it.
+3. Flip the existing Release Drafter draft from "draft" to "published" (no body
+   changes) and then upload the freshly built artifacts to that release.
 
 Since this uses Trusted Publishing you don't need API tokens, but PyPI/TestPyPI
-must trust the workflow first.
+must trust the workflow.
 
 ## Trusted Publishing setup
 
@@ -45,10 +46,11 @@ must trust the workflow first.
    git tag 0.2.4
    git push origin 0.2.4
    ```
-4. Watch the "Publish Release" workflow. Approve the Trusted Publishing request
-   on PyPI/TestPyPI if one pops up (didn't have that happen for me yet).
-5. Once it's green, PyPI/TestPyPI have the new files and the GitHub release is
-   live with the release notes + artifacts.
+4. Double-check that there's a Release Drafter draft whose name matches your tag
+   (tweak the text now if needed), then watch the "Publish Release" workflow.
+   Approve the Trusted Publishing request on PyPI/TestPyPI if one pops up.
+5. Once it's green, PyPI/TestPyPI have the new files and GitHub shows your draft
+   as a published release with the same notes + the uploaded artifacts.
 
 To re-run the workflow, use the Actions
 tab -> **Publish Release -> Run workflow**.

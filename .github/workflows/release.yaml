@@ -97,16 +97,30 @@ jobs:
           name: syncmymoodle-dist
           path: dist
 
-      - name: Publish curated release notes
-        id: publish_release
-        uses: release-drafter/release-drafter@v6
-        with:
-          publish: true
-          tag: ${{ github.ref_name }}
+      - name: Publish curated draft release
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          TAG_NAME: ${{ github.ref_name }}
+          TARGET_SHA: ${{ github.sha }}
+        run: |
+          release_id=$(gh api repos/$GH_REPO/releases \
+            --paginate \
+            --jq '.[] | select(.draft == true and .name == env.TAG_NAME) | .id')
+
+          if [ -z "$release_id" ]; then
+            echo "Draft release \"${TAG_NAME}\" not found. Make sure Release Drafter created it and the name matches the tag." >&2
+            exit 1
+          fi
+
+          gh api repos/$GH_REPO/releases/$release_id \
+            --method PATCH \
+            -f draft=false \
+            -f tag_name=$TAG_NAME \
+            -f target_commitish=$TARGET_SHA
 
       - name: Upload release artifacts
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
         run: gh release upload ${{ github.ref_name }} dist/* --clobber
