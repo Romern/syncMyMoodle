@@ -1082,6 +1082,17 @@ class SyncMyMoodle:
         """Download file with progress bar if it isn't already downloaded"""
         downloadpath = self.get_sanitized_node_path(node)
 
+        # If we already downloaded this path during the current run, skip any
+        # further processing. This avoids duplicate downloads and spurious
+        # conflicts when the same remote file appears multiple times in the
+        # node tree (e.g. Sciebo links reused in a course).
+        if hasattr(self, "_downloaded_paths"):
+            if downloadpath in self._downloaded_paths:
+                return True
+        else:
+            # Initialise on first use to keep __init__ simple.
+            self._downloaded_paths = set()
+
         # Decide whether we need to (re-)download the file at all
         cached_timemodified = None
         old_node = None
@@ -1093,9 +1104,23 @@ class SyncMyMoodle:
             old_node = self._get_old_node_for(node)
             if old_node is not None:
                 cached_timemodified = getattr(old_node, "timemodified", None)
-                # If Moodle did not change the file, skip re-download
+                old_etag = getattr(old_node, "etag", None)
+                # If Moodle did not change the file, skip re-download.
                 if node.timemodified == cached_timemodified:
                     return True
+                # For Sciebo, we use the etag from the previous run as the
+                # remote version marker. If it matches the current etag from
+                # the PROPFIND response, the remote file has not changed.
+                if (
+                    cached_timemodified is None
+                    and old_etag
+                    and getattr(node, "etag", None) == old_etag
+                ):
+                    # Additionally, on the first run with a cache, the local file
+                    # may already match this etag (e.g. previously downloaded
+                    # manually). If so, we can safely skip any download.
+                    if self._local_file_matches_etag(downloadpath, old_etag):
+                        return True
 
             # At this point, either there is no cache for this course/path, or
             # Moodle reports a different modification time. This means the
@@ -1130,19 +1155,27 @@ class SyncMyMoodle:
                     except (OSError, ValueError):
                         local_conflict = True
                 else:
-                    # No previous cache for this file. Before treating this as a
-                    # conflict, try to detect if the local file already matches
-                    # the *current* Moodle content via the ETag.
-                    remote_etag = None
-                    try:
-                        head_resp = self.session.head(node.url, allow_redirects=True)
-                        remote_etag = head_resp.headers.get("ETag")
-                    except Exception:
-                        remote_etag = None
+                    # No previous etag and no previous timemodified: this usually
+                    # means the file existed before we ever cached it. Before we
+                    # treat this as a conflict, try to see if the local file
+                    # already matches the *current* remote content using the
+                    # ETag from either the Sciebo PROPFIND or a Moodle HEAD
+                    # request.
+                    remote_etag = getattr(node, "etag", None)
+                    if remote_etag is None and node.url:
+                        try:
+                            head_resp = self.session.head(
+                                node.url, allow_redirects=True
+                            )
+                            remote_etag = head_resp.headers.get("ETag")
+                        except Exception:
+                            remote_etag = None
 
                     if remote_etag and self._local_file_matches_etag(
                         downloadpath, remote_etag
                     ):
+                        # Local file already equals the current remote content,
+                        # so there is no conflict and no need to download again.
                         node.etag = remote_etag
                         if getattr(node, "timemodified", None) is not None:
                             try:
@@ -1150,12 +1183,12 @@ class SyncMyMoodle:
                                 os.utime(downloadpath, (ts, ts))
                             except (OSError, OverflowError, ValueError):
                                 pass
-                        # Local file matches current Moodle content, so no conflict.
                         return True
 
-                    # Without a previous Moodle timestamp or ETag match we cannot
-                    # reliably tell if the local file was changed by the user, so
-                    # treat this as a potential conflict.
+                    # At this point we know the local file differs from the
+                    # current remote version (or we couldn't verify), and we
+                    # have no prior cached state. Treat this as a potential
+                    # conflict to avoid silently overwriting user changes.
                     local_conflict = True
 
             if local_conflict:
@@ -1245,6 +1278,8 @@ class SyncMyMoodle:
                 except Exception:
                     # If for some reason we cannot set it, just ignore.
                     pass
+            # Remember that we downloaded this path during the current run.
+            self._downloaded_paths.add(downloadpath)
             return True
 
     def getOpenCastRealURL(self, additional_info, url):
@@ -1520,10 +1555,28 @@ class SyncMyMoodle:
                     href: str, parent_node: Node, sharingToken: str, auth_header: dict
                 ):
 
-                    # request the URL with the PROPFIND method and the header
+                    # request the URL with the PROPFIND method and a body that
+                    # also asks Sciebo/Nextcloud to include content checksums
+                    # (oc:checksums) for each item. These checksums are stable
+                    # content hashes (e.g. SHA1) and allow us to safely compare
+                    # local files against the current remote content without
+                    # relying on ETags.
+                    propfind_body = """<?xml version="1.0" encoding="UTF-8"?>
+<d:propfind xmlns:d="DAV:" xmlns:oc="http://owncloud.org/ns">
+  <d:prop>
+    <d:getlastmodified/>
+    <d:getetag/>
+    <oc:checksums/>
+  </d:prop>
+</d:propfind>"""
+                    headers = {
+                        **auth_header,
+                        "Depth": "1",
+                        "Content-Type": "application/xml",
+                    }
                     try:
-                        response = self.session.request(
-                            "PROPFIND", sciebo_url + href, headers=auth_header
+                        propfind_response = self.session.request(
+                            "PROPFIND", sciebo_url + href, headers=headers, data=propfind_body
                         )
                     except Exception:
                         logger.exception(
@@ -1533,21 +1586,24 @@ class SyncMyMoodle:
                         )
                         return
 
-                    if not (200 <= response.status_code < 300):
+                    if not (200 <= propfind_response.status_code < 300):
                         logger.warning(
                             "Sciebo PROPFIND returned status %s for href %s (share %s)",
-                            response.status_code,
+                            propfind_response.status_code,
                             href,
                             sharingToken,
                         )
                         return
 
                     # parse the response
-                    soup = bs(response.text, features="xml")
+                    soup_xml = bs(propfind_response.text, features="xml")
 
-                    for response in soup.find_all("d:response"):
+                    for resp in soup_xml.find_all("d:response"):
                         # get the href of the response
-                        new_href = response.find("d:href").text
+                        href_tag = resp.find("d:href")
+                        if href_tag is None or not href_tag.text:
+                            continue
+                        new_href = href_tag.text
 
                         if new_href == href:
                             logger.info(
@@ -1555,6 +1611,25 @@ class SyncMyMoodle:
                                 new_href,
                             )
                             continue
+
+                        # Extract a stable content hash for this item. Prefer the
+                        # SHA1 checksum from oc:checksums if available; fall back
+                        # to the raw ETag otherwise.
+                        etag_value = None
+                        prop = resp.find("d:prop")
+                        if prop is not None:
+                            checksums_tag = prop.find("oc:checksums")
+                            if checksums_tag is not None:
+                                for cs in checksums_tag.find_all("oc:checksum"):
+                                    text = (cs.text or "").strip()
+                                    if text.upper().startswith("SHA1:"):
+                                        etag_value = text.split(":", 1)[1]
+                                        break
+
+                            if etag_value is None:
+                                etag_tag = prop.find("d:getetag")
+                                if etag_tag and etag_tag.text:
+                                    etag_value = etag_tag.text.strip()
 
                         logger.info("Sciebo response href: %s", new_href)
                         # get the displayname of the response
@@ -1573,7 +1648,7 @@ class SyncMyMoodle:
                         if new_href.endswith("/"):
                             # create a new node for the folder
                             folder_node = parent_node.add_child(
-                                displayname, None, "Sciebo Folder"
+                                displayname, None, "Sciebo Folder", etag=etag_value
                             )
                             # recursive call to get all files in the folder
                             get_sciebo_files(
@@ -1587,6 +1662,7 @@ class SyncMyMoodle:
                                 "Sciebo File",
                                 url=sciebo_url + new_href,
                                 additional_info=auth_header,
+                                etag=etag_value,
                             )
 
                 get_sciebo_files(
