@@ -237,3 +237,8 @@ in the configuration file.
 If everything went alright, you won't need to enter your password again
 in the future, as it will be obtained automatically and securely from
 the Secret Service Integration.
+
+
+## Maintenance
+
+Information to create releases and publish them can be found in `docs/releasing.md`.

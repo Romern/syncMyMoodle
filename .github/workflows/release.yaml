@@ -3,7 +3,7 @@ name: Publish Release
 on:
   push:
     tags:
-      - "v*"
+      - "*.*.*"
   workflow_dispatch:
 
 permissions:
@@ -97,8 +97,16 @@ jobs:
           name: syncmymoodle-dist
           path: dist
 
-      - name: Publish release
-        uses: softprops/action-gh-release@v1
+      - name: Publish curated release notes
+        id: publish_release
+        uses: release-drafter/release-drafter@v6
         with:
-          files: dist/*
-          generate_release_notes: true
+          publish: true
+          tag: ${{ github.ref_name }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Upload release artifacts
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh release upload ${{ github.ref_name }} dist/* --clobber
