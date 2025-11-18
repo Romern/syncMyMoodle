@@ -239,6 +239,10 @@ class SyncMyMoodle:
         # Per-course caches: mapping from course directory path to cached
         # course root node loaded from `.syncmymoodle_cache`.
         self._course_caches = {}
+        # Track repeated Opencast errors so we can hint at the RWTH
+        # status page without spamming messages
+        self._opencast_error_count = 0
+        self._opencast_status_hint_logged = False
 
     def cache_root_node(self):
         """Persist per-course caches into .syncmymoodle_cache files.
@@ -375,6 +379,31 @@ class SyncMyMoodle:
             digest = hashlib.file_digest(f, algo)
             return digest.hexdigest() == hex_str
 
+    def _log_opencast_backend_issue(self, response_body: str | None = None) -> None:
+        """Log additional context for repeated Opencast backend issues.
+
+        We keep the response body at INFO level (only shown with --verbose) and
+        emit a hint to the RWTH ITC status page once the error
+        counter exceeds a small threshold.
+        """
+        self._opencast_error_count += 1
+
+        if response_body:
+            logger.info(
+                f"Opencast response body (truncated): {response_body[:1000]}"
+            )
+
+        if (
+            self._opencast_error_count >= 5
+            and not self._opencast_status_hint_logged
+        ):
+            logger.warning(
+                "Multiple Opencast backend errors occurred. Please check the RWTH "
+                "ITC status page before reporting an issue on GitHub: "
+                "https://maintenance.itc.rwth-aachen.de/ticket/status/messages/499"
+            )
+            self._opencast_status_hint_logged = True
+
     # RWTH SSO Login
 
     def login(self):
@@ -423,7 +452,7 @@ class SyncMyMoodle:
             logger.critical(
                 "Detected Maintenance mode! If this is an error, please report it on GitHub."
             )
-            logger.info("Cleaned page body:\n%s", body_text)
+            logger.info(f"Cleaned page body:\n{body_text}")
             sys.exit()
 
         soup = bs(resp.text, features="lxml")
@@ -1317,9 +1346,39 @@ class SyncMyMoodle:
             "https://engage.streaming.rwth-aachen.de/play/([a-z0-9-]{36})$", url
         )
         if not linkid:
+            logger.warning(f"Opencast: could not extract episode id from url {url}")
             return False
-        episodejson = f"https://engage.streaming.rwth-aachen.de/search/episode.json?id={linkid.groups()[0]}"
-        episodejson = json.loads(self.session.get(episodejson).text)
+
+        episode_url = (
+            "https://engage.streaming.rwth-aachen.de/search/episode.json"
+            f"?id={linkid.groups()[0]}"
+        )
+        try:
+            episode_response = self.session.get(episode_url)
+        except Exception:
+            logger.exception(
+                "Opencast: failed to fetch episode metadata from %s", episode_url
+            )
+            self._log_opencast_backend_issue(None)
+            return False
+
+        if not (200 <= episode_response.status_code < 300):
+            logger.error(
+                "Opencast: episode.json returned status %s for %s",
+                episode_response.status_code,
+                episode_url,
+            )
+            self._log_opencast_backend_issue(episode_response.text)
+            return False
+
+        try:
+            episodejson = episode_response.json()
+        except ValueError:
+            logger.error(
+                "Opencast: failed to decode JSON from %s", episode_url
+            )
+            self._log_opencast_backend_issue(episode_response.text)
+            return False
 
         # Collect tracks from all mediapackages
         mediapackages = [
@@ -1504,7 +1563,7 @@ class SyncMyMoodle:
                 try:
                     response = self.session.get(link)
                 except Exception:
-                    logger.exception("Failed to fetch Sciebo link %s", link)
+                    logger.exception(f"Failed to fetch Sciebo link {link}")
                     continue
 
                 # parse html code
@@ -1519,7 +1578,7 @@ class SyncMyMoodle:
                         "Sciebo: missing request token for link %s, skipping", link
                     )
                     continue
-                logger.info("Sciebo request token: %s", requestToken)
+                logger.info(f"Sciebo request token: {requestToken}")
 
                 # get the property value of the input tag with the name sharingToken
                 sharing_input = soup.find("input", {"name": "sharingToken"})
@@ -1529,7 +1588,7 @@ class SyncMyMoodle:
                     )
                     continue
                 sharingToken = sharing_input["value"]
-                logger.info("Sciebo sharingToken: %s", sharingToken)
+                logger.info(f"Sciebo sharingToken: {sharingToken}")
 
                 # get baseauthentication secret
                 baseAuthSecret = base64.b64encode(
@@ -1631,7 +1690,7 @@ class SyncMyMoodle:
                                 if etag_tag and etag_tag.text:
                                     etag_value = etag_tag.text.strip()
 
-                        logger.info("Sciebo response href: %s", new_href)
+                        logger.info(f"Sciebo response href: {new_href}")
                         # get the displayname of the response
                         displayname = (
                             new_href.split("/")[-2]
@@ -1919,6 +1978,19 @@ def main():
     smm.download_all_files()
     print("Saving root node as cache...")
     smm.cache_root_node()
+
+    # If we saw multiple Opencast backend errors send a reminder
+    # to check the RWTH ITC status page before filing a bug.
+    try:
+        if smm._opencast_error_count >= 5:
+            logger.warning(
+                "Multiple Opencast backend errors occurred. Please check the RWTH "
+                "ITC status page before reporting an issue on GitHub: "
+                "https://maintenance.itc.rwth-aachen.de/ticket/status/messages/499"
+            )
+    except Exception:
+        # Never let summary logging break the main flow.
+        pass
 
 
 if __name__ == "__main__":
