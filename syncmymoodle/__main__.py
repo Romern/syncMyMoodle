@@ -398,14 +398,14 @@ class SyncMyMoodle:
             "https://moodle.rwth-aachen.de/auth/shibboleth/index.php"
         )
         if resp.url.startswith("https://moodle.rwth-aachen.de/my/"):
-            soup = bs(resp.text, features="html.parser")
+            soup = bs(resp.text, features="lxml")
             self.session_key = get_session_key(soup)
             with cookie_file.open("wb") as f:
                 pickle.dump(self.session.cookies, f)
             return
 
         # Create a separate soup for maintenance detection
-        soup_check = bs(resp.text, features="html.parser")
+        soup_check = bs(resp.text, features="lxml")
 
         # Remove known info banners by class
         for banner in soup_check.select(".themeboostunioninfobanner"):
@@ -426,7 +426,7 @@ class SyncMyMoodle:
             logger.info("Cleaned page body:\n%s", body_text)
             sys.exit()
 
-        soup = bs(resp.text, features="html.parser")
+        soup = bs(resp.text, features="lxml")
         if soup.find("input", {"name": "RelayState"}) is None:
             csrf_token = soup.find("input", {"name": "csrf_token"})["value"]
             login_data = {
@@ -437,7 +437,7 @@ class SyncMyMoodle:
             }
             resp2 = self.session.post(resp.url, data=login_data)
 
-            soup = bs(resp2.text, features="html.parser")
+            soup = bs(resp2.text, features="lxml")
 
             if soup.find(id="fudis_selected_token_ids_input") is None:
                 logger.critical(
@@ -458,7 +458,7 @@ class SyncMyMoodle:
 
             resp3 = self.session.post(resp2.url, data=totp_selection_data)
 
-            soup = bs(resp3.text, features="html.parser")
+            soup = bs(resp3.text, features="lxml")
             if soup.find(id="fudis_otp_input") is None:
                 logger.critical(
                     "Failed to select TOTP generator! Maybe your TOTP serial number is wrong or the RWTH-Servers have difficulties, see https://maintenance.rz.rwth-aachen.de/ticket/status/messages . For more info use the --verbose argument."
@@ -483,7 +483,7 @@ class SyncMyMoodle:
             resp4 = self.session.post(resp3.url, data=totp_login_data)
 
             time.sleep(1)  # if we go too fast, we might have our connection closed
-            soup = bs(resp4.text, features="html.parser")
+            soup = bs(resp4.text, features="lxml")
         if soup.find("input", {"name": "RelayState"}) is None:
             logger.critical(
                 "Failed to login! Maybe your login-info was wrong or the RWTH-Servers have difficulties, see https://maintenance.rz.rwth-aachen.de/ticket/status/messages . For more info use the --verbose argument."
@@ -499,7 +499,7 @@ class SyncMyMoodle:
             "https://moodle.rwth-aachen.de/Shibboleth.sso/SAML2/POST", data=data
         )
         with cookie_file.open("wb") as f:
-            soup = bs(resp.text, features="html.parser")
+            soup = bs(resp.text, features="lxml")
             self.session_key = get_session_key(soup)
             pickle.dump(self.session.cookies, f)
 
@@ -906,7 +906,7 @@ class SyncMyMoodle:
                                 html_url = f'https://moodle.rwth-aachen.de/mod/h5pactivity/view.php?id={module["id"]}'
                                 html = bs(
                                     self.session.get(html_url).text,
-                                    features="html.parser",
+                                    features="lxml",
                                 )
                                 # Get h5p iframe
                                 iframe = html.find("iframe")
@@ -914,7 +914,7 @@ class SyncMyMoodle:
                                     iframe_html = str(
                                         bs(
                                             self.session.get(iframe.attrs["src"]).text,
-                                            features="html.parser",
+                                            features="lxml",
                                         )
                                     )
                                     # Moodle devs dont know how to use CDATA correctly, so we need to remove all backslashes
@@ -944,7 +944,7 @@ class SyncMyMoodle:
                         ).get("url", {}).get("opencast", {}):
                             info_url = f'https://moodle.rwth-aachen.de/mod/lti/launch.php?id={module["id"]}&triggerview=0'
                             info_res = bs(
-                                self.session.get(info_url).text, features="html.parser"
+                                self.session.get(info_url).text, features="lxml"
                             )
                             # FIXME: For now we assume that all lti modules will lead to an opencast video
                             engage_id = info_res.find("input", {"name": "custom_id"})
@@ -976,7 +976,7 @@ class SyncMyMoodle:
                         ).get("url", {}).get("quiz", {}):
                             info_url = f'https://moodle.rwth-aachen.de/mod/quiz/view.php?id={module["id"]}'
                             info_res = bs(
-                                self.session.get(info_url).text, features="html.parser"
+                                self.session.get(info_url).text, features="lxml"
                             )
                             attempts = info_res.findAll(
                                 "a",
@@ -990,7 +990,7 @@ class SyncMyMoodle:
                                 review_url = attempt.get("href")
                                 quiz_res = bs(
                                     self.session.get(review_url).text,
-                                    features="html.parser",
+                                    features="lxml",
                                 )
                                 name = (
                                     quiz_res.find("title")
@@ -1299,7 +1299,7 @@ class SyncMyMoodle:
 
         # submit engage authentication info
         try:
-            engageDataSoup = bs(response.json()[0]["data"], features="html.parser")
+            engageDataSoup = bs(response.json()[0]["data"], features="lxml")
         except Exception as e:
             logger.exception("Failed to parse Opencast response!")
             logger.info("------Opencast-Error------")
@@ -1380,7 +1380,7 @@ class SyncMyMoodle:
         if (path / f"{node.name}.pdf").exists():
             return True
 
-        quiz_res = bs(self.session.get(node.url).text, features="html.parser")
+        quiz_res = bs(self.session.get(node.url).text, features="lxml")
 
         # i need to hide the left nav element because its obscuring the quiz in the resulting pdf
         for nav in quiz_res.findAll("div", {"id": "nav-drawer"}):
@@ -1430,7 +1430,7 @@ class SyncMyMoodle:
                     return
                 elif not self.config.get("nolinks"):
                     response = self.session.get(text)
-                    tempsoup = bs(response.text, features="html.parser")
+                    tempsoup = bs(response.text, features="lxml")
                     videojs = tempsoup.select_one(".video-js")
                     if videojs:
                         videojs = videojs.select_one("source")
@@ -1508,7 +1508,7 @@ class SyncMyMoodle:
                     continue
 
                 # parse html code
-                soup = bs(response.text, features="html.parser")
+                soup = bs(response.text, features="lxml")
 
                 # get the requesttoken
                 requestToken = (
