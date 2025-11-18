@@ -1,3 +1,8 @@
+template: |
+  ## What's new
+
+  $CHANGES
+
 name-template: "$RESOLVED_VERSION"
 tag-template: "$RESOLVED_VERSION"
 version-template: "$MAJOR.$MINOR.$PATCH"
