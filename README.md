@@ -11,6 +11,10 @@ Downloads the following materials:
 * Quizzes (**Disabled by default**)
 * Pages and Labels: Embedded Opencast and Youtube Videos
 
+On subsequent runs, *syncMyMoodle* can also update existing files when the
+content on Moodle or Sciebo (Nextcloud) changed, while optionally protecting
+local edits through configurable conflict handling.
+
 ## Installation
 
 This software requires **Python 3.11 or higher**.
@@ -32,6 +36,21 @@ If you just want to get the job done, just use the following commands:
 python3 -m venv .venv
 source .venv/bin/activate  # bash/zsh, for other shells view the docs
 pip3 install syncmymoodle
+```
+
+After installation you can run the CLI directly as:
+
+```bash
+syncmymoodle
+```
+
+You can also install it as an isolated tool, for example using
+[pipx](https://pipx.pypa.io) or [uv](https://github.com/astral-sh/uv):
+
+```bash
+pipx install syncmymoodle
+# or
+uv tool install syncmymoodle
 ```
 
 ### Manual installation
@@ -64,15 +83,15 @@ of simplicity.
 
 ### Command line arguments
 
-#### Using pip
+#### Using pip / tool install
 
-Use `python3 -m syncmymoodle` and use the command line arguments.
+Use `syncmymoodle` and pass the command line arguments directly.
 
 #### Manual installation
 
 ```bash
 source .venv/bin/activate  # if you installed using virtual environment
-python3 -m syncmymoodle
+syncmymoodle
 deactivate  # leave virtual environment
 ```
 
@@ -171,8 +190,8 @@ configuration does:
     },
     "exclude_filetypes": [], // Exclude specific filetypes (e.g. ["mp4", "mkv"]) to disable downloading most videos
     "exclude_files": [], // Exclude specific files using UNIX filename pattern matching (e.g. "Lecture{video,zoom}*.{mp4,mkv}")
-    "update_files": true, // If true, existing files are redownloaded only when Moodle reports that they were modified (requires a cached root node from a previous run).
-    "update_files_conflict": "rename" // How to handle locally modified files when Moodle has a newer version: "rename" (default, move to <name>.syncconflict.<hash>), "keep" (skip update), or "overwrite" (replace local file).
+    "update_files": true, // If true, existing files are redownloaded only when Moodle/Sciebo report that they were modified (based on timemodified and checksums).
+    "update_files_conflict": "rename" // How to handle locally modified files when a newer version is available on Moodle/Sciebo: "rename" (default, move to <name>.syncconflict.<hash>), "keep" (skip update), or "overwrite" (!!DANGEROUS!! replaces the local file, you may lose any files you edited/changed!).
 }
 ```
 
