@@ -604,6 +604,7 @@ class SyncMyMoodle:
             sys.exit(1)
 
         token_base64d = location.split("token=")[1]
+        conn.close()
         self.wstoken = base64.b64decode(token_base64d).decode().split(":::")[1]
         return self.wstoken
 
