@@ -556,55 +556,7 @@ class SyncMyMoodle:
         response = conn.getresponse()
 
         # token is in an app schema, which contains the wstoken base64-encoded along with some other token
-        location = response.getheader("Location")
-        if location is None or "token=" not in location:
-            location_path = urllib.parse.urlparse(location).path if location else None
-            body_prefix = response.read(1000).decode("utf-8", errors="replace")
-            conn.close()
-
-            if location_path and location_path.startswith("/admin/tool/policy/"):
-                logger.critical(
-                    "RWTHmoodle requires you to accept updated policies/terms "
-                    "before syncmymoodle can create a webservice token. Please "
-                    "open https://moodle.rwth-aachen.de/ in your browser, accept "
-                    "the pending policy page, and rerun syncmymoodle."
-                )
-                logger.info(
-                    "Unexpected mobile launch redirect target: "
-                    f"{location_path or '<missing>'}"
-                )
-                sys.exit(1)
-
-            if location_path == "/login/index.php":
-                logger.critical(
-                    "Failed to retrieve the Moodle webservice token because "
-                    "Moodle redirected back to the login page. Your saved "
-                    "session is probably stale or the SSO login did not finish "
-                    "correctly. Delete the cookie file and try again."
-                )
-                logger.info(
-                    "Unexpected mobile launch redirect target: "
-                    f"{location_path or '<missing>'}"
-                )
-                sys.exit(1)
-
-            logger.critical(
-                "Failed to retrieve the Moodle webservice token because Moodle "
-                "returned an unexpected redirect instead of a token."
-            )
-            logger.info(
-                "Unexpected mobile launch redirect target: "
-                f"{location_path or '<missing>'}"
-            )
-            if body_prefix:
-                logger.info(
-                    "Unexpected mobile launch response body (truncated): "
-                    f"{body_prefix}"
-                )
-            sys.exit(1)
-
-        token_base64d = location.split("token=")[1]
-        conn.close()
+        token_base64d = response.getheader("Location").split("token=")[1]
         self.wstoken = base64.b64decode(token_base64d).decode().split(":::")[1]
         return self.wstoken
 
@@ -1032,7 +984,7 @@ class SyncMyMoodle:
                                 engage_id = engage_id.get("value")
                                 name = name.get("value")
                                 vid = self.getOpenCastRealURL(
-                                    course_id,
+                                    module["id"],
                                     f"https://engage.streaming.rwth-aachen.de/play/{engage_id}",
                                 )
                                 section_node.add_child(
@@ -1040,7 +992,7 @@ class SyncMyMoodle:
                                     engage_id,
                                     "Opencast",
                                     url=vid,
-                                    additional_info=course_id,
+                                    additional_info=module["id"],
                                 )
                         # Integration for Quizzes
                         if module["modname"] == "quiz" and self.config.get(
@@ -1366,21 +1318,13 @@ class SyncMyMoodle:
     def getOpenCastRealURL(self, additional_info, url):
         """Download Opencast videos by using the engage API"""
         # get engage authentication form
-        course_info = [
-            {
-                "index": 0,
-                "methodname": "filter_opencast_get_lti_form",
-                "args": {"courseid": str(additional_info)},
-            }
-        ]
-        response = self.session.post(
-            f"https://moodle.rwth-aachen.de/lib/ajax/service.php?sesskey={self.session_key}&info=filter_opencast_get_lti_form",
-            data=json.dumps(course_info),
+        response = self.session.get(
+            f"https://moodle.rwth-aachen.de/mod/lti/launch.php?id={additional_info}&triggerview=0"
         )
 
         # submit engage authentication info
         try:
-            engageDataSoup = bs(response.json()[0]["data"], features="lxml")
+            engageDataSoup = bs(response.text, features="lxml")
         except Exception as e:
             logger.exception("Failed to parse Opencast response!")
             logger.info("------Opencast-Error------")
@@ -1590,13 +1534,19 @@ class SyncMyMoodle:
                 "https://engage.streaming.rwth-aachen.de/play/[a-zA-Z0-9-]+", text
             )
             for vid in opencast_links:
-                vid = self.getOpenCastRealURL(course_id, vid)
+                vid_id = (
+                    re.match(
+                        "https://engage.streaming.rwth-aachen.de/play/([a-zA-Z0-9-]+)"
+                    ).group(1),
+                )
+                vid = self.getOpenCastRealURL(vid_id, vid)
+
                 parent_node.add_child(
                     module_title or vid.split("/")[-1],
                     vid,
                     "Opencast",
                     url=vid,
-                    additional_info=course_id,
+                    additional_info=vid_id,
                 )
 
         # https://rwth-aachen.sciebo.de/s/XXX

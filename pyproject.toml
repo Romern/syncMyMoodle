@@ -8,14 +8,14 @@ version = "0.3.0"
 description = "Synchronization client for RWTH Moodle"
 readme = "README.md"
 requires-python = ">=3.11"
-license = { text = "GPL-3.0-only" }
+license = "GPL-3.0-only"
 authors = [
   { name = "Nils Kattenbeck", email = "nilskemail+pypi@gmail.com" }
 ]
 keywords = ["moodle", "sync", "rwth", "cli"]
 classifiers = [
   "Programming Language :: Python :: 3",
-  "License :: OSI Approved :: GNU General Public License v3 (GPLv3)",
+  "GPL-3.0-only",
   "Operating System :: OS Independent",
   "Development Status :: 5 - Production/Stable"
 ]
@@ -68,3 +68,6 @@ ignore_missing_imports = true
 max-line-length = 88
 select = ["C", "E", "F", "W", "B", "B901"]
 extend-ignore = ["E203", "E501", "W503"]
+
+[tool.setuptools]
+py-modules = ["syncmymoodle"]
