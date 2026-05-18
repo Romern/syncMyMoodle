@@ -556,7 +556,6 @@ class SyncMyMoodle:
         response = conn.getresponse()
 
         # token is in an app schema, which contains the wstoken base64-encoded along with some other token
-        # token is in an app schema, which contains the wstoken base64-encoded along with some other token
         location = response.getheader("Location")
         if location is None or "token=" not in location:
             location_path = urllib.parse.urlparse(location).path if location else None
