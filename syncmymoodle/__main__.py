@@ -556,7 +556,55 @@ class SyncMyMoodle:
         response = conn.getresponse()
 
         # token is in an app schema, which contains the wstoken base64-encoded along with some other token
-        token_base64d = response.getheader("Location").split("token=")[1]
+        # token is in an app schema, which contains the wstoken base64-encoded along with some other token
+        location = response.getheader("Location")
+        if location is None or "token=" not in location:
+            location_path = urllib.parse.urlparse(location).path if location else None
+            body_prefix = response.read(1000).decode("utf-8", errors="replace")
+            conn.close()
+
+            if location_path and location_path.startswith("/admin/tool/policy/"):
+                logger.critical(
+                    "RWTHmoodle requires you to accept updated policies/terms "
+                    "before syncmymoodle can create a webservice token. Please "
+                    "open https://moodle.rwth-aachen.de/ in your browser, accept "
+                    "the pending policy page, and rerun syncmymoodle."
+                )
+                logger.info(
+                    "Unexpected mobile launch redirect target: "
+                    f"{location_path or '<missing>'}"
+                )
+                sys.exit(1)
+
+            if location_path == "/login/index.php":
+                logger.critical(
+                    "Failed to retrieve the Moodle webservice token because "
+                    "Moodle redirected back to the login page. Your saved "
+                    "session is probably stale or the SSO login did not finish "
+                    "correctly. Delete the cookie file and try again."
+                )
+                logger.info(
+                    "Unexpected mobile launch redirect target: "
+                    f"{location_path or '<missing>'}"
+                )
+                sys.exit(1)
+
+            logger.critical(
+                "Failed to retrieve the Moodle webservice token because Moodle "
+                "returned an unexpected redirect instead of a token."
+            )
+            logger.info(
+                "Unexpected mobile launch redirect target: "
+                f"{location_path or '<missing>'}"
+            )
+            if body_prefix:
+                logger.info(
+                    "Unexpected mobile launch response body (truncated): "
+                    f"{body_prefix}"
+                )
+            sys.exit(1)
+
+        token_base64d = location.split("token=")[1]
         self.wstoken = base64.b64decode(token_base64d).decode().split(":::")[1]
         return self.wstoken
 
