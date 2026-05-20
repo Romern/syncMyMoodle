@@ -20,7 +20,6 @@ from contextlib import closing
 from fnmatch import fnmatchcase
 from pathlib import Path
 from typing import List
-import pprint
 
 try:
     import pdfkit
@@ -967,6 +966,55 @@ class SyncMyMoodle:
                             "h5pactivity",
                         ] and self.config.get("used_modules", {}).get("url", {}):
                             if module["modname"] == "page":
+                                if (
+                                    self.config.get("used_modules", {})
+                                    .get("url", {})
+                                    .get("opencast", {})
+                                ):
+                                    # Check for embedded OpenCast iframes
+                                    html_url = f'https://moodle.rwth-aachen.de/mod/page/view.php?id={module["id"]}'
+                                    response = self.session.get(html_url)
+                                    html = bs(
+                                        response.text,
+                                        features="lxml",
+                                    )
+                                    # Get iframes
+                                    iframes = html.find_all("iframe")
+
+                                    if response.url == html_url and len(iframes) > 0:
+                                        for iframe in iframes:
+                                            vid_id = re.search(
+                                                "episodeid=([a-zA-Z0-9-]+)",
+                                                iframe.attrs["src"],
+                                            )[1]
+
+                                            info_url = f"https://moodle.rwth-aachen.de/filter/opencast/ltilaunch.php?courseid={course_id}&episodeid={vid_id}&sesskey={self.session_key}&ocinstanceid=1"
+                                            info_res = bs(
+                                                self.session.get(info_url).text,
+                                                features="lxml",
+                                            )
+                                            engage_data = {
+                                                i["name"]: i["value"]
+                                                for i in info_res.findAll("input")
+                                                if i.get("name")
+                                            }
+
+                                            # Retrieve LTI Cookie
+                                            resp = self.session.post(
+                                                "https://engage.streaming.rwth-aachen.de/lti",
+                                                data=engage_data,
+                                            )
+
+                                            vid = self.extractTrackFromEpisode(vid_id)
+
+                                            section_node.add_child(
+                                                module["name"],
+                                                vid,
+                                                "Opencast",
+                                                url=vid,
+                                                additional_info=module["id"],
+                                            )
+
                                 self.scanForLinks(
                                     module["url"],
                                     section_node,
@@ -1409,39 +1457,9 @@ class SyncMyMoodle:
             self._downloaded_paths.add(downloadpath)
             return True
 
-    def getOpenCastRealURL(self, additional_info, url):
-        """Download Opencast videos by using the engage API"""
-        # get engage authentication form
-        response = self.session.get(
-            f"https://moodle.rwth-aachen.de/mod/lti/launch.php?id={additional_info}&triggerview=0"
-        )
-
-        # submit engage authentication info
-        try:
-            engageDataSoup = bs(response.text, features="lxml")
-        except Exception as e:
-            logger.exception("Failed to parse Opencast response!")
-            logger.info("------Opencast-Error------")
-            logger.info(response.text)
-            raise e
-
-        engageData = dict(
-            [(i["name"], i["value"]) for i in engageDataSoup.findAll("input")]
-        )
-        response = self.session.post(
-            "https://engage.streaming.rwth-aachen.de/lti", data=engageData
-        )
-
-        linkid = re.match(
-            "https://engage.streaming.rwth-aachen.de/play/([a-z0-9-]{36})$", url
-        )
-        if not linkid:
-            logger.warning(f"Opencast: could not extract episode id from url {url}")
-            return False
-
+    def extractTrackFromEpisode(self, id):
         episode_url = (
-            "https://engage.streaming.rwth-aachen.de/search/episode.json"
-            f"?id={linkid.groups()[0]}"
+            "https://engage.streaming.rwth-aachen.de/search/episode.json" f"?id={id}"
         )
         try:
             episode_response = self.session.get(episode_url)
@@ -1492,6 +1510,38 @@ class SyncMyMoodle:
         finaltrack = tracks[-1]
 
         return finaltrack[0]
+
+    def getOpenCastRealURL(self, additional_info, url):
+        """Download Opencast videos by using the engage API"""
+        # get engage authentication form
+        response = self.session.get(
+            f"https://moodle.rwth-aachen.de/mod/lti/launch.php?id={additional_info}&triggerview=0"
+        )
+
+        # submit engage authentication info
+        try:
+            engageDataSoup = bs(response.text, features="lxml")
+        except Exception as e:
+            logger.exception("Failed to parse Opencast response!")
+            logger.info("------Opencast-Error------")
+            logger.info(response.text)
+            raise e
+
+        engageData = dict(
+            [(i["name"], i["value"]) for i in engageDataSoup.findAll("input")]
+        )
+        response = self.session.post(
+            "https://engage.streaming.rwth-aachen.de/lti", data=engageData
+        )
+
+        linkid = re.match(
+            "https://engage.streaming.rwth-aachen.de/play/([a-z0-9-]{36})$", url
+        )
+        if not linkid:
+            logger.warning(f"Opencast: could not extract episode id from url {url}")
+            return False
+
+        return self.extractTrackFromEpisode(linkid.groups()[0])
 
     def downloadOpenCastVideos(self, node):
         if ".mp4" not in node.name:
