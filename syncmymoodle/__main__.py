@@ -1105,7 +1105,7 @@ class SyncMyMoodle:
                                 for episode in series_response["result"]:
                                     vid = self.getOpenCastRealURL(
                                         module["id"],
-                                        f"https://engage.streaming.rwth-aachen.de/play/{episode["mediapackage"]["id"]}",
+                                        f"https://engage.streaming.rwth-aachen.de/play/{episode['mediapackage']['id']}",
                                     )
                                     series_node.add_child(
                                         episode["mediapackage"]["title"],
