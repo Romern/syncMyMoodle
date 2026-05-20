@@ -20,6 +20,7 @@ from contextlib import closing
 from fnmatch import fnmatchcase
 from pathlib import Path
 from typing import List
+import pprint
 
 try:
     import pdfkit
@@ -1018,30 +1019,75 @@ class SyncMyMoodle:
                             info_res = bs(
                                 self.session.get(info_url).text, features="lxml"
                             )
-                            # FIXME: For now we assume that all lti modules will lead to an opencast video
-                            engage_id = info_res.find("input", {"name": "custom_id"})
+
+                            engage_series_id = info_res.find(
+                                "input", {"name": "custom_series"}
+                            )
+                            engage_single_id = info_res.find(
+                                "input", {"name": "custom_id"}
+                            )
                             name = info_res.find(
                                 "input", {"name": "resource_link_title"}
                             )
-                            if not engage_id:
-                                logger.error("Failed to find custom_id on lti page.")
-                                logger.info("------LTI-ERROR-HTML------")
-                                logger.info(f"url: {info_url}")
-                                logger.info(info_res)
-                            else:
-                                engage_id = engage_id.get("value")
+
+                            if engage_series_id:
+                                # Found an Opencast "series" page
+                                series_id = engage_series_id.get("value")
                                 name = name.get("value")
-                                vid = self.getOpenCastRealURL(
-                                    module["id"],
-                                    f"https://engage.streaming.rwth-aachen.de/play/{engage_id}",
+
+                                series_node = course_node.add_child(
+                                    name, series_id, "Section"
                                 )
-                                section_node.add_child(
-                                    name,
-                                    engage_id,
-                                    "Opencast",
-                                    url=vid,
-                                    additional_info=module["id"],
+
+                                engage_data = {
+                                    i["name"]: i["value"]
+                                    for i in info_res.findAll("input")
+                                    if i.get("name")
+                                }
+
+                                # Retrieve LTI Cookie
+                                self.session.post(
+                                    "https://engage.streaming.rwth-aachen.de/lti",
+                                    data=engage_data,
                                 )
+
+                                series_url = f"https://engage.streaming.rwth-aachen.de/search/episode.json?limit=100&offset=0&sid={series_id}"
+                                series_response = self.session.get(series_url).json()
+
+                                for episode in series_response["result"]:
+                                    vid = self.getOpenCastRealURL(
+                                        module["id"],
+                                        f"https://engage.streaming.rwth-aachen.de/play/{episode["mediapackage"]["id"]}",
+                                    )
+                                    series_node.add_child(
+                                        episode["mediapackage"]["title"],
+                                        vid,
+                                        "Opencast",
+                                        url=vid,
+                                        additional_info=module["id"],
+                                    )
+                            else:
+                                if not engage_single_id:
+                                    logger.error(
+                                        "Failed to find either custom_id or custom_series on lti page."
+                                    )
+                                    logger.info("------LTI-ERROR-HTML------")
+                                    logger.info(f"url: {info_url}")
+                                    logger.info(info_res)
+                                else:
+                                    engage_single_id = engage_single_id.get("value")
+                                    name = name.get("value")
+                                    vid = self.getOpenCastRealURL(
+                                        module["id"],
+                                        f"https://engage.streaming.rwth-aachen.de/play/{engage_single_id}",
+                                    )
+                                    section_node.add_child(
+                                        name,
+                                        engage_single_id,
+                                        "Opencast",
+                                        url=vid,
+                                        additional_info=module["id"],
+                                    )
                         # Integration for Quizzes
                         if module["modname"] == "quiz" and self.config.get(
                             "used_modules", {}
