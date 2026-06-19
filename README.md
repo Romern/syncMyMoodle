@@ -199,6 +199,10 @@ Command line arguments have a higher priority than configuration files.
 You can override any of the options that you have configured in the file
 using command line arguments.
 
+syncMyMoodle stores per-course metadata in a hidden `.syncmymoodle_cache` file
+inside each synced course directory. Delete that file to force a fresh metadata
+cache for a course.
+
 ### TOTP
 
 From the RWTH IDM service you will get a TOTP secret which will be used to
