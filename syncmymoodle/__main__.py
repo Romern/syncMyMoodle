@@ -973,46 +973,54 @@ class SyncMyMoodle:
                                 ):
                                     # Check for embedded OpenCast iframes
                                     html_url = f'https://moodle.rwth-aachen.de/mod/page/view.php?id={module["id"]}'
-                                    response = self.session.get(html_url)
+                                    try:
+                                        response = self.session.get(html_url)
+                                    except Exception:
+                                        logger.exception(
+                                            "Opencast: failed to fetch page module %s",
+                                            module["id"],
+                                        )
+                                        response = None
+                                    if response and not (
+                                        200 <= response.status_code < 300
+                                    ):
+                                        logger.warning(
+                                            "Opencast: page module %s returned status %s",
+                                            module["id"],
+                                            response.status_code,
+                                        )
+                                        response = None
                                     html = bs(
-                                        response.text,
+                                        response.text if response else "",
                                         features="lxml",
                                     )
-                                    # Get iframes
-                                    iframes = html.find_all("iframe")
-
-                                    if response.url == html_url and len(iframes) > 0:
-                                        for iframe in iframes:
-                                            vid_id = re.search(
-                                                "episodeid=([a-zA-Z0-9-]+)",
-                                                iframe.attrs["src"],
-                                            )[1]
-
-                                            info_url = f"https://moodle.rwth-aachen.de/filter/opencast/ltilaunch.php?courseid={course_id}&episodeid={vid_id}&sesskey={self.session_key}&ocinstanceid=1"
-                                            info_res = bs(
-                                                self.session.get(info_url).text,
-                                                features="lxml",
+                                    if response:
+                                        for iframe in html.find_all("iframe"):
+                                            iframe_src = iframe.get("src")
+                                            if not iframe_src:
+                                                continue
+                                            iframe_src = urllib.parse.urljoin(
+                                                html_url, iframe_src
                                             )
-                                            engage_data = {
-                                                i["name"]: i["value"]
-                                                for i in info_res.findAll("input")
-                                                if i.get("name")
-                                            }
-
-                                            # Retrieve LTI Cookie
-                                            resp = self.session.post(
-                                                "https://engage.streaming.rwth-aachen.de/lti",
-                                                data=engage_data,
+                                            vid_id = self._extract_opencast_episode_id(
+                                                iframe_src
                                             )
-
+                                            if not vid_id:
+                                                continue
+                                            if not self._authenticate_opencast_episode(
+                                                course_id, vid_id
+                                            ):
+                                                continue
                                             vid = self.extractTrackFromEpisode(vid_id)
+                                            if not vid:
+                                                continue
 
                                             section_node.add_child(
                                                 module["name"],
-                                                vid,
+                                                vid_id,
                                                 "Opencast",
                                                 url=vid,
-                                                additional_info=module["id"],
+                                                additional_info=course_id,
                                             )
 
                                 self.scanForLinks(
@@ -1031,10 +1039,14 @@ class SyncMyMoodle:
                                 )
                                 # Get h5p iframe
                                 iframe = html.find("iframe")
-                                if iframe is not None:
+                                iframe_src = iframe.get("src") if iframe else None
+                                if iframe_src:
+                                    iframe_src = urllib.parse.urljoin(
+                                        html_url, iframe_src
+                                    )
                                     iframe_html = str(
                                         bs(
-                                            self.session.get(iframe.attrs["src"]).text,
+                                            self.session.get(iframe_src).text,
                                             features="lxml",
                                         )
                                     )
@@ -1064,71 +1076,98 @@ class SyncMyMoodle:
                             "used_modules", {}
                         ).get("url", {}).get("opencast", {}):
                             info_url = f'https://moodle.rwth-aachen.de/mod/lti/launch.php?id={module["id"]}&triggerview=0'
-                            info_res = bs(
-                                self.session.get(info_url).text, features="lxml"
-                            )
+                            try:
+                                info_response = self.session.get(info_url)
+                            except Exception:
+                                logger.exception(
+                                    "Opencast: failed to fetch LTI module %s",
+                                    module["id"],
+                                )
+                                continue
+                            if not (200 <= info_response.status_code < 300):
+                                logger.warning(
+                                    "Opencast: LTI module %s returned status %s",
+                                    module["id"],
+                                    info_response.status_code,
+                                )
+                                self._log_opencast_backend_issue(info_response.text)
+                                continue
 
-                            engage_series_id = info_res.find(
-                                "input", {"name": "custom_series"}
+                            info_res = bs(info_response.text, features="lxml")
+
+                            engage_series_id = self._get_input_value(
+                                info_res, "custom_series"
                             )
-                            engage_single_id = info_res.find(
-                                "input", {"name": "custom_id"}
+                            engage_single_id = self._get_input_value(
+                                info_res, "custom_id"
                             )
-                            name = info_res.find(
-                                "input", {"name": "resource_link_title"}
+                            name = (
+                                self._get_input_value(info_res, "resource_link_title")
+                                or module["name"]
                             )
+                            engage_data = self._extract_lti_form_data(info_res)
 
                             if engage_series_id:
                                 # Found an Opencast "series" page
-                                series_id = engage_series_id.get("value")
-                                name = name.get("value")
+                                series_id = engage_series_id
 
                                 series_node = course_node.add_child(
                                     name, series_id, "Section"
                                 )
 
-                                engage_data = {
-                                    i["name"]: i["value"]
-                                    for i in info_res.findAll("input")
-                                    if i.get("name")
-                                }
-
-                                # Retrieve LTI Cookie
-                                self.session.post(
-                                    "https://engage.streaming.rwth-aachen.de/lti",
-                                    data=engage_data,
-                                )
+                                if not self._submit_opencast_lti_form(
+                                    engage_data, f"LTI series module {module['id']}"
+                                ):
+                                    continue
 
                                 series_url = f"https://engage.streaming.rwth-aachen.de/search/episode.json?limit=100&offset=0&sid={series_id}"
-                                series_response = self.session.get(series_url).json()
+                                series_response = self._fetch_opencast_json(
+                                    series_url, f"series {series_id}"
+                                )
+                                if series_response is None:
+                                    continue
 
-                                for episode in series_response["result"]:
-                                    vid = self.getOpenCastRealURL(
-                                        module["id"],
-                                        f"https://engage.streaming.rwth-aachen.de/play/{episode['mediapackage']['id']}",
-                                    )
+                                for episode in self._get_opencast_result_list(
+                                    series_response, f"series {series_id}"
+                                ):
+                                    if not isinstance(episode, dict):
+                                        continue
+                                    mediapackage = episode.get("mediapackage", {})
+                                    if not isinstance(mediapackage, dict):
+                                        continue
+                                    episode_id = mediapackage.get("id")
+                                    if not episode_id:
+                                        logger.warning(
+                                            "Opencast: series %s contains episode without id",
+                                            series_id,
+                                        )
+                                        continue
+                                    vid = self.extractTrackFromEpisode(episode_id)
+                                    if not vid:
+                                        continue
                                     series_node.add_child(
-                                        episode["mediapackage"]["title"],
-                                        vid,
+                                        mediapackage.get("title") or episode_id,
+                                        episode_id,
                                         "Opencast",
                                         url=vid,
                                         additional_info=module["id"],
                                     )
                             else:
                                 if not engage_single_id:
-                                    logger.error(
+                                    logger.info(
                                         "Failed to find either custom_id or custom_series on lti page."
                                     )
                                     logger.info("------LTI-ERROR-HTML------")
                                     logger.info(f"url: {info_url}")
                                     logger.info(info_res)
                                 else:
-                                    engage_single_id = engage_single_id.get("value")
-                                    name = name.get("value")
-                                    vid = self.getOpenCastRealURL(
-                                        module["id"],
-                                        f"https://engage.streaming.rwth-aachen.de/play/{engage_single_id}",
-                                    )
+                                    if not self._submit_opencast_lti_form(
+                                        engage_data, f"LTI module {module['id']}"
+                                    ):
+                                        continue
+                                    vid = self.extractTrackFromEpisode(engage_single_id)
+                                    if not vid:
+                                        continue
                                     section_node.add_child(
                                         name,
                                         engage_single_id,
@@ -1457,91 +1496,241 @@ class SyncMyMoodle:
             self._downloaded_paths.add(downloadpath)
             return True
 
-    def extractTrackFromEpisode(self, id):
-        episode_url = (
-            "https://engage.streaming.rwth-aachen.de/search/episode.json" f"?id={id}"
+    def _extract_opencast_episode_id(self, url):
+        if not url:
+            return None
+
+        url = str(url).replace("&amp;", "&")
+        parsed = urllib.parse.urlparse(url)
+        episode_ids = urllib.parse.parse_qs(parsed.query).get("episodeid", [])
+        if episode_ids and episode_ids[0]:
+            return episode_ids[0]
+
+        match = re.match(
+            r"^https://engage\.streaming\.rwth-aachen\.de/play/([a-zA-Z0-9-]{36})(?:[/?#].*)?$",
+            url,
         )
+        if match:
+            return match.group(1)
+
+        return None
+
+    def _extract_lti_form_data(self, soup):
+        return {
+            input_tag["name"]: input_tag.get("value", "")
+            for input_tag in soup.findAll("input")
+            if input_tag.get("name")
+        }
+
+    def _get_input_value(self, soup, name):
+        input_tag = soup.find("input", {"name": name})
+        if input_tag and input_tag.get("value"):
+            return input_tag["value"]
+        return None
+
+    def _submit_opencast_lti_form(self, engage_data, context):
+        if not engage_data:
+            logger.warning("Opencast: missing LTI form fields for %s", context)
+            return False
+
         try:
-            episode_response = self.session.get(episode_url)
-        except Exception:
-            logger.exception(
-                "Opencast: failed to fetch episode metadata from %s", episode_url
+            response = self.session.post(
+                "https://engage.streaming.rwth-aachen.de/lti", data=engage_data
             )
+        except Exception:
+            logger.exception("Opencast: failed to submit LTI form for %s", context)
             self._log_opencast_backend_issue(None)
             return False
 
-        if not (200 <= episode_response.status_code < 300):
-            logger.error(
-                "Opencast: episode.json returned status %s for %s",
-                episode_response.status_code,
-                episode_url,
+        if not (200 <= response.status_code < 300):
+            logger.warning(
+                "Opencast: LTI form returned status %s for %s",
+                response.status_code,
+                context,
             )
-            self._log_opencast_backend_issue(episode_response.text)
+            self._log_opencast_backend_issue(response.text)
             return False
+
+        return True
+
+    def _fetch_lti_form_data(self, url, context):
+        try:
+            response = self.session.get(url)
+        except Exception:
+            logger.exception("Opencast: failed to fetch LTI form for %s", context)
+            self._log_opencast_backend_issue(None)
+            return None
+
+        if not (200 <= response.status_code < 300):
+            logger.warning(
+                "Opencast: LTI form returned status %s for %s",
+                response.status_code,
+                context,
+            )
+            self._log_opencast_backend_issue(response.text)
+            return None
+
+        soup = bs(response.text, features="lxml")
+        engage_data = self._extract_lti_form_data(soup)
+        if not engage_data:
+            logger.info("Opencast: no LTI form fields found for %s", context)
+            logger.info("------LTI-ERROR-HTML------")
+            logger.info(f"url: {url}")
+            logger.info(soup)
+            return None
+
+        return engage_data
+
+    def _authenticate_opencast_lti_module(self, module_id):
+        info_url = (
+            f"https://moodle.rwth-aachen.de/mod/lti/launch.php?id={module_id}"
+            "&triggerview=0"
+        )
+        engage_data = self._fetch_lti_form_data(info_url, f"LTI module {module_id}")
+        if engage_data is None:
+            return False
+        return self._submit_opencast_lti_form(engage_data, f"LTI module {module_id}")
+
+    def _authenticate_opencast_episode(self, course_id, episode_id):
+        if not self.session_key:
+            logger.warning("Opencast: cannot launch episode without Moodle sesskey")
+            return False
+
+        params = urllib.parse.urlencode(
+            {
+                "courseid": course_id,
+                "episodeid": episode_id,
+                "sesskey": self.session_key,
+                "ocinstanceid": 1,
+            }
+        )
+        info_url = f"https://moodle.rwth-aachen.de/filter/opencast/ltilaunch.php?{params}"
+        context = f"episode {episode_id} in course {course_id}"
+        engage_data = self._fetch_lti_form_data(info_url, context)
+        if engage_data is None:
+            return False
+        return self._submit_opencast_lti_form(engage_data, context)
+
+    def _fetch_opencast_json(self, url, context):
+        try:
+            response = self.session.get(url)
+        except Exception:
+            logger.exception("Opencast: failed to fetch %s from %s", context, url)
+            self._log_opencast_backend_issue(None)
+            return None
+
+        if not (200 <= response.status_code < 300):
+            logger.error(
+                "Opencast: %s returned status %s for %s",
+                context,
+                response.status_code,
+                url,
+            )
+            self._log_opencast_backend_issue(response.text)
+            return None
 
         try:
-            episodejson = episode_response.json()
+            payload = response.json()
         except ValueError:
-            logger.error("Opencast: failed to decode JSON from %s", episode_url)
-            self._log_opencast_backend_issue(episode_response.text)
+            logger.error("Opencast: failed to decode JSON for %s from %s", context, url)
+            self._log_opencast_backend_issue(response.text)
+            return None
+
+        if not isinstance(payload, dict):
+            logger.warning(
+                "Opencast: expected JSON object for %s, got %s",
+                context,
+                type(payload).__name__,
+            )
+            self._log_opencast_backend_issue(response.text)
+            return None
+
+        if payload.get("error") or payload.get("errorcode"):
+            logger.error(
+                "Opencast: %s returned error%s: %s",
+                context,
+                f" {payload.get('errorcode')}" if payload.get("errorcode") else "",
+                payload.get("error") or payload,
+            )
+            self._log_opencast_backend_issue(response.text)
+            return None
+
+        return payload
+
+    def _get_opencast_result_list(self, payload, context):
+        result = payload.get("result") if isinstance(payload, dict) else None
+        if not isinstance(result, list):
+            logger.warning("Opencast: missing result list for %s", context)
+            self._log_opencast_backend_issue(
+                json.dumps(payload, ensure_ascii=False) if payload is not None else None
+            )
+            return []
+        if not result:
+            logger.warning("Opencast: empty result list for %s", context)
+            return []
+        return result
+
+    def _resolution_width(self, resolution):
+        match = re.match(r"(\d+)\s*x\s*\d+", str(resolution or ""))
+        if not match:
+            return 0
+        return int(match.group(1))
+
+    def extractTrackFromEpisode(self, episode_id):
+        episode_url = (
+            "https://engage.streaming.rwth-aachen.de/search/episode.json"
+            f"?id={episode_id}"
+        )
+        episodejson = self._fetch_opencast_json(episode_url, f"episode {episode_id}")
+        if episodejson is None:
             return False
 
-        # Collect tracks from all mediapackages
-        mediapackages = [
-            track["mediapackage"]["media"]["track"] for track in episodejson["result"]
-        ]
+        tracks = []
+        for entry in self._get_opencast_result_list(
+            episodejson, f"episode {episode_id}"
+        ):
+            if not isinstance(entry, dict):
+                continue
+            mediapackage = entry.get("mediapackage")
+            media = mediapackage.get("media") if isinstance(mediapackage, dict) else None
+            track_data = media.get("track") if isinstance(media, dict) else None
+            if isinstance(track_data, dict):
+                track_data = [track_data]
+            if not isinstance(track_data, list):
+                continue
+            for track in track_data:
+                if not isinstance(track, dict):
+                    continue
+                video = track.get("video")
+                url = track.get("url")
+                if (
+                    url
+                    and track.get("mimetype") == "video/mp4"
+                    and "transport" not in track
+                    and isinstance(video, dict)
+                ):
+                    tracks.append(
+                        (self._resolution_width(video.get("resolution")), url)
+                    )
 
-        # TODO, handle multiple mediapackages (videos? could be seperate presenter and screencap)
-        tracks = mediapackages[0]
+        if not tracks:
+            logger.warning("Opencast: no downloadable mp4 track found for %s", episode_id)
+            return False
 
-        # Filter and sort tracks by resolution (width)
-        tracks = sorted(
-            [
-                (t["url"], t["video"]["resolution"])
-                for t in tracks
-                if t["mimetype"] == "video/mp4"
-                and "transport" not in t
-                and "video" in t
-            ],
-            key=lambda x: int(x[1].split("x")[0]),  # Sort by width (e.g., "1920x1080")
-        )
-
-        # only choose mp4s provided with plain https (no transport key), and use the one with the highest resolution (sorted by width) (could also use bitrate)
-        finaltrack = tracks[-1]
-
-        return finaltrack[0]
+        # Prefer the highest resolution plain HTTPS mp4 track.
+        return sorted(tracks, key=lambda track: track[0])[-1][1]
 
     def getOpenCastRealURL(self, additional_info, url):
         """Download Opencast videos by using the engage API"""
-        # get engage authentication form
-        response = self.session.get(
-            f"https://moodle.rwth-aachen.de/mod/lti/launch.php?id={additional_info}&triggerview=0"
-        )
-
-        # submit engage authentication info
-        try:
-            engageDataSoup = bs(response.text, features="lxml")
-        except Exception as e:
-            logger.exception("Failed to parse Opencast response!")
-            logger.info("------Opencast-Error------")
-            logger.info(response.text)
-            raise e
-
-        engageData = dict(
-            [(i["name"], i["value"]) for i in engageDataSoup.findAll("input")]
-        )
-        response = self.session.post(
-            "https://engage.streaming.rwth-aachen.de/lti", data=engageData
-        )
-
-        linkid = re.match(
-            "https://engage.streaming.rwth-aachen.de/play/([a-z0-9-]{36})$", url
-        )
-        if not linkid:
+        episode_id = self._extract_opencast_episode_id(url)
+        if not episode_id:
             logger.warning(f"Opencast: could not extract episode id from url {url}")
             return False
 
-        return self.extractTrackFromEpisode(linkid.groups()[0])
+        if not self._authenticate_opencast_lti_module(additional_info):
+            return False
+
+        return self.extractTrackFromEpisode(episode_id)
 
     def downloadOpenCastVideos(self, node):
         if ".mp4" not in node.name:
@@ -1678,18 +1867,22 @@ class SyncMyMoodle:
                 "https://engage.streaming.rwth-aachen.de/play/[a-zA-Z0-9-]+", text
             )
             for vid in opencast_links:
-                vid_id = re.match(
-                    "https://engage.streaming.rwth-aachen.de/play/([a-zA-Z0-9-]+)",
-                    vid,
-                ).group(1)
-                vid = self.getOpenCastRealURL(vid_id, vid)
+                vid_id = self._extract_opencast_episode_id(vid)
+                if not vid_id:
+                    logger.warning(f"Opencast: could not extract episode id from url {vid}")
+                    continue
+                if not self._authenticate_opencast_episode(course_id, vid_id):
+                    continue
+                vid = self.extractTrackFromEpisode(vid_id)
+                if not vid:
+                    continue
 
                 parent_node.add_child(
                     module_title or vid.split("/")[-1],
-                    vid,
+                    vid_id,
                     "Opencast",
                     url=vid,
-                    additional_info=vid_id,
+                    additional_info=course_id,
                 )
 
         # https://rwth-aachen.sciebo.de/s/XXX
