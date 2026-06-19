@@ -1604,7 +1604,9 @@ class SyncMyMoodle:
                 "ocinstanceid": 1,
             }
         )
-        info_url = f"https://moodle.rwth-aachen.de/filter/opencast/ltilaunch.php?{params}"
+        info_url = (
+            f"https://moodle.rwth-aachen.de/filter/opencast/ltilaunch.php?{params}"
+        )
         context = f"episode {episode_id} in course {course_id}"
         engage_data = self._fetch_lti_form_data(info_url, context)
         if engage_data is None:
@@ -1692,7 +1694,9 @@ class SyncMyMoodle:
             if not isinstance(entry, dict):
                 continue
             mediapackage = entry.get("mediapackage")
-            media = mediapackage.get("media") if isinstance(mediapackage, dict) else None
+            media = (
+                mediapackage.get("media") if isinstance(mediapackage, dict) else None
+            )
             track_data = media.get("track") if isinstance(media, dict) else None
             if isinstance(track_data, dict):
                 track_data = [track_data]
@@ -1714,7 +1718,9 @@ class SyncMyMoodle:
                     )
 
         if not tracks:
-            logger.warning("Opencast: no downloadable mp4 track found for %s", episode_id)
+            logger.warning(
+                "Opencast: no downloadable mp4 track found for %s", episode_id
+            )
             return False
 
         # Prefer the highest resolution plain HTTPS mp4 track.
@@ -1869,7 +1875,9 @@ class SyncMyMoodle:
             for vid in opencast_links:
                 vid_id = self._extract_opencast_episode_id(vid)
                 if not vid_id:
-                    logger.warning(f"Opencast: could not extract episode id from url {vid}")
+                    logger.warning(
+                        f"Opencast: could not extract episode id from url {vid}"
+                    )
                     continue
                 if not self._authenticate_opencast_episode(course_id, vid_id):
                     continue
