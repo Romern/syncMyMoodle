@@ -5,13 +5,27 @@ on:
     tags:
       - "*.*.*"
   workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag to publish, for example 0.3.0"
+        required: true
+        type: string
 
 permissions:
   contents: read
-  id-token: write
+
+concurrency:
+  group: release-${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+  cancel-in-progress: false
+
+defaults:
+  run:
+    shell: bash
 
 env:
   PYTHON_VERSION: "3.12"
+  RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+  RELEASE_REF: ${{ github.event_name == 'workflow_dispatch' && format('refs/tags/{0}', inputs.tag) || github.ref }}
 
 jobs:
   build:
@@ -19,27 +33,72 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ env.RELEASE_REF }}
+          fetch-depth: 0
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
           python-version: ${{ env.PYTHON_VERSION }}
 
-      - name: Install build backend
+      - name: Validate release inputs
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+
+          git rev-parse --verify --quiet "${RELEASE_TAG}^{commit}" >/dev/null || {
+            echo "Release tag ${RELEASE_TAG} does not exist." >&2
+            exit 1
+          }
+
+          python - <<'PY'
+          import os
+          import sys
+          import tomllib
+          from pathlib import Path
+
+          release_tag = os.environ["RELEASE_TAG"]
+          version = tomllib.loads(Path("pyproject.toml").read_text())["project"]["version"]
+          if release_tag != version:
+              print(
+                  f"Release tag {release_tag!r} does not match pyproject.toml version {version!r}.",
+                  file=sys.stderr,
+              )
+              sys.exit(1)
+          PY
+
+          draft_id=$(gh api "repos/${GH_REPO}/releases" \
+            --paginate \
+            --jq '.[] | select(.draft == true and (.name == env.RELEASE_TAG or .tag_name == env.RELEASE_TAG)) | .id' \
+            | head -n 1)
+
+          if [ -z "${draft_id}" ] && ! gh release view "${RELEASE_TAG}" --repo "${GH_REPO}" >/dev/null 2>&1; then
+            echo "No draft or published GitHub release found for ${RELEASE_TAG}. Make sure Release Drafter created a matching draft before publishing." >&2
+            exit 1
+          fi
+
+      - name: Install build tools
         run: |
           python -m pip install --upgrade pip
-          pip install build
+          python -m pip install build twine
 
       - name: Build package
         run: python -m build
 
+      - name: Check package metadata
+        run: python -m twine check dist/*
+
       - name: Upload dist artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: syncmymoodle-dist
           path: dist/*
           if-no-files-found: error
+          retention-days: 7
 
   publish-testpypi:
     name: Publish to TestPyPI
@@ -52,7 +111,7 @@ jobs:
       id-token: write
 
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           name: syncmymoodle-dist
           path: dist
@@ -75,7 +134,7 @@ jobs:
       id-token: write
 
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           name: syncmymoodle-dist
           path: dist
@@ -92,7 +151,7 @@ jobs:
       contents: write
 
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           name: syncmymoodle-dist
           path: dist
@@ -101,26 +160,29 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GH_REPO: ${{ github.repository }}
-          TAG_NAME: ${{ github.ref_name }}
-          TARGET_SHA: ${{ github.sha }}
+          TAG_NAME: ${{ env.RELEASE_TAG }}
         run: |
-          release_id=$(gh api repos/$GH_REPO/releases \
-            --paginate \
-            --jq '.[] | select(.draft == true and .name == env.TAG_NAME) | .id')
+          set -euo pipefail
 
-          if [ -z "$release_id" ]; then
+          release_id=$(gh api "repos/${GH_REPO}/releases" \
+            --paginate \
+            --jq '.[] | select(.draft == true and (.name == env.TAG_NAME or .tag_name == env.TAG_NAME)) | .id' \
+            | head -n 1)
+
+          if [ -n "${release_id}" ]; then
+            gh api "repos/${GH_REPO}/releases/${release_id}" \
+              --method PATCH \
+              -f draft=false \
+              -f tag_name="${TAG_NAME}"
+          elif gh release view "${TAG_NAME}" --repo "${GH_REPO}" >/dev/null 2>&1; then
+            echo "GitHub release ${TAG_NAME} is already published; uploading artifacts."
+          else
             echo "Draft release \"${TAG_NAME}\" not found. Make sure Release Drafter created it and the name matches the tag." >&2
             exit 1
           fi
-
-          gh api repos/$GH_REPO/releases/$release_id \
-            --method PATCH \
-            -f draft=false \
-            -f tag_name=$TAG_NAME \
-            -f target_commitish=$TARGET_SHA
 
       - name: Upload release artifacts
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GH_REPO: ${{ github.repository }}
-        run: gh release upload ${{ github.ref_name }} dist/* --clobber
+        run: gh release upload "${RELEASE_TAG}" dist/* --clobber
