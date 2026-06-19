@@ -1678,11 +1678,10 @@ class SyncMyMoodle:
                 "https://engage.streaming.rwth-aachen.de/play/[a-zA-Z0-9-]+", text
             )
             for vid in opencast_links:
-                vid_id = (
-                    re.match(
-                        "https://engage.streaming.rwth-aachen.de/play/([a-zA-Z0-9-]+)"
-                    ).group(1),
-                )
+                vid_id = re.match(
+                    "https://engage.streaming.rwth-aachen.de/play/([a-zA-Z0-9-]+)",
+                    vid,
+                ).group(1)
                 vid = self.getOpenCastRealURL(vid_id, vid)
 
                 parent_node.add_child(
