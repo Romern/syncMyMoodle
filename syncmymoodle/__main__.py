@@ -2117,11 +2117,6 @@ def main():
         "--cookiefile", default=None, help="set the location of a cookie file"
     )
     parser.add_argument(
-        "--rootnodecachefile",
-        default=None,
-        help="set the location of a root node cache file",
-    )
-    parser.add_argument(
         "--courses",
         default=None,
         help="specify the courses that should be synced using comma-separated links. Defaults to all courses, if no additional restrictions e.g. semester are defined.",
@@ -2204,9 +2199,6 @@ def main():
     config["totp"] = args.totp or config.get("totp")
     config["totpsecret"] = args.totpsecret or config.get("totpsecret")
     config["cookie_file"] = args.cookiefile or config.get("cookie_file", "./session")
-    config["root_node_cache_file"] = args.rootnodecachefile or config.get(
-        "root_node_cache_file", "./cached_root_node"
-    )
     config["selected_courses"] = (
         args.courses.split(",") if args.courses else config.get("selected_courses", [])
     )
