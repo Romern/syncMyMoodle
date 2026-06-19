@@ -1,5 +1,5 @@
 [build-system]
-requires = ["setuptools>=61", "wheel"]
+requires = ["setuptools>=77.0.3", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -8,14 +8,14 @@ version = "0.3.0"
 description = "Synchronization client for RWTH Moodle"
 readme = "README.md"
 requires-python = ">=3.11"
-license = { text = "GPL-3.0-only" }
+license = "GPL-3.0-only"
+license-files = ["LICENSE"]
 authors = [
   { name = "Nils Kattenbeck", email = "nilskemail+pypi@gmail.com" }
 ]
 keywords = ["moodle", "sync", "rwth", "cli"]
 classifiers = [
   "Programming Language :: Python :: 3",
-  "License :: OSI Approved :: GNU General Public License v3 (GPLv3)",
   "Operating System :: OS Independent",
   "Development Status :: 5 - Production/Stable"
 ]

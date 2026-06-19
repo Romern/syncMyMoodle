@@ -6,34 +6,42 @@ template: |
 name-template: "$RESOLVED_VERSION"
 tag-template: "$RESOLVED_VERSION"
 version-template: "$MAJOR.$MINOR.$PATCH"
-version-resolver:
-  major:
-    labels:
-      - "semver:major"
-  minor:
-    labels:
-      - "semver:minor"
-  patch:
-    labels:
-      - "semver:patch"
-  default: patch
 categories:
+  - type: pre-exclude
+    when:
+      label: skip-changelog
+  - type: version-resolver
+    semver-increment: major
+    when:
+      label: "semver:major"
+  - type: version-resolver
+    semver-increment: minor
+    when:
+      label: "semver:minor"
+  - type: version-resolver
+    semver-increment: patch
+    when:
+      label: "semver:patch"
+  - type: version-resolver
+    semver-increment: patch
   - title: "Features"
-    labels:
-      - feature
-      - enhancement
+    when:
+      labels:
+        - feature
+        - enhancement
   - title: "Bug Fixes"
-    labels:
-      - bug
-      - fix
+    when:
+      labels:
+        - bug
+        - fix
   - title: "Maintenance"
-    labels:
-      - chore
-      - maintenance
-      - refactor
-      - dependencies
-      - documentation
+    when:
+      labels:
+        - chore
+        - maintenance
+        - refactor
+        - dependencies
+        - documentation
 change-template: "- $TITLE (#$NUMBER) @$AUTHOR"
+change-title-escapes: '\<*_&@#`'
 no-changes-template: "No user-facing changes."
-exclude-labels:
-  - skip-changelog
