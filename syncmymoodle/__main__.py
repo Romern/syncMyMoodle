@@ -29,12 +29,13 @@ except ImportError:
 import requests
 import yt_dlp
 from bs4 import BeautifulSoup as bs
+from bs4 import Tag
 from tqdm import tqdm
 
 try:
     import keyring
 except ImportError:
-    keyring = None
+    keyring = None  # type: ignore[assignment]
 
 YOUTUBE_ID_LENGTH = 11
 
@@ -2007,9 +2008,12 @@ class SyncMyMoodle:
                     soup_xml = bs(propfind_response.text, features="xml")
 
                     for resp in soup_xml.find_all("d:response"):
+                        if not isinstance(resp, Tag):
+                            continue
+
                         # get the href of the response
                         href_tag = resp.find("d:href")
-                        if href_tag is None or not href_tag.text:
+                        if not isinstance(href_tag, Tag) or not href_tag.text:
                             continue
                         new_href = href_tag.text
 
@@ -2025,10 +2029,12 @@ class SyncMyMoodle:
                         # to the raw ETag otherwise.
                         etag_value = None
                         prop = resp.find("d:prop")
-                        if prop is not None:
+                        if isinstance(prop, Tag):
                             checksums_tag = prop.find("oc:checksums")
-                            if checksums_tag is not None:
+                            if isinstance(checksums_tag, Tag):
                                 for cs in checksums_tag.find_all("oc:checksum"):
+                                    if not isinstance(cs, Tag):
+                                        continue
                                     text = (cs.text or "").strip()
                                     if text.upper().startswith("SHA1:"):
                                         etag_value = text.split(":", 1)[1]
@@ -2036,7 +2042,7 @@ class SyncMyMoodle:
 
                             if etag_value is None:
                                 etag_tag = prop.find("d:getetag")
-                                if etag_tag and etag_tag.text:
+                                if isinstance(etag_tag, Tag) and etag_tag.text:
                                     etag_value = etag_tag.text.strip()
 
                         logger.info(f"Sciebo response href: {new_href}")
