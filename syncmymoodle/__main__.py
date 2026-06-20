@@ -40,6 +40,21 @@ except ImportError:
     keyring = None
 
 YOUTUBE_ID_LENGTH = 11
+MOODLE_URL = "https://moodle.rwth-aachen.de/"
+RWTH_HOMEPAGE_URL = "https://www.rwth-aachen.de/"
+RWTH_STATUS_URL = "https://maintenance.itc.rwth-aachen.de/ticket/status/messages"
+RWTH_MOODLE_STATUS_URL = (
+    "https://maintenance.itc.rwth-aachen.de/ticket/status/messages/499?locale=en"
+)
+RWTH_SSO_STATUS_URL = (
+    "https://maintenance.itc.rwth-aachen.de/ticket/status/messages/462?locale=en"
+)
+RWTH_DISRUPTIVE_STATUS_CLASSES = {
+    "statuslabel_stoerung",
+    "statuslabel_teilstoerung",
+    "statuslabel_wartung",
+    "statuslabel_warnung",
+}
 
 logger = logging.getLogger(__name__)
 
@@ -457,6 +472,137 @@ class SyncMyMoodle:
             )
             self._opencast_status_hint_logged = True
 
+    def _check_general_connectivity(self):
+        try:
+            response = requests.get(RWTH_HOMEPAGE_URL, timeout=10)
+        except requests.RequestException as exc:
+            logger.warning(
+                "General connectivity check to %s failed: %s",
+                RWTH_HOMEPAGE_URL,
+                exc,
+            )
+            return False
+
+        if response.status_code >= 500:
+            logger.warning(
+                "General connectivity check to %s returned status %s",
+                RWTH_HOMEPAGE_URL,
+                response.status_code,
+            )
+            return False
+
+        logger.info("General connectivity check to %s succeeded", RWTH_HOMEPAGE_URL)
+        return True
+
+    def _current_rwth_service_issues(self, service_name, status_url):
+        try:
+            response = requests.get(status_url, timeout=10)
+        except requests.RequestException as exc:
+            logger.warning(
+                "Could not fetch RWTH ITC status page for %s: %s", service_name, exc
+            )
+            return []
+
+        if not (200 <= response.status_code < 300):
+            logger.warning(
+                "RWTH ITC status page for %s returned status %s",
+                service_name,
+                response.status_code,
+            )
+            return []
+
+        soup = bs(response.text, features="lxml")
+        issues = []
+        for card in soup.select(".notification-card"):
+            indicator = card.select_one(".notification-status-indicator")
+            status_label = card.select_one(".incident_queue-statuses div")
+            if indicator and "old" in indicator.get("class", []):
+                continue
+            if status_label and "old" in status_label.get("class", []):
+                continue
+
+            status_classes = set(status_label.get("class", []) if status_label else [])
+            if not status_classes.intersection(RWTH_DISRUPTIVE_STATUS_CLASSES):
+                continue
+
+            title = card.select_one(".report_title h3")
+            issue_link = card.select_one("[id^=link-to-copy-]")
+            issues.append(
+                {
+                    "service": service_name,
+                    "status": (
+                        status_label.get_text(" ", strip=True)
+                        if status_label
+                        else "Status issue"
+                    ),
+                    "title": (
+                        title.get_text(" ", strip=True)
+                        if title
+                        else "Current service issue"
+                    ),
+                    "url": (
+                        issue_link.get_text(" ", strip=True)
+                        if issue_link
+                        else status_url
+                    ),
+                }
+            )
+        return issues
+
+    def _check_rwth_status_page(self):
+        logger.warning("Check the RWTH ITC status page: %s", RWTH_STATUS_URL)
+        issues = []
+        for service_name, status_url in [
+            ("RWTHmoodle", RWTH_MOODLE_STATUS_URL),
+            ("RWTH Single Sign-On", RWTH_SSO_STATUS_URL),
+        ]:
+            issues.extend(self._current_rwth_service_issues(service_name, status_url))
+
+        if not issues:
+            logger.info(
+                "No current RWTHmoodle or RWTH Single Sign-On outage was found "
+                "on the RWTH ITC status pages"
+            )
+            return
+
+        for issue in issues:
+            logger.warning(
+                "%s may currently be affected: %s - %s. See %s",
+                issue["service"],
+                issue["status"],
+                issue["title"],
+                issue["url"],
+            )
+
+    def _check_moodle_availability(self):
+        if not self.session:
+            raise Exception("You need a requests session first.")
+
+        try:
+            response = self.session.get(MOODLE_URL, timeout=15)
+        except requests.RequestException as exc:
+            logger.critical("Could not reach RWTHmoodle at %s: %s", MOODLE_URL, exc)
+            self._check_general_connectivity()
+            self._check_rwth_status_page()
+            sys.exit(1)
+
+        if response.status_code >= 500:
+            logger.critical(
+                "RWTHmoodle returned status %s before login",
+                response.status_code,
+            )
+            self._check_rwth_status_page()
+            sys.exit(1)
+
+        if response.status_code >= 400:
+            logger.warning(
+                "RWTHmoodle availability check returned status %s; login may fail",
+                response.status_code,
+            )
+            self._check_rwth_status_page()
+
+        return response
+
     # RWTH SSO Login
 
     def login(self):
@@ -475,10 +621,17 @@ class SyncMyMoodle:
         if cookie_file.exists():
             with cookie_file.open("rb") as f:
                 self.session.cookies.update(pickle.load(f))
-        resp = self.session.get("https://moodle.rwth-aachen.de/")
-        resp = self.session.get(
-            "https://moodle.rwth-aachen.de/auth/shibboleth/index.php"
-        )
+        self._check_moodle_availability()
+        try:
+            resp = self.session.get(
+                urllib.parse.urljoin(MOODLE_URL, "auth/shibboleth/index.php"),
+                timeout=15,
+            )
+        except requests.RequestException as exc:
+            logger.critical("Could not reach RWTH SSO login endpoint: %s", exc)
+            self._check_general_connectivity()
+            self._check_rwth_status_page()
+            sys.exit(1)
         if resp.url.startswith("https://moodle.rwth-aachen.de/my/"):
             soup = bs(resp.text, features="lxml")
             self.session_key = get_session_key(soup)
@@ -523,8 +676,12 @@ class SyncMyMoodle:
 
             if soup.find(id="fudis_selected_token_ids_input") is None:
                 logger.critical(
-                    "Failed to login! Maybe your login-info was wrong or the RWTH-Servers have difficulties, see https://maintenance.rz.rwth-aachen.de/ticket/status/messages . For more info use the --verbose argument."
+                    "Failed to login. Maybe your login-info was wrong or the "
+                    "RWTH servers have difficulties. For current service "
+                    "status, see %s. For more info use the --verbose argument.",
+                    RWTH_STATUS_URL,
                 )
+                self._check_rwth_status_page()
                 logger.info("-------Login-Error-Soup--------")
                 logger.info(soup)
                 sys.exit(1)
@@ -543,8 +700,13 @@ class SyncMyMoodle:
             soup = bs(resp3.text, features="lxml")
             if soup.find(id="fudis_otp_input") is None:
                 logger.critical(
-                    "Failed to select TOTP generator! Maybe your TOTP serial number is wrong or the RWTH-Servers have difficulties, see https://maintenance.rz.rwth-aachen.de/ticket/status/messages . For more info use the --verbose argument."
+                    "Failed to select TOTP generator. Maybe your TOTP serial "
+                    "number is wrong or the RWTH servers have difficulties. "
+                    "For current service status, see %s. For more info use "
+                    "the --verbose argument.",
+                    RWTH_STATUS_URL,
                 )
+                self._check_rwth_status_page()
                 logger.info("-------Login-Error-Soup--------")
                 logger.info(soup)
                 sys.exit(1)
@@ -568,8 +730,12 @@ class SyncMyMoodle:
             soup = bs(resp4.text, features="lxml")
         if soup.find("input", {"name": "RelayState"}) is None:
             logger.critical(
-                "Failed to login! Maybe your login-info was wrong or the RWTH-Servers have difficulties, see https://maintenance.rz.rwth-aachen.de/ticket/status/messages . For more info use the --verbose argument."
+                "Failed to login. Maybe your login-info was wrong or the RWTH "
+                "servers have difficulties. For current service status, see "
+                "%s. For more info use the --verbose argument.",
+                RWTH_STATUS_URL,
             )
+            self._check_rwth_status_page()
             logger.info("-------Login-Error-Soup--------")
             logger.info(soup)
             sys.exit(1)
