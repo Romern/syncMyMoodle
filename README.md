@@ -190,10 +190,27 @@ configuration does:
     },
     "exclude_filetypes": [], // Exclude specific filetypes (e.g. ["mp4", "mkv"]) to disable downloading most videos
     "exclude_files": [], // Exclude specific files using UNIX filename pattern matching (e.g. "Lecture{video,zoom}*.{mp4,mkv}")
+    "exclude_links": [], // Exclude specific links using UNIX pattern matching (e.g. ["*tooltask.igm.rwth-aachen.de/hinge*"])
+    "allowed_domains": [], // Optional allowlist for discovered http(s) links. If set, links outside these domains are skipped (e.g. ["moodle.rwth-aachen.de", "rwth-aachen.sciebo.de"])
+    "exclude_sections": [], // Exclude sections by name or id using pattern matching. Can also be an object keyed by course id, e.g. {"13489": ["Week 1"]}
+    "exclude_modules": [], // Exclude modules by name, type, id or Moodle module URL. Can also be an object keyed by course id
     "update_files": true, // If true, existing files are redownloaded only when Moodle/Sciebo report that they were modified (based on timemodified and checksums).
     "update_files_conflict": "rename" // How to handle locally modified files when a newer version is available on Moodle/Sciebo: "rename" (default, move to <name>.syncconflict.<hash>), "keep" (skip update), or "overwrite" (!!DANGEROUS!! replaces the local file, you may lose any files you edited/changed!).
 }
 ```
+
+`exclude_sections` skips complete Moodle course sections, i.e. top-level
+topic/week blocks such as `General`, `Week 1` or `Exercise Sheets`. Matching a
+section skips all modules, files and links inside it.
+
+`exclude_modules` skips individual Moodle activities/resources inside a
+section, such as one file resource, folder, assignment, URL, page, quiz or
+Opencast/LTI item. It can match the module name, Moodle type (`resource`,
+`folder`, `assign`, `url`, `page`, `lti`, ...), id or Moodle module URL.
+
+`exclude_sections` and `exclude_modules` can be either a global list or an
+object keyed by Moodle course id. In per-course objects, `*` can be used for
+rules that apply to every course.
 
 Command line arguments have a higher priority than configuration files.
 You can override any of the options that you have configured in the file

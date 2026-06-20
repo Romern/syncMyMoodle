@@ -400,6 +400,126 @@ class SyncMyMoodle:
             timemodified=timemodified,
         )
 
+    def _as_list(self, value):
+        if value is None:
+            return []
+        if isinstance(value, list):
+            return value
+        return [value]
+
+    def _configured_patterns(self, *keys, course_id=None):
+        patterns = []
+        for key in keys:
+            value = self.config.get(key)
+            if isinstance(value, dict):
+                patterns.extend(self._as_list(value.get("*")))
+                if course_id is not None:
+                    patterns.extend(self._as_list(value.get(str(course_id))))
+            else:
+                patterns.extend(self._as_list(value))
+        return [str(pattern) for pattern in patterns if pattern is not None]
+
+    def _matches_any_pattern(self, values, patterns):
+        for value in values:
+            if value is None:
+                continue
+            value = str(value)
+            for pattern in patterns:
+                if value == pattern or fnmatchcase(value, pattern):
+                    return True
+        return False
+
+    def _domain_matches(self, netloc, allowed_domain):
+        host = netloc.split("@")[-1].split(":")[0].lower()
+        domain = str(allowed_domain).strip().lower()
+        domain = urllib.parse.urlparse(domain).netloc or domain
+        domain = domain.split("@")[-1].split(":")[0]
+        if not domain:
+            return False
+        if fnmatchcase(host, domain):
+            return True
+        if domain.startswith("*."):
+            return host.endswith(domain[1:])
+        return host == domain or host.endswith(f".{domain}")
+
+    def _should_skip_url(self, url, context="link"):
+        if not url:
+            return False
+
+        url = str(url).replace("&amp;", "&")
+        if self._matches_any_pattern([url], self._configured_patterns("exclude_links")):
+            logger.info("Skipping %s %s because it matches exclude_links", context, url)
+            return True
+
+        allowed_domains = self._configured_patterns("allowed_domains")
+        if allowed_domains:
+            parsed_url = urllib.parse.urlparse(url)
+            if parsed_url.scheme in {"http", "https"} and parsed_url.netloc:
+                if not any(
+                    self._domain_matches(parsed_url.netloc, domain)
+                    for domain in allowed_domains
+                ):
+                    logger.info(
+                        "Skipping %s %s because it is outside allowed_domains",
+                        context,
+                        url,
+                    )
+                    return True
+
+        return False
+
+    def _should_skip_section(self, section, course_id):
+        patterns = self._configured_patterns(
+            "exclude_sections", "skip_sections", course_id=course_id
+        )
+        if not patterns:
+            return False
+
+        values = [section.get("name"), section.get("id")]
+        if self._matches_any_pattern(values, patterns):
+            logger.info(
+                "Skipping section %s (%s) in course %s because it matches "
+                "exclude_sections",
+                section.get("name"),
+                section.get("id"),
+                course_id,
+            )
+            return True
+        return False
+
+    def _should_skip_module(self, module, course_id):
+        patterns = self._configured_patterns(
+            "exclude_modules", "skip_modules", course_id=course_id
+        )
+        if not patterns:
+            return False
+
+        module_id = module.get("id")
+        module_name = module.get("name")
+        modname = module.get("modname")
+        module_urls = []
+        if module.get("url"):
+            module_urls.append(module.get("url"))
+        if module_id and modname:
+            module_urls.extend(
+                [
+                    f"https://moodle.rwth-aachen.de/mod/{modname}/view.php?id={module_id}",
+                    f"https://moodle.rwth-aachen.de/mod/{modname}/launch.php?id={module_id}",
+                ]
+            )
+
+        values = [module_id, module_name, modname, *module_urls]
+        if self._matches_any_pattern(values, patterns):
+            logger.info(
+                "Skipping module %s (%s) in course %s because it matches "
+                "exclude_modules",
+                module_name,
+                module_id,
+                course_id,
+            )
+            return True
+        return False
+
     def _make_conflict_path(self, path: Path) -> Path:
         """Return a unique path for storing a locally modified file."""
         suffix = path.suffix
@@ -1064,6 +1184,8 @@ class SyncMyMoodle:
                 if isinstance(section, str):
                     logger.error(f"Error syncing section in {course_name}: {section}")
                     continue
+                if self._should_skip_section(section, course_id):
+                    continue
                 logger.info("------SECTION-DATA------")
                 logger.info(json.dumps(section))
                 section_node = course_node.add_child(
@@ -1071,6 +1193,9 @@ class SyncMyMoodle:
                 )
                 for module in section["modules"]:
                     try:
+                        if self._should_skip_module(module, course_id):
+                            continue
+
                         # Get Assignments
                         if module["modname"] == "assign" and self.config.get(
                             "used_modules", {}
@@ -1104,6 +1229,10 @@ class SyncMyMoodle:
                                 "introattachments"
                             ] + self.get_assignment_submission_files(assignment_id)
                             for c in ass:
+                                if self._should_skip_url(
+                                    c.get("fileurl"), "assignment file"
+                                ):
+                                    continue
                                 self._add_moodle_file_node(
                                     assignment_node,
                                     c.get("filepath", "/"),
@@ -1127,7 +1256,9 @@ class SyncMyMoodle:
                             ).get("resource", {}):
                                 continue
                             for c in module.get("contents", []):
-                                if c["fileurl"]:
+                                if c["fileurl"] and not self._should_skip_url(
+                                    c["fileurl"], "resource link"
+                                ):
                                     self.scanForLinks(
                                         c["fileurl"],
                                         section_node,
@@ -1154,6 +1285,10 @@ class SyncMyMoodle:
                                 self.scanForLinks(rel_folder[0], folder_node, course_id)
 
                             for c in module.get("contents", []):
+                                if self._should_skip_url(
+                                    c.get("fileurl"), "folder file"
+                                ):
+                                    continue
                                 self._add_moodle_file_node(
                                     folder_node,
                                     c.get("filepath", "/"),
@@ -1218,6 +1353,11 @@ class SyncMyMoodle:
                                                 continue
                                             vid = self.extractTrackFromEpisode(vid_id)
                                             if not vid:
+                                                continue
+
+                                            if self._should_skip_url(
+                                                vid, "Opencast video URL"
+                                            ):
                                                 continue
 
                                             section_node.add_child(
@@ -1350,6 +1490,8 @@ class SyncMyMoodle:
                                     vid = self.extractTrackFromEpisode(episode_id)
                                     if not vid:
                                         continue
+                                    if self._should_skip_url(vid, "Opencast video URL"):
+                                        continue
                                     series_node.add_child(
                                         mediapackage.get("title") or episode_id,
                                         episode_id,
@@ -1372,6 +1514,8 @@ class SyncMyMoodle:
                                         continue
                                     vid = self.extractTrackFromEpisode(engage_single_id)
                                     if not vid:
+                                        continue
+                                    if self._should_skip_url(vid, "Opencast video URL"):
                                         continue
                                     section_node.add_child(
                                         name,
@@ -1491,6 +1635,9 @@ class SyncMyMoodle:
     def download_file(self, node):
         """Download file with progress bar if it isn't already downloaded"""
         downloadpath = self.get_sanitized_node_path(node)
+
+        if self._should_skip_url(node.url, f"{node.type} file"):
+            return True
 
         # If we already downloaded this path during the current run, skip any
         # further processing. This avoids duplicate downloads and spurious
@@ -1955,6 +2102,8 @@ class SyncMyMoodle:
         """Download Youtube-Videos using yt_dlp"""
         path = self.get_sanitized_node_path(node.parent)
         link = node.url
+        if self._should_skip_url(link, "YouTube link"):
+            return True
         if path.exists():
             if any(link[-YOUTUBE_ID_LENGTH:] in f.name for f in path.iterdir()):
                 return False
@@ -2007,6 +2156,8 @@ class SyncMyMoodle:
         if single:
             try:
                 text = text.replace("webservice/pluginfile.php", "pluginfile.php")
+                if self._should_skip_url(text, "link"):
+                    return
                 response = self.session.head(text)
                 if "youtube.com" in text or "youtu.be" in text:
                     # workaround for youtube providing bad headers when using HEAD
@@ -2037,12 +2188,13 @@ class SyncMyMoodle:
                                 f"{parsed.scheme}://{parsed.netloc}/{parsed.path}",
                                 videojs["src"],
                             )
-                            parent_node.add_child(
-                                videojs["src"].split("/")[-1],
-                                None,
-                                "Embedded videojs",
-                                url=link,
-                            )
+                            if not self._should_skip_url(link, "embedded video"):
+                                parent_node.add_child(
+                                    videojs["src"].split("/")[-1],
+                                    None,
+                                    "Embedded videojs",
+                                    url=link,
+                                )
                     # further inspect the response for other links
                     self.scanForLinks(
                         response.text,
@@ -2068,6 +2220,8 @@ class SyncMyMoodle:
                 )
             ]
             for link in youtube_links:
+                if self._should_skip_url(link, "YouTube link"):
+                    continue
                 parent_node.add_child(
                     f"Youtube: {module_title or link}", link, "Youtube", url=link
                 )
@@ -2078,6 +2232,8 @@ class SyncMyMoodle:
                 "https://engage.streaming.rwth-aachen.de/play/[a-zA-Z0-9-]+", text
             )
             for vid in opencast_links:
+                if self._should_skip_url(vid, "Opencast link"):
+                    continue
                 vid_id = self._extract_opencast_episode_id(vid)
                 if not vid_id:
                     logger.warning(
@@ -2088,6 +2244,8 @@ class SyncMyMoodle:
                     continue
                 vid = self.extractTrackFromEpisode(vid_id)
                 if not vid:
+                    continue
+                if self._should_skip_url(vid, "Opencast video URL"):
                     continue
 
                 parent_node.add_child(
@@ -2107,6 +2265,8 @@ class SyncMyMoodle:
             webdav_location = "/public.php/webdav/"
             for link in sciebo_links:
                 logger.info(f"Found Sciebo Link: {link}")
+                if self._should_skip_url(link, "Sciebo link"):
+                    continue
                 cached_sciebo_root = self._sciebo_link_cache.get(link)
                 if cached_sciebo_root is not None:
                     if any(
@@ -2448,6 +2608,14 @@ def main():
         else config.get("exclude_filetypes", [])
     )
     config["exclude_files"] = config.get("exclude_files", [])
+    config["exclude_links"] = config.get("exclude_links", [])
+    config["allowed_domains"] = config.get("allowed_domains", [])
+    config["exclude_sections"] = config.get(
+        "exclude_sections", config.get("skip_sections", [])
+    )
+    config["exclude_modules"] = config.get(
+        "exclude_modules", config.get("skip_modules", [])
+    )
     config["updatefiles"] = args.updatefiles or config.get("update_files", False)
     config["update_files_conflict"] = args.updatefilesconflict or config.get(
         "update_files_conflict", "rename"
