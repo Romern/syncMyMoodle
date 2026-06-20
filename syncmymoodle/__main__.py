@@ -349,6 +349,42 @@ class SyncMyMoodle:
         except Exception:
             return None
 
+    def _get_or_add_child(self, parent_node, name, id, type):
+        for child in parent_node.children:
+            if child.name == name and child.type == type:
+                return child
+        return parent_node.add_child(name, id, type)
+
+    def _add_moodle_file_node(
+        self,
+        parent_node,
+        moodle_filepath,
+        filename,
+        id,
+        type,
+        url,
+        timemodified=None,
+    ):
+        target_node = parent_node
+        path_segments = [
+            self.sanitize(segment)
+            for segment in str(moodle_filepath or "").strip("/").split("/")
+            if segment
+        ]
+
+        for segment in path_segments:
+            target_node = self._get_or_add_child(target_node, segment, None, "Folder")
+            if target_node is None:
+                return None
+
+        return target_node.add_child(
+            filename,
+            id,
+            type,
+            url=url,
+            timemodified=timemodified,
+        )
+
     def _make_conflict_path(self, path: Path) -> Path:
         """Return a unique path for storing a locally modified file."""
         suffix = path.suffix
@@ -893,27 +929,15 @@ class SyncMyMoodle:
                                 "introattachments"
                             ] + self.get_assignment_submission_files(assignment_id)
                             for c in ass:
-                                if c["filepath"] != "/":
-                                    assignment_node.add_child(
-                                        str(
-                                            Path(
-                                                self.sanitize(c["filepath"]),
-                                                self.sanitize(c["filename"]),
-                                            )
-                                        ),
-                                        c["fileurl"],
-                                        "Assignment File",
-                                        url=c["fileurl"],
-                                        timemodified=c.get("timemodified"),
-                                    )
-                                else:
-                                    assignment_node.add_child(
-                                        c["filename"],
-                                        c["fileurl"],
-                                        "Assignment File",
-                                        url=c["fileurl"],
-                                        timemodified=c.get("timemodified"),
-                                    )
+                                self._add_moodle_file_node(
+                                    assignment_node,
+                                    c.get("filepath", "/"),
+                                    c["filename"],
+                                    c["fileurl"],
+                                    "Assignment File",
+                                    c["fileurl"],
+                                    timemodified=c.get("timemodified"),
+                                )
 
                         # Get Resources or URLs
                         if module["modname"] in [
@@ -955,31 +979,15 @@ class SyncMyMoodle:
                                 self.scanForLinks(rel_folder[0], folder_node, course_id)
 
                             for c in module.get("contents", []):
-                                if c["filepath"] != "/":
-                                    while c["filepath"][-1] == "/":
-                                        c["filepath"] = c["filepath"][:-1]
-                                    while c["filepath"][0] == "/":
-                                        c["filepath"] = c["filepath"][1:]
-                                    folder_node.add_child(
-                                        str(
-                                            Path(
-                                                self.sanitize(c["filepath"]),
-                                                self.sanitize(c["filename"]),
-                                            )
-                                        ),
-                                        c["fileurl"],
-                                        "Folder File",
-                                        url=c["fileurl"],
-                                        timemodified=c.get("timemodified"),
-                                    )
-                                else:
-                                    folder_node.add_child(
-                                        c["filename"],
-                                        c["fileurl"],
-                                        "Folder File",
-                                        url=c["fileurl"],
-                                        timemodified=c.get("timemodified"),
-                                    )
+                                self._add_moodle_file_node(
+                                    folder_node,
+                                    c.get("filepath", "/"),
+                                    c["filename"],
+                                    c["fileurl"],
+                                    "Folder File",
+                                    c["fileurl"],
+                                    timemodified=c.get("timemodified"),
+                                )
 
                         # Get embedded videos in pages or labels
                         if module["modname"] in [
