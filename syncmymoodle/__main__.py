@@ -19,6 +19,7 @@ from argparse import ArgumentParser
 from contextlib import closing
 from fnmatch import fnmatchcase
 from pathlib import Path
+from types import ModuleType
 from typing import List
 
 try:
@@ -32,7 +33,9 @@ from bs4 import BeautifulSoup as bs
 from tqdm import tqdm
 
 try:
-    import keyring
+    import keyring as imported_keyring
+
+    keyring: ModuleType | None = imported_keyring
 except ImportError:
     keyring = None
 
@@ -124,6 +127,21 @@ class Node:
         )
         self.children.append(temp)
         return temp
+
+    def clone(self, parent=None):
+        clone = Node(
+            self.name,
+            self.id,
+            self.type,
+            parent,
+            url=self.url,
+            additional_info=self.additional_info,
+            timemodified=self.timemodified,
+            etag=self.etag,
+            is_downloaded=self.is_downloaded,
+        )
+        clone.children = [child.clone(clone) for child in self.children]
+        return clone
 
     def get_path(self):
         ret = []
@@ -243,6 +261,10 @@ class SyncMyMoodle:
         # status page without spamming messages
         self._opencast_error_count = 0
         self._opencast_status_hint_logged = False
+        # Sciebo shares often appear multiple times in Moodle pages. Cache the
+        # resolved node tree during one run so repeated links do not trigger
+        # duplicate page fetches and WebDAV PROPFIND walks.
+        self._sciebo_link_cache = {}
 
     def cache_root_node(self):
         """Persist per-course caches into .syncmymoodle_cache files.
@@ -1902,6 +1924,16 @@ class SyncMyMoodle:
             webdav_location = "/public.php/webdav/"
             for link in sciebo_links:
                 logger.info(f"Found Sciebo Link: {link}")
+                cached_sciebo_root = self._sciebo_link_cache.get(link)
+                if cached_sciebo_root is not None:
+                    if any(
+                        child.name == cached_sciebo_root.name
+                        and child.type == cached_sciebo_root.type
+                        for child in parent_node.children
+                    ):
+                        continue
+                    parent_node.children.append(cached_sciebo_root.clone(parent_node))
+                    continue
 
                 # get the download page
                 try:
@@ -2076,6 +2108,7 @@ class SyncMyMoodle:
                 get_sciebo_files(
                     webdav_location, sciebo_root, sharingToken, auth_header
                 )
+                self._sciebo_link_cache[link] = sciebo_root.clone()
 
 
 def main():
