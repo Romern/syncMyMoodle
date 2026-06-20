@@ -925,6 +925,15 @@ class SyncMyMoodle:
                                 assignment_name, assignment_id, "Assignment"
                             )
 
+                            assignment_intro = ass.get("intro")
+                            if assignment_intro:
+                                self.scanForLinks(
+                                    assignment_intro,
+                                    assignment_node,
+                                    course_id,
+                                    module_title=assignment_name,
+                                )
+
                             ass = ass[
                                 "introattachments"
                             ] + self.get_assignment_submission_files(assignment_id)
