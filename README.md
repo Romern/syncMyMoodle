@@ -184,7 +184,7 @@ configuration does:
             "youtube": true, // Include YouTube Links/Embeds
             "opencast": true, // Include Opencast Links/Embeds
             "sciebo": true, // Include Sciebo Links/Embeds
-            "quiz": false // Include Quiz Links
+            "quiz": false // Quiz PDF generation is currently disabled for security reasons
         },
         "folder": true // Include folders
     },
@@ -219,6 +219,10 @@ using command line arguments.
 syncMyMoodle stores per-course metadata in a hidden `.syncmymoodle_cache` file
 inside each synced course directory. Delete that file to force a fresh metadata
 cache for a course.
+
+Quiz PDF generation is currently disabled. The previous optional
+`pdfkit`/`wkhtmltopdf` renderer is no longer maintained
+and has open security issues leading to RCE.
 
 ### TOTP
 
