@@ -58,6 +58,8 @@ RWTH_DISRUPTIVE_STATUS_CLASSES = {
     "statuslabel_wartung",
     "statuslabel_warnung",
 }
+COURSE_PREFIX_RE = re.compile(r"^\((?P<prefix>[^()]{2})\) +(?P<course_name>.+)$")
+COURSE_PREFIX_HANDLING_OPTIONS = ("keep", "remove", "suffix")
 
 logger = logging.getLogger(__name__)
 
@@ -230,7 +232,10 @@ class Node:
             self.children.remove(child)
             unclashed_children.append(child)
             siblings = [
-                c for c in self.children if c.name == child.name and c.url != child.url
+                c
+                for c in self.children
+                if c.name == child.name
+                and (c.url != child.url or c.name_clash_id != child.name_clash_id)
             ]
             if len(siblings) > 0:
                 # if a filename is still duplicate in its directory, we rename it by appending its id (urlsafe base64 so it also works for urls).
@@ -645,6 +650,27 @@ class SyncMyMoodle:
             else:
                 patterns.extend(self._as_list(value))
         return [str(pattern) for pattern in patterns if pattern is not None]
+
+    def _format_course_name(self, course_name):
+        prefix_handling = self.config.get("course_prefix_handling", "keep")
+        if prefix_handling == "keep":
+            return course_name
+        if prefix_handling not in COURSE_PREFIX_HANDLING_OPTIONS:
+            logger.warning(
+                "Unsupported course_prefix_handling value %r; using keep",
+                prefix_handling,
+            )
+            return course_name
+
+        match = COURSE_PREFIX_RE.match(course_name)
+        if not match:
+            return course_name
+
+        name = match.group("course_name")
+        prefix = match.group("prefix")
+        if prefix_handling == "remove":
+            return name
+        return f"{name} ({prefix})"
 
     def _matches_any_pattern(self, values, patterns):
         for value in values:
@@ -1339,7 +1365,7 @@ class SyncMyMoodle:
 
         # Syncing all courses
         for course in self.get_all_courses():
-            course_name = course["shortname"]
+            course_name = self._format_course_name(course["shortname"])
             course_id = course["id"]
 
             if (
@@ -2810,6 +2836,15 @@ def main():
         help="specify the directory where all files will be synced",
     )
     parser.add_argument(
+        "--courseprefix",
+        choices=COURSE_PREFIX_HANDLING_OPTIONS,
+        default=None,
+        help=(
+            "handle leading two-character course prefixes in local folder names: "
+            "'keep' (default), 'remove', or 'suffix'"
+        ),
+    )
+    parser.add_argument(
         "--nolinks",
         action="store_true",
         help="define whether various links in moodle pages should also be inspected e.g. youtube videos, wikipedia articles",
@@ -2881,6 +2916,9 @@ def main():
         else config.get("only_sync_semester", [])
     )
     config["basedir"] = args.basedir or config.get("basedir", "./")
+    config["course_prefix_handling"] = args.courseprefix or config.get(
+        "course_prefix_handling", "keep"
+    )
     config["use_secret_service"] = (
         args.secretservice if keyring else None
     ) or config.get("use_secret_service")
