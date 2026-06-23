@@ -40,6 +40,14 @@ except ImportError:
     keyring = None
 
 YOUTUBE_ID_LENGTH = 11
+NAME_CLASH_ID_UNSET = object()
+YOUTUBE_LINK_RE = re.compile(
+    r"(https?://(www\.)?(youtube\.com/(watch\?[a-zA-Z0-9_=&-]*v=|embed/)|youtu.be/).{11})"
+)
+OPENCAST_LINK_RE = re.compile(
+    r"https://engage\.streaming\.rwth-aachen\.de/play/[a-zA-Z0-9-]+"
+)
+SCIEBO_LINK_RE = re.compile(r"https://rwth-aachen\.sciebo\.de/s/[a-zA-Z0-9-]+")
 MOODLE_URL = "https://moodle.rwth-aachen.de/"
 RWTH_HOMEPAGE_URL = "https://www.rwth-aachen.de/"
 RWTH_STATUS_URL = "https://maintenance.itc.rwth-aachen.de/ticket/status/messages"
@@ -90,6 +98,7 @@ class Node:
         additional_info=None,
         timemodified=None,
         etag=None,
+        name_clash_id=NAME_CLASH_ID_UNSET,
         is_downloaded=False,
     ):
         self.name = name
@@ -103,6 +112,9 @@ class Node:
         self.additional_info = additional_info
         self.timemodified = timemodified
         self.etag = etag
+        self.name_clash_id = (
+            id if name_clash_id is NAME_CLASH_ID_UNSET else name_clash_id
+        )
         self.is_downloaded = (
             is_downloaded  # Can also be used to exclude files from being downloaded
         )
@@ -119,6 +131,7 @@ class Node:
         additional_info=None,
         timemodified=None,
         etag=None,
+        name_clash_id=NAME_CLASH_ID_UNSET,
     ):
         if url:
             url = url.replace("?forcedownload=1", "").replace(
@@ -139,6 +152,7 @@ class Node:
             additional_info=additional_info,
             timemodified=timemodified,
             etag=etag,
+            name_clash_id=name_clash_id,
         )
         self.children.append(temp)
         return temp
@@ -153,6 +167,7 @@ class Node:
             additional_info=self.additional_info,
             timemodified=self.timemodified,
             etag=self.etag,
+            name_clash_id=self.name_clash_id,
             is_downloaded=self.is_downloaded,
         )
         clone.children = [child.clone(clone) for child in self.children]
@@ -229,7 +244,7 @@ class Node:
                     filename.stem
                     + "_"
                     + base64.urlsafe_b64encode(
-                        hashlib.md5(str(child.id).encode("utf-8"))
+                        hashlib.md5(str(child.name_clash_id).encode("utf-8"))
                         .hexdigest()
                         .encode("utf-8")
                     ).decode()[:10]
@@ -241,7 +256,7 @@ class Node:
                         filename.stem
                         + "_"
                         + base64.urlsafe_b64encode(
-                            hashlib.md5(str(s.id).encode("utf-8"))
+                            hashlib.md5(str(s.name_clash_id).encode("utf-8"))
                             .hexdigest()
                             .encode("utf-8")
                         ).decode()[:10]
@@ -280,6 +295,11 @@ class SyncMyMoodle:
         # resolved node tree during one run so repeated links do not trigger
         # duplicate page fetches and WebDAV PROPFIND walks.
         self._sciebo_link_cache = {}
+        # Opencast episodes can be discovered through multiple Moodle surfaces
+        # in one sync run. Cache successful launches and track lookups to avoid
+        # repeating identical LTI/API requests.
+        self._opencast_episode_auth_cache = set()
+        self._opencast_track_cache = {}
 
     def cache_root_node(self):
         """Persist per-course caches into .syncmymoodle_cache files.
@@ -309,6 +329,8 @@ class SyncMyMoodle:
             node.timemodified = None
         if not hasattr(node, "etag"):
             node.etag = None
+        if not hasattr(node, "name_clash_id"):
+            node.name_clash_id = getattr(node, "id", None)
         for child in getattr(node, "children", []):
             self._ensure_timemodified_attribute(child)
 
@@ -379,6 +401,7 @@ class SyncMyMoodle:
         type,
         url,
         timemodified=None,
+        name_clash_id=NAME_CLASH_ID_UNSET,
     ):
         target_node = parent_node
         path_segments = [
@@ -398,6 +421,80 @@ class SyncMyMoodle:
             type,
             url=url,
             timemodified=timemodified,
+            name_clash_id=name_clash_id,
+        )
+
+    def _add_moodle_content_file_node(self, parent_node, content, file_type=None):
+        file_url = content.get("fileurl")
+        if not file_url:
+            return None
+
+        mimetype = content.get("mimetype") or "unknown"
+        filename = urllib.parse.urlsplit(file_url).path.split("/")[-1]
+        if not filename:
+            filename = content.get("filename")
+        return self._add_moodle_file_node(
+            parent_node,
+            "/",
+            filename,
+            file_url,
+            file_type or f"Linked file [{mimetype}]",
+            file_url,
+            timemodified=content.get("timemodified"),
+            name_clash_id=None,
+        )
+
+    def _is_direct_moodle_file_content(self, module, content):
+        file_url = content.get("fileurl")
+        if not file_url or content.get("type") != "file":
+            return False
+
+        mimetype = str(content.get("mimetype") or "").split(";", 1)[0].lower()
+        if not mimetype or mimetype in {
+            "document/unknown",
+            "unknown",
+            "text/html",
+            "application/xhtml+xml",
+        }:
+            return False
+        if mimetype.startswith("text/"):
+            return False
+
+        modname = module.get("modname")
+        if modname in {"resource", "pdfannotator"}:
+            return True
+
+        # Page modules often expose their rendered body as index.html. Keep
+        # that path in the HTML scanner, but direct-add binary attachments.
+        if modname == "page" and content.get("filename") != "index.html":
+            return True
+
+        return False
+
+    def _scan_html_text_for_links(
+        self, html_text, base_url, parent_node, course_id, module_title=None
+    ):
+        if "video-js" in html_text and "<source" in html_text.lower():
+            soup = bs(html_text, features="lxml")
+            videojs = soup.select_one(".video-js")
+            if videojs:
+                videojs = videojs.select_one("source")
+                if videojs and videojs.get("src"):
+                    link = urllib.parse.urljoin(str(base_url or ""), videojs["src"])
+                    if not self._should_skip_url(link, "embedded video"):
+                        parent_node.add_child(
+                            videojs["src"].split("/")[-1],
+                            None,
+                            "Embedded videojs",
+                            url=link,
+                        )
+
+        self.scanForLinks(
+            html_text,
+            parent_node,
+            course_id,
+            module_title=module_title,
+            single=False,
         )
 
     def _as_list(self, value):
@@ -1009,13 +1106,14 @@ class SyncMyMoodle:
             params=params,
             data=data,
         )
-        if not resp.json().get("userid") or not resp.json()["userprivateaccesskey"]:
+        payload = resp.json()
+        if not payload.get("userid") or not payload["userprivateaccesskey"]:
             logger.critical(
-                f"Error while getting userid and access key: {json.dumps(resp.json(), indent=4)}"
+                f"Error while getting userid and access key: {json.dumps(payload, indent=4)}"
             )
             sys.exit(1)
-        self.user_id = resp.json()["userid"]
-        self.user_private_access_key = resp.json()["userprivateaccesskey"]
+        self.user_id = payload["userid"]
+        self.user_private_access_key = payload["userprivateaccesskey"]
         return self.user_id, self.user_private_access_key
 
     def get_assignment(self, course_id):
@@ -1036,7 +1134,8 @@ class SyncMyMoodle:
             params=params,
             data=data,
         )
-        return resp.json()["courses"][0] if len(resp.json()["courses"]) > 0 else None
+        courses = resp.json()["courses"]
+        return courses[0] if courses else None
 
     def get_assignment_submission_files(self, assignment_id):
         data = {
@@ -1062,19 +1161,12 @@ class SyncMyMoodle:
         logger.info(f"------ASSIGNMENT-{assignment_id}-DATA------")
         logger.info(response.text)
 
-        files = (
-            response.json()
-            .get("lastattempt", {})
-            .get("submission", {})
-            .get("plugins", [])
-        )
+        payload = response.json()
+        files = payload.get("lastattempt", {}).get("submission", {}).get("plugins", [])
         files += (
-            response.json()
-            .get("lastattempt", {})
-            .get("teamsubmission", {})
-            .get("plugins", [])
+            payload.get("lastattempt", {}).get("teamsubmission", {}).get("plugins", [])
         )
-        files += response.json().get("feedback", {}).get("plugins", [])
+        files += payload.get("feedback", {}).get("plugins", [])
 
         files = [
             f.get("files", [])
@@ -1168,8 +1260,33 @@ class SyncMyMoodle:
             course_node = semester_node.add_child(course_name, course_id, "Course")
 
             print(f"Syncing {course_name}...")
-            assignments = self.get_assignment(course_id)
-            folders = self.get_folders_by_courses(course_id)
+            course_sections = self.get_course(course_id)
+            module_names = {
+                module.get("modname")
+                for section in course_sections
+                if isinstance(section, dict)
+                for module in section.get("modules", [])
+            }
+
+            assignments = None
+            if self.config.get("used_modules", {}).get("assign", {}) and (
+                "assign" in module_names
+            ):
+                assignments = self.get_assignment(course_id)
+            assignments_by_cmid = {
+                assignment["cmid"]: assignment
+                for assignment in ((assignments or {}).get("assignments") or [])
+                if "cmid" in assignment
+            }
+
+            folders = []
+            if self.config.get("used_modules", {}).get("folder", {}) and (
+                "folder" in module_names
+            ):
+                folders = self.get_folders_by_courses(course_id)
+            folders_by_coursemodule = {
+                folder.get("coursemodule"): folder for folder in folders
+            }
 
             logger.info("-----------------------")
             logger.info(f"------{semestername} - {course_name}------")
@@ -1180,7 +1297,7 @@ class SyncMyMoodle:
             logger.info("------FOLDER-DATA------")
             logger.info(json.dumps(folders))
 
-            for section in self.get_course(course_id):
+            for section in course_sections:
                 if isinstance(section, str):
                     logger.error(f"Error syncing section in {course_name}: {section}")
                     continue
@@ -1200,16 +1317,9 @@ class SyncMyMoodle:
                         if module["modname"] == "assign" and self.config.get(
                             "used_modules", {}
                         ).get("assign", {}):
-                            if assignments is None:
+                            ass = assignments_by_cmid.get(module["id"])
+                            if not ass:
                                 continue
-                            ass = [
-                                a
-                                for a in assignments.get("assignments")
-                                if a["cmid"] == module["id"]
-                            ]
-                            if len(ass) == 0:
-                                continue
-                            ass = ass[0]
                             assignment_id = ass["id"]
                             assignment_name = module["name"]
                             assignment_node = section_node.add_child(
@@ -1256,11 +1366,19 @@ class SyncMyMoodle:
                             ).get("resource", {}):
                                 continue
                             for c in module.get("contents", []):
-                                if c["fileurl"] and not self._should_skip_url(
-                                    c["fileurl"], "resource link"
+                                file_url = c.get("fileurl")
+                                if not file_url:
+                                    continue
+                                if self._should_skip_url(file_url, "resource link"):
+                                    continue
+                                if self._is_direct_moodle_file_content(module, c):
+                                    self._add_moodle_content_file_node(section_node, c)
+                                elif not (
+                                    module["modname"] == "page"
+                                    and c.get("filename") == "index.html"
                                 ):
                                     self.scanForLinks(
-                                        c["fileurl"],
+                                        file_url,
                                         section_node,
                                         course_id,
                                         single=True,
@@ -1276,13 +1394,11 @@ class SyncMyMoodle:
                             )
 
                             # Scan intro for links
-                            rel_folder = [
-                                f["intro"]
-                                for f in folders
-                                if f["coursemodule"] == module["id"]
-                            ]
-                            if rel_folder:
-                                self.scanForLinks(rel_folder[0], folder_node, course_id)
+                            folder_info = folders_by_coursemodule.get(module["id"])
+                            if folder_info and folder_info.get("intro"):
+                                self.scanForLinks(
+                                    folder_info["intro"], folder_node, course_id
+                                )
 
                             for c in module.get("contents", []):
                                 if self._should_skip_url(
@@ -1306,18 +1422,24 @@ class SyncMyMoodle:
                             "h5pactivity",
                         ] and self.config.get("used_modules", {}).get("url", {}):
                             if module["modname"] == "page":
-                                if (
+                                opencast_enabled = (
                                     self.config.get("used_modules", {})
                                     .get("url", {})
                                     .get("opencast", {})
-                                ):
-                                    # Check for embedded OpenCast iframes
-                                    html_url = f'https://moodle.rwth-aachen.de/mod/page/view.php?id={module["id"]}'
+                                )
+                                html_url = (
+                                    module.get("url")
+                                    or f'https://moodle.rwth-aachen.de/mod/page/view.php?id={module["id"]}'
+                                )
+                                scan_page_links = not self.config.get(
+                                    "nolinks"
+                                ) and not self._should_skip_url(html_url, "page link")
+                                if opencast_enabled or scan_page_links:
                                     try:
                                         response = self.session.get(html_url)
                                     except Exception:
                                         logger.exception(
-                                            "Opencast: failed to fetch page module %s",
+                                            "Failed to fetch page module %s",
                                             module["id"],
                                         )
                                         response = None
@@ -1325,56 +1447,63 @@ class SyncMyMoodle:
                                         200 <= response.status_code < 300
                                     ):
                                         logger.warning(
-                                            "Opencast: page module %s returned status %s",
+                                            "Page module %s returned status %s",
                                             module["id"],
                                             response.status_code,
                                         )
                                         response = None
-                                    html = bs(
-                                        response.text if response else "",
-                                        features="lxml",
-                                    )
                                     if response:
-                                        for iframe in html.find_all("iframe"):
-                                            iframe_src = iframe.get("src")
-                                            if not iframe_src:
-                                                continue
-                                            iframe_src = urllib.parse.urljoin(
-                                                html_url, iframe_src
+                                        if opencast_enabled:
+                                            html = bs(
+                                                response.text,
+                                                features="lxml",
                                             )
-                                            vid_id = self._extract_opencast_episode_id(
-                                                iframe_src
+                                            for iframe in html.find_all("iframe"):
+                                                iframe_src = iframe.get("src")
+                                                if not iframe_src:
+                                                    continue
+                                                iframe_src = urllib.parse.urljoin(
+                                                    response.url or html_url,
+                                                    iframe_src,
+                                                )
+                                                vid_id = (
+                                                    self._extract_opencast_episode_id(
+                                                        iframe_src
+                                                    )
+                                                )
+                                                if not vid_id:
+                                                    continue
+                                                if not self._authenticate_opencast_episode(
+                                                    course_id, vid_id
+                                                ):
+                                                    continue
+                                                vid = self.extractTrackFromEpisode(
+                                                    vid_id
+                                                )
+                                                if not vid:
+                                                    continue
+
+                                                if self._should_skip_url(
+                                                    vid, "Opencast video URL"
+                                                ):
+                                                    continue
+
+                                                section_node.add_child(
+                                                    module["name"],
+                                                    vid_id,
+                                                    "Opencast",
+                                                    url=vid,
+                                                    additional_info=course_id,
+                                                )
+
+                                        if scan_page_links:
+                                            self._scan_html_text_for_links(
+                                                response.text,
+                                                response.url or html_url,
+                                                section_node,
+                                                course_id,
+                                                module_title=module["name"],
                                             )
-                                            if not vid_id:
-                                                continue
-                                            if not self._authenticate_opencast_episode(
-                                                course_id, vid_id
-                                            ):
-                                                continue
-                                            vid = self.extractTrackFromEpisode(vid_id)
-                                            if not vid:
-                                                continue
-
-                                            if self._should_skip_url(
-                                                vid, "Opencast video URL"
-                                            ):
-                                                continue
-
-                                            section_node.add_child(
-                                                module["name"],
-                                                vid_id,
-                                                "Opencast",
-                                                url=vid,
-                                                additional_info=course_id,
-                                            )
-
-                                self.scanForLinks(
-                                    module["url"],
-                                    section_node,
-                                    course_id,
-                                    module_title=module["name"],
-                                    single=True,
-                                )
                             # "Interactive" h5p videos
                             elif module["modname"] == "h5pactivity":
                                 html_url = f'https://moodle.rwth-aachen.de/mod/h5pactivity/view.php?id={module["id"]}'
@@ -2033,6 +2162,10 @@ class SyncMyMoodle:
             logger.warning("Opencast: cannot launch episode without Moodle sesskey")
             return False
 
+        cache_key = (course_id, episode_id)
+        if cache_key in self._opencast_episode_auth_cache:
+            return True
+
         params = urllib.parse.urlencode(
             {
                 "courseid": course_id,
@@ -2048,7 +2181,10 @@ class SyncMyMoodle:
         engage_data = self._fetch_lti_form_data(info_url, context)
         if engage_data is None:
             return False
-        return self._submit_opencast_lti_form(engage_data, context)
+        if not self._submit_opencast_lti_form(engage_data, context):
+            return False
+        self._opencast_episode_auth_cache.add(cache_key)
+        return True
 
     def _fetch_opencast_json(self, url, context):
         try:
@@ -2116,6 +2252,9 @@ class SyncMyMoodle:
         return int(match.group(1))
 
     def extractTrackFromEpisode(self, episode_id):
+        if episode_id in self._opencast_track_cache:
+            return self._opencast_track_cache[episode_id]
+
         episode_url = (
             "https://engage.streaming.rwth-aachen.de/search/episode.json"
             f"?id={episode_id}"
@@ -2161,7 +2300,9 @@ class SyncMyMoodle:
             return False
 
         # Prefer the highest resolution plain HTTPS mp4 track.
-        return sorted(tracks, key=lambda track: track[0])[-1][1]
+        track_url = sorted(tracks, key=lambda track: track[0])[-1][1]
+        self._opencast_track_cache[episode_id] = track_url
+        return track_url
 
     def getOpenCastRealURL(self, additional_info, url):
         """Download Opencast videos by using the engage API"""
@@ -2265,30 +2406,12 @@ class SyncMyMoodle:
                     return
                 elif not self.config.get("nolinks"):
                     response = self.session.get(text)
-                    tempsoup = bs(response.text, features="lxml")
-                    videojs = tempsoup.select_one(".video-js")
-                    if videojs:
-                        videojs = videojs.select_one("source")
-                        if videojs and videojs.get("src"):
-                            parsed = urllib.parse.urlparse(response.url)
-                            link = urllib.parse.urljoin(
-                                f"{parsed.scheme}://{parsed.netloc}/{parsed.path}",
-                                videojs["src"],
-                            )
-                            if not self._should_skip_url(link, "embedded video"):
-                                parent_node.add_child(
-                                    videojs["src"].split("/")[-1],
-                                    None,
-                                    "Embedded videojs",
-                                    url=link,
-                                )
-                    # further inspect the response for other links
-                    self.scanForLinks(
+                    self._scan_html_text_for_links(
                         response.text,
+                        response.url or text,
                         parent_node,
                         course_id,
                         module_title=module_title,
-                        single=False,
                     )
             except Exception:
                 # Maybe the url is down?
@@ -2299,12 +2422,9 @@ class SyncMyMoodle:
         # Youtube videos
         if self.config.get("used_modules", {}).get("url", {}).get("youtube", {}):
             youtube_links = [
-                u[0]
+                match.group(1)
                 # finds youtube.com, youtu.be and embed links
-                for u in re.findall(
-                    r"(https?://(www\.)?(youtube\.com/(watch\?[a-zA-Z0-9_=&-]*v=|embed/)|youtu.be/).{11})",
-                    text,
-                )
+                for match in YOUTUBE_LINK_RE.finditer(text)
             ]
             for link in youtube_links:
                 if self._should_skip_url(link, "YouTube link"):
@@ -2315,9 +2435,7 @@ class SyncMyMoodle:
 
         # OpenCast videos
         if self.config.get("used_modules", {}).get("url", {}).get("opencast", {}):
-            opencast_links = re.findall(
-                "https://engage.streaming.rwth-aachen.de/play/[a-zA-Z0-9-]+", text
-            )
+            opencast_links = OPENCAST_LINK_RE.findall(text)
             for vid in opencast_links:
                 if self._should_skip_url(vid, "Opencast link"):
                     continue
@@ -2345,9 +2463,7 @@ class SyncMyMoodle:
 
         # https://rwth-aachen.sciebo.de/s/XXX
         if self.config.get("used_modules", {}).get("url", {}).get("sciebo", {}):
-            sciebo_links = set(
-                re.findall("https://rwth-aachen.sciebo.de/s/[a-zA-Z0-9-]+", text)
-            )
+            sciebo_links = set(SCIEBO_LINK_RE.findall(text))
             sciebo_url = "https://rwth-aachen.sciebo.de"
             webdav_location = "/public.php/webdav/"
             for link in sciebo_links:
