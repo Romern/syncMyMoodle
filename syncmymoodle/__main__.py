@@ -1591,8 +1591,8 @@ class SyncMyMoodle:
                         )
                 elif cur_node.type == "Opencast":
                     try:
-                        self.downloadOpenCastVideos(cur_node)
-                        cur_node.is_downloaded = True
+                        if self.downloadOpenCastVideos(cur_node):
+                            cur_node.is_downloaded = True
                     except Exception:
                         logger.exception(f"Failed to download the module {cur_node}")
                 elif cur_node.type == "Quiz":
@@ -1604,8 +1604,8 @@ class SyncMyMoodle:
                         logger.warning("Is wkhtmltopdf correctly installed?")
                 else:
                     try:
-                        self.download_file(cur_node)
-                        cur_node.is_downloaded = True
+                        if self.download_file(cur_node):
+                            cur_node.is_downloaded = True
                     except Exception:
                         logger.exception(f"Failed to download the module {cur_node}")
             return
@@ -1631,6 +1631,58 @@ class SyncMyMoodle:
         path = path.replace("amp;", "&")
 
         return path
+
+    def _content_type_without_parameters(self, response):
+        content_type = response.headers.get("Content-Type", "")
+        return content_type.split(";", 1)[0].strip().lower()
+
+    def _node_allows_html_download(self, node):
+        html_suffixes = {".htm", ".html", ".xhtml"}
+        node_suffix = Path(str(node.name or "")).suffix.lower()
+        url_suffix = Path(
+            urllib.parse.urlparse(str(node.url or "")).path
+        ).suffix.lower()
+        return node_suffix in html_suffixes or url_suffix in html_suffixes
+
+    def _chunk_looks_like_html(self, chunk):
+        body_start = chunk.lstrip().lower()
+        return body_start.startswith(b"<!doctype html") or body_start.startswith(
+            b"<html"
+        )
+
+    def _download_response_is_usable(self, node, response, downloadpath):
+        if response.status_code == 204:
+            logger.warning(
+                "Skipping download of %s from %s because the server returned no "
+                "content",
+                downloadpath,
+                node.url,
+            )
+            return False
+
+        if not (200 <= response.status_code < 300):
+            logger.warning(
+                "Skipping download of %s from %s because the server returned "
+                "HTTP %s",
+                downloadpath,
+                node.url,
+                response.status_code,
+            )
+            return False
+
+        content_type = self._content_type_without_parameters(response)
+        if content_type in {"text/html", "application/xhtml+xml"}:
+            if not self._node_allows_html_download(node):
+                logger.warning(
+                    "Skipping download of %s from %s because the server returned "
+                    "HTML instead of the expected file. This usually means the "
+                    "link requires a separate login or points to an error page.",
+                    downloadpath,
+                    node.url,
+                )
+                return False
+
+        return True
 
     def download_file(self, node):
         """Download file with progress bar if it isn't already downloaded"""
@@ -1804,15 +1856,45 @@ class SyncMyMoodle:
             self.session.get(node.url, headers=header, stream=True)
         ) as response:
             etag_header = response.headers.get("ETag")
-            print(f"Downloading {downloadpath} [{node.type}]")
             # If we attempted to resume but the server did not honor the Range
             # header (status != 206), fallback to a full download and ignore
             # the existing partial file to avoid corrupting PDFs or other
             # content by appending a second full copy.
-            if resume_size and response.status_code != 206:
+            if resume_size and response.status_code == 200:
                 resume_size = 0
                 tmp_downloadpath.unlink(missing_ok=True)
 
+            if not self._download_response_is_usable(node, response, downloadpath):
+                return False
+
+            if resume_size and response.status_code != 206:
+                logger.warning(
+                    "Skipping download of %s from %s because the server returned "
+                    "HTTP %s instead of partial content for a resumed download",
+                    downloadpath,
+                    node.url,
+                    response.status_code,
+                )
+                return False
+
+            content = response.iter_content(self.block_size)
+            first_chunk = next((chunk for chunk in content if chunk), b"")
+            if (
+                first_chunk
+                and self._chunk_looks_like_html(first_chunk)
+                and not self._node_allows_html_download(node)
+            ):
+                logger.warning(
+                    "Skipping download of %s from %s because the response body "
+                    "starts with HTML instead of the expected file. This usually "
+                    "means the link requires a separate login or points to an "
+                    "error page.",
+                    downloadpath,
+                    node.url,
+                )
+                return False
+
+            print(f"Downloading {downloadpath} [{node.type}]")
             total_size_in_bytes = int(response.headers.get("content-length", 0)) + max(
                 resume_size, 0
             )
@@ -1822,7 +1904,10 @@ class SyncMyMoodle:
             downloadpath.parent.mkdir(parents=True, exist_ok=True)
             mode = "ab" if resume_size else "wb"
             with tmp_downloadpath.open(mode) as file:
-                for data in response.iter_content(self.block_size):
+                if first_chunk:
+                    progress_bar.update(len(first_chunk))
+                    file.write(first_chunk)
+                for data in content:
                     progress_bar.update(len(data))
                     file.write(data)
             progress_bar.close()
@@ -2158,13 +2243,15 @@ class SyncMyMoodle:
                 text = text.replace("webservice/pluginfile.php", "pluginfile.php")
                 if self._should_skip_url(text, "link"):
                     return
-                response = self.session.head(text)
+                response = self.session.head(text, allow_redirects=True)
+                content_type = self._content_type_without_parameters(response)
                 if "youtube.com" in text or "youtu.be" in text:
                     # workaround for youtube providing bad headers when using HEAD
                     pass
                 elif (
-                    "Content-Type" in response.headers
-                    and "text/html" not in response.headers["Content-Type"]
+                    200 <= response.status_code < 300
+                    and content_type
+                    and content_type not in {"text/html", "application/xhtml+xml"}
                 ):
                     # non html links, assume the filename is in the path
                     filename = urllib.parse.urlsplit(text).path.split("/")[-1]
