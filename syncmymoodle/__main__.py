@@ -1848,7 +1848,13 @@ class SyncMyMoodle:
                         )
                 elif cur_node.type == "Opencast":
                     try:
-                        if self.downloadOpenCastVideos(cur_node):
+                        # download Opencast videos
+                        if ".mp4" not in cur_node.name:
+                            if cur_node.name is not None and cur_node.name != "":
+                                cur_node.name += ".mp4"
+                            else:
+                                cur_node.name = cur_node.url.split("/")[-1]
+                        if self.download_file(cur_node):
                             cur_node.is_downloaded = True
                     except Exception:
                         logger.exception(f"Failed to download the module {cur_node}")
@@ -2288,16 +2294,6 @@ class SyncMyMoodle:
 
         return engage_data
 
-    def _authenticate_opencast_lti_module(self, module_id):
-        info_url = (
-            f"https://moodle.rwth-aachen.de/mod/lti/launch.php?id={module_id}"
-            "&triggerview=0"
-        )
-        engage_data = self._fetch_lti_form_data(info_url, f"LTI module {module_id}")
-        if engage_data is None:
-            return False
-        return self._submit_opencast_lti_form(engage_data, f"LTI module {module_id}")
-
     def _authenticate_opencast_episode(self, course_id, episode_id):
         if not self.session_key:
             logger.warning("Opencast: cannot launch episode without Moodle sesskey")
@@ -2444,26 +2440,6 @@ class SyncMyMoodle:
         track_url = sorted(tracks, key=lambda track: track[0])[-1][1]
         self._opencast_track_cache[episode_id] = track_url
         return track_url
-
-    def getOpenCastRealURL(self, additional_info, url):
-        """Download Opencast videos by using the engage API"""
-        episode_id = self._extract_opencast_episode_id(url)
-        if not episode_id:
-            logger.warning(f"Opencast: could not extract episode id from url {url}")
-            return False
-
-        if not self._authenticate_opencast_lti_module(additional_info):
-            return False
-
-        return self.extractTrackFromEpisode(episode_id)
-
-    def downloadOpenCastVideos(self, node):
-        if ".mp4" not in node.name:
-            if node.name is not None and node.name != "":
-                node.name += ".mp4"
-            else:
-                node.name = node.url.split("/")[-1]
-        return self.download_file(node)
 
     def scanAndDownloadYouTube(self, node):
         """Download Youtube-Videos using yt_dlp"""
