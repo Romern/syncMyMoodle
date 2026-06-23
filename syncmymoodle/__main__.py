@@ -235,7 +235,17 @@ class Node:
                 c
                 for c in self.children
                 if c.name == child.name
-                and (c.url != child.url or c.name_clash_id != child.name_clash_id)
+                and (
+                    c.url != child.url
+                    # Course prefix handling may create duplicate URL-less course
+                    # folders. Other URL-less nodes, such as duplicate Moodle
+                    # sections, keep the legacy behavior and merge silently.
+                    or (
+                        child.type == "Course"
+                        and c.type == "Course"
+                        and c.name_clash_id != child.name_clash_id
+                    )
+                )
             ]
             if len(siblings) > 0:
                 # if a filename is still duplicate in its directory, we rename it by appending its id (urlsafe base64 so it also works for urls).

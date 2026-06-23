@@ -69,6 +69,17 @@ class CourseNameClashTest(unittest.TestCase):
         for name in names:
             self.assertTrue(name.startswith("Software Quality Assurance_"))
 
+    def test_same_section_name_without_url_keeps_legacy_merged_path(self):
+        root = Node("", -1, "Root", None)
+        course = root.add_child("Course", 100, "Course")
+        course.add_child("Case Study", 201, "Section")
+        course.add_child("Case Study", 202, "Section")
+
+        root.remove_children_nameclashes()
+
+        names = [section.name for section in course.children]
+        self.assertEqual(names, ["Case Study", "Case Study"])
+
     def test_same_name_with_different_urls_still_gets_stable_suffixes(self):
         root = Node("", -1, "Root", None)
         section = root.add_child("General", None, "Section")
