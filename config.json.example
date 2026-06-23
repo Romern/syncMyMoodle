@@ -7,6 +7,7 @@
     "totp": "",
     "totpsecret": "",
     "basedir": "./",
+    "course_prefix_handling": "suffix",
     "cookie_file": "./session",
     "use_secret_service": false,
     "secret_service_store_totp_secret": false,

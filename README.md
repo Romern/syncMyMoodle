@@ -106,9 +106,11 @@ usage: python3 -m syncmymoodle [-h] [--secretservice] [--secretservicetotpsecret
                                [--config CONFIG] [--cookiefile COOKIEFILE]
                                [--courses COURSES] [--skipcourses SKIPCOURSES]
                                [--semester SEMESTER] [--basedir BASEDIR]
-                               [--nolinks]
+                               [--courseprefix {keep,remove,suffix}] [--nolinks]
                                [--excludefiletypes EXCLUDEFILETYPES]
-                               [--updatefiles] [-v]
+                               [--updatefiles]
+                               [--updatefilesconflict {rename,keep,overwrite}]
+                               [-v]
 
 Synchronization client for RWTH Moodle. All optional arguments override those
 in config.json.
@@ -139,6 +141,9 @@ options:
                         separated. Defaults to all semesters, if no additional
                         restrictions e.g. courses are defined.
   --basedir BASEDIR     specify the directory where all files will be synced
+  --courseprefix {keep,remove,suffix}
+                        handle leading two-character course prefixes in local
+                        folder names: 'keep' (default), 'remove', or 'suffix'
   --nolinks             define whether various links in moodle pages should
                         also be inspected e.g. youtube videos, wikipedia
                         articles
@@ -173,6 +178,7 @@ configuration does:
     "totp": "", // RWTH SSO TOTP "Serial Number", format: TOTP0000000A, see https://idm.rwth-aachen.de/selfservice/MFATokenManager
     "totpsecret": "", // The TOTP Secret for your TOTP generator (optional)
     "basedir": "./", // The base directory where all your files will be synced to
+    "course_prefix_handling": "suffix", // How to handle local course folders starting with a two-character prefix like "(VO) ": "keep" (backwards-compatible default), "remove", or "suffix" (recommended)
     "cookie_file": "./session", // The location of the session/cookie file, which can be used instead of a password.
     "use_secret_service": false, // Use the system keyring (see README), instead of a password.
     "secret_service_store_totp_secret": false, // Store the TOTP secret in the system keyring.
@@ -198,6 +204,15 @@ configuration does:
     "update_files_conflict": "rename" // How to handle locally modified files when a newer version is available on Moodle/Sciebo: "rename" (default, move to <name>.syncconflict.<hash>), "keep" (skip update), or "overwrite" (!!DANGEROUS!! replaces the local file, you may lose any files you edited/changed!).
 }
 ```
+
+`course_prefix_handling` controls local course folder names that start with a
+prefix of exactly two characters in parentheses, followed by a space. For
+example, `(VO) Analysis` stays unchanged with `keep`, becomes `Analysis` with
+`remove`, and becomes `Analysis (VO)` with `suffix`. If not set, the default
+is `keep` for backwards compatibility, however `suffix` is recommended.
+`remove` can create folder-name conflicts when multiple course types share
+the same title; syncMyMoodle resolves those by adding a stable suffix to the
+conflicting folders.
 
 `exclude_sections` skips complete Moodle course sections, i.e. top-level
 topic/week blocks such as `General`, `Week 1` or `Exercise Sheets`. Matching a
