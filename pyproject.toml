@@ -32,7 +32,6 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-quiz = ["pdfkit>=0.6.0"]
 keyring = ["keyring>=20.0.0"]
 test = [
   "black",
@@ -59,7 +58,6 @@ module = [
   "bs4",
   "yt_dlp",
   "tqdm",
-  "pdfkit",
   "keyring",
 ]
 ignore_missing_imports = true

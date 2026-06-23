@@ -2,17 +2,17 @@
 
 import base64
 import getpass
+import gzip
 import hashlib
 import hmac
 import http.client
 import json
 import logging
 import os
-import pickle
 import re
-import shutil
 import struct
 import sys
+import tempfile
 import time
 import urllib.parse
 from argparse import ArgumentParser
@@ -21,11 +21,6 @@ from fnmatch import fnmatchcase
 from pathlib import Path
 from types import ModuleType
 from typing import List
-
-try:
-    import pdfkit
-except ImportError:
-    pdfkit = None
 
 import requests
 import yt_dlp
@@ -301,6 +296,130 @@ class SyncMyMoodle:
         self._opencast_episode_auth_cache = set()
         self._opencast_track_cache = {}
 
+    def _harden_private_file(self, path: Path, description: str) -> bool:
+        if not path.exists():
+            return True
+        if path.is_symlink():
+            logger.warning("Refusing to use symlinked %s file: %s", description, path)
+            return False
+        try:
+            path.chmod(0o600)
+        except OSError:
+            logger.warning(
+                "Could not restrict permissions for %s file: %s", description, path
+            )
+        return True
+
+    def _write_private_gzip_json(self, path: Path, payload) -> None:
+        path = path.expanduser()
+        path.parent.mkdir(parents=True, exist_ok=True)
+
+        json_bytes = json.dumps(payload, separators=(",", ":")).encode("utf-8")
+        data = gzip.compress(json_bytes)
+
+        fd, tmp_name = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
+        tmp_path = Path(tmp_name)
+        try:
+            os.fchmod(fd, 0o600)
+            with os.fdopen(fd, "wb") as f:
+                f.write(data)
+            os.replace(tmp_path, path)
+            path.chmod(0o600)
+        finally:
+            if tmp_path.exists():
+                tmp_path.unlink()
+
+    def _read_private_gzip_json(self, path: Path, description: str):
+        path = path.expanduser()
+        if not path.exists():
+            return None
+        if not self._harden_private_file(path, description):
+            return None
+        try:
+            with path.open("rb") as f:
+                return json.loads(gzip.decompress(f.read()).decode("utf-8"))
+        except (OSError, gzip.BadGzipFile, UnicodeDecodeError, json.JSONDecodeError):
+            logger.warning(
+                "Ignoring legacy or invalid %s file %s. Delete it if this warning repeats.",
+                description,
+                path,
+            )
+            return None
+
+    def _node_to_cache_data(self, node: Node):
+        return {
+            "name": node.name,
+            "id": node.id,
+            "type": node.type,
+            "url": node.url,
+            "timemodified": node.timemodified,
+            "etag": node.etag,
+            "name_clash_id": node.name_clash_id,
+            "is_downloaded": node.is_downloaded,
+            "children": [self._node_to_cache_data(child) for child in node.children],
+        }
+
+    def _node_from_cache_data(self, data, parent=None):
+        node = Node(
+            data.get("name", ""),
+            data.get("id"),
+            data.get("type", "Unknown"),
+            parent,
+            url=data.get("url"),
+            timemodified=data.get("timemodified"),
+            etag=data.get("etag"),
+            name_clash_id=data.get("name_clash_id", NAME_CLASH_ID_UNSET),
+            is_downloaded=data.get("is_downloaded", False),
+        )
+        node.children = [
+            self._node_from_cache_data(child, node)
+            for child in data.get("children", [])
+            if isinstance(child, dict)
+        ]
+        return node
+
+    def _cookies_to_data(self):
+        cookies = []
+        for cookie in self.session.cookies:
+            cookies.append(
+                {
+                    "name": cookie.name,
+                    "value": cookie.value,
+                    "domain": cookie.domain,
+                    "path": cookie.path,
+                    "secure": cookie.secure,
+                    "expires": cookie.expires,
+                    "rest": getattr(cookie, "_rest", {}),
+                }
+            )
+        return {"format": "syncmymoodle.cookies.v1", "cookies": cookies}
+
+    def _load_cookies_from_data(self, payload):
+        if not isinstance(payload, dict):
+            return
+        if payload.get("format") != "syncmymoodle.cookies.v1":
+            logger.warning("Ignoring unsupported cookie file format")
+            return
+
+        for cookie_data in payload.get("cookies", []):
+            if not isinstance(cookie_data, dict):
+                continue
+            if not cookie_data.get("name"):
+                continue
+            cookie = requests.cookies.create_cookie(
+                name=cookie_data["name"],
+                value=cookie_data.get("value", ""),
+                domain=cookie_data.get("domain") or "",
+                path=cookie_data.get("path") or "/",
+                secure=bool(cookie_data.get("secure")),
+                expires=cookie_data.get("expires"),
+                rest=cookie_data.get("rest") or {},
+            )
+            self.session.cookies.set_cookie(cookie)
+
+    def _save_session_cookies(self, cookie_file: Path) -> None:
+        self._write_private_gzip_json(cookie_file, self._cookies_to_data())
+
     def cache_root_node(self):
         """Persist per-course caches into .syncmymoodle_cache files.
 
@@ -320,8 +439,13 @@ class SyncMyMoodle:
                 course_path = self.get_sanitized_node_path(course_node)
                 course_path.mkdir(parents=True, exist_ok=True)
                 cache_path = course_path / ".syncmymoodle_cache"
-                with cache_path.open("wb") as f:
-                    pickle.dump(course_node, f)
+                self._write_private_gzip_json(
+                    cache_path,
+                    {
+                        "format": "syncmymoodle.course-cache.v1",
+                        "course": self._node_to_cache_data(course_node),
+                    },
+                )
 
     def _ensure_timemodified_attribute(self, node):
         # Old cached root nodes might not have the timemodified attribute yet.
@@ -353,12 +477,18 @@ class SyncMyMoodle:
         if not cache_path.exists():
             return None
 
-        with cache_path.open("rb") as f:
-            try:
-                cached_course_root = pickle.load(f)
-                self._ensure_timemodified_attribute(cached_course_root)
-            except EOFError:
-                return None
+        payload = self._read_private_gzip_json(cache_path, "course cache")
+        if not isinstance(payload, dict):
+            return None
+        if payload.get("format") != "syncmymoodle.course-cache.v1":
+            logger.warning("Ignoring unsupported course cache format: %s", cache_path)
+            return None
+        course_data = payload.get("course")
+        if not isinstance(course_data, dict):
+            return None
+
+        cached_course_root = self._node_from_cache_data(course_data)
+        self._ensure_timemodified_attribute(cached_course_root)
 
         self._course_caches[course_path] = cached_course_root
         return cached_course_root
@@ -834,10 +964,10 @@ class SyncMyMoodle:
                 exit(1)
 
         self.session = requests.Session()
-        cookie_file = Path(self.config.get("cookie_file", "./session"))
-        if cookie_file.exists():
-            with cookie_file.open("rb") as f:
-                self.session.cookies.update(pickle.load(f))
+        cookie_file = Path(self.config.get("cookie_file", "./session")).expanduser()
+        cookie_payload = self._read_private_gzip_json(cookie_file, "session cookie")
+        if cookie_payload is not None:
+            self._load_cookies_from_data(cookie_payload)
         self._check_moodle_availability()
         try:
             resp = self.session.get(
@@ -852,8 +982,7 @@ class SyncMyMoodle:
         if resp.url.startswith("https://moodle.rwth-aachen.de/my/"):
             soup = bs(resp.text, features="lxml")
             self.session_key = get_session_key(soup)
-            with cookie_file.open("wb") as f:
-                pickle.dump(self.session.cookies, f)
+            self._save_session_cookies(cookie_file)
             return
 
         # Create a separate soup for maintenance detection
@@ -963,10 +1092,9 @@ class SyncMyMoodle:
         resp = self.session.post(
             "https://moodle.rwth-aachen.de/Shibboleth.sso/SAML2/POST", data=data
         )
-        with cookie_file.open("wb") as f:
-            soup = bs(resp.text, features="lxml")
-            self.session_key = get_session_key(soup)
-            pickle.dump(self.session.cookies, f)
+        soup = bs(resp.text, features="lxml")
+        self.session_key = get_session_key(soup)
+        self._save_session_cookies(cookie_file)
 
     # Moodle Web Services API
 
@@ -1725,12 +1853,11 @@ class SyncMyMoodle:
                     except Exception:
                         logger.exception(f"Failed to download the module {cur_node}")
                 elif cur_node.type == "Quiz":
-                    try:
-                        self.downloadQuiz(cur_node)
-                        cur_node.is_downloaded = True
-                    except Exception:
-                        logger.exception(f"Failed to download the module {cur_node}")
-                        logger.warning("Is wkhtmltopdf correctly installed?")
+                    logger.warning(
+                        "Skipping quiz PDF generation for %s because it is disabled "
+                        "for security.",
+                        cur_node.name,
+                    )
                 else:
                     try:
                         if self.download_file(cur_node):
@@ -1744,7 +1871,21 @@ class SyncMyMoodle:
 
     def get_sanitized_node_path(self, node: Node) -> Path:
         basedir = Path(self.config.get("basedir", "./")).expanduser()
-        return basedir.joinpath(*(self.sanitize(p) for p in node.get_path()))
+        path_segments = []
+        for part in node.get_path():
+            if part == "":
+                continue
+            sanitized = self.sanitize(part)
+            if sanitized in {"", ".", ".."}:
+                sanitized = "_"
+            path_segments.append(sanitized)
+
+        target_path = basedir.joinpath(*path_segments)
+        resolved_basedir = basedir.resolve(strict=False)
+        resolved_target = target_path.resolve(strict=False)
+        if not resolved_target.is_relative_to(resolved_basedir):
+            raise ValueError(f"Refusing to write outside basedir: {target_path}")
+        return target_path
 
     def sanitize(self, path):
         path = urllib.parse.unquote(path)
@@ -2346,34 +2487,11 @@ class SyncMyMoodle:
         return True
 
     def downloadQuiz(self, node):
-        path = self.get_sanitized_node_path(node.parent)
-        path.mkdir(parents=True, exist_ok=True)
-
-        if (path / f"{node.name}.pdf").exists():
-            return True
-
-        quiz_res = bs(self.session.get(node.url).text, features="lxml")
-
-        # i need to hide the left nav element because its obscuring the quiz in the resulting pdf
-        for nav in quiz_res.findAll("div", {"id": "nav-drawer"}):
-            nav["style"] = "visibility: hidden;"
-
-        quiz_html = str(quiz_res)
-        print("Generating quiz-PDF for " + node.name + "... [Quiz]")
-
-        pdfkit.from_string(
-            quiz_html,
-            path / f"{node.name}.pdf",
-            options={
-                "quiet": "",
-                "javascript-delay": "30000",
-                "disable-smart-shrinking": "",
-                "run-script": 'MathJax.Hub.Config({"CommonHTML": {minScaleAdjust: 100},"HTML-CSS": {scale: 200}}); MathJax.Hub.Queue(["Rerender", MathJax.Hub], function () {window.status="finished"})',
-            },
+        logger.warning(
+            "Quiz PDF generation is disabled until the pdfkit/wkhtmltopdf "
+            "renderer is replaced with a safer implementation."
         )
-
-        print("...done!")
-        return True
+        return False
 
     def scanForLinks(
         self, text, parent_node, course_id, module_title=None, single=False
@@ -2826,14 +2944,11 @@ def main():
 
     logging.basicConfig(level=args.loglevel)
 
-    if pdfkit is None and config["used_modules"]["url"]["quiz"]:
-        config["used_modules"]["url"]["quiz"] = False
-        logger.warning("pdfkit is not installed. Quiz-PDFs are NOT generated")
-
-    if not shutil.which("wkhtmltopdf") and config["used_modules"]["url"]["quiz"]:
+    if config["used_modules"]["url"].get("quiz"):
         config["used_modules"]["url"]["quiz"] = False
         logger.warning(
-            "You do not have wkhtmltopdf in your path. Quiz-PDFs are NOT generated"
+            "Quiz PDF generation is disabled until the pdfkit/wkhtmltopdf "
+            "renderer is replaced with a safer implementation."
         )
 
     if keyring and config.get("use_secret_service"):
