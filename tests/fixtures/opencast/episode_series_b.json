@@ -1,0 +1,26 @@
+{
+  "result": [
+    {
+      "mediapackage": {
+        "media": {
+          "track": [
+            {
+              "mimetype": "video/webm",
+              "url": "https://video.example.test/opencast/series-b.webm",
+              "video": {
+                "resolution": "1920x1080"
+              }
+            },
+            {
+              "mimetype": "video/mp4",
+              "url": "https://video.example.test/opencast/series-b.mp4",
+              "video": {
+                "resolution": "1920x1080"
+              }
+            }
+          ]
+        }
+      }
+    }
+  ]
+}

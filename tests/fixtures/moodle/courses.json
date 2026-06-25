@@ -1,0 +1,17 @@
+[
+  {
+    "id": 101,
+    "shortname": "(VO) Data Science",
+    "idnumber": "26ss-data-science"
+  },
+  {
+    "id": 102,
+    "shortname": "(UE) Software Quality",
+    "idnumber": "26ss-software-quality"
+  },
+  {
+    "id": 103,
+    "shortname": "Robust Moodle Fixtures",
+    "idnumber": "26ss-fixtures"
+  }
+]

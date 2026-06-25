@@ -1,0 +1,7 @@
+Semester | 26ss |  |  | 
+Course | 26ss/(VO) Data Science |  |  | 
+Section | 26ss/(VO) Data Science/Opencast |  |  | 
+Opencast | 26ss/(VO) Data Science/Opencast/Single recording | https://video.example.test/opencast/single-high.mp4 |  | 
+Section | 26ss/(VO) Data Science/Series recordings |  |  | 
+Opencast | 26ss/(VO) Data Science/Series recordings/Series episode A | https://video.example.test/opencast/series-a.mp4 |  | 
+Opencast | 26ss/(VO) Data Science/Series recordings/Series episode B | https://video.example.test/opencast/series-b.mp4 |  | 

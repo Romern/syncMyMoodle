@@ -1,0 +1,20 @@
+Semester | 26ss |  |  | 
+Course | 26ss/Comprehensive Sync |  |  | 
+Section | 26ss/Comprehensive Sync/Materials |  |  | 
+Linked file [application/pdf] | 26ss/Comprehensive Sync/Materials/lecture-slides.pdf | https://moodle.rwth-aachen.de/pluginfile.php/104/mod_resource/content/1/lecture-slides.pdf | 1710000100 | 
+Folder | 26ss/Comprehensive Sync/Materials/Data folder |  |  | 
+Youtube | 26ss/Comprehensive Sync/Materials/Data folder/Youtube: https://youtu.be/foldervid01 | https://youtu.be/foldervid01 |  | 
+Folder | 26ss/Comprehensive Sync/Materials/Data folder/Data |  |  | 
+Folder | 26ss/Comprehensive Sync/Materials/Data folder/Data/Raw |  |  | 
+Folder File | 26ss/Comprehensive Sync/Materials/Data folder/Data/Raw/measurements.csv | https://moodle.rwth-aachen.de/pluginfile.php/104/mod_folder/content/0/Data/Raw/measurements.csv | 1710000101 | 
+Assignment | 26ss/Comprehensive Sync/Materials/Essay upload |  |  | 
+Assignment File | 26ss/Comprehensive Sync/Materials/Essay upload/essay-template.docx | https://moodle.rwth-aachen.de/pluginfile.php/104/mod_assign/introattachment/essay-template.docx | 1710000105 | 
+Folder | 26ss/Comprehensive Sync/Materials/Essay upload/Feedback |  |  | 
+Assignment File | 26ss/Comprehensive Sync/Materials/Essay upload/Feedback/feedback.txt | https://moodle.rwth-aachen.de/pluginfile.php/104/mod_assign/feedback/feedback.txt | 1710000106 | 
+Linked file [application/pdf] | 26ss/Comprehensive Sync/Materials/direct.pdf | https://files.example.test/direct.pdf |  | 
+Youtube | 26ss/Comprehensive Sync/Materials/Youtube: External HTML page | https://www.youtube.com/watch?v=directvid01 |  | 
+Opencast | 26ss/Comprehensive Sync/Materials/Page module | https://video.example.test/33333333-4444-4555-8666-777777777777/presentation.mp4 |  | 
+Embedded videojs | 26ss/Comprehensive Sync/Materials/page-video.mp4 | https://moodle.rwth-aachen.de/pluginfile.php/104/mod_page/content/315/page-video.mp4 |  | 
+Youtube | 26ss/Comprehensive Sync/Materials/Youtube: Page module | https://www.youtube.com/watch?v=pagevideo01 |  | 
+Youtube | 26ss/Comprehensive Sync/Materials/Youtube: Label module | https://youtu.be/labelvid001 |  | 
+Youtube | 26ss/Comprehensive Sync/Materials/Youtube: h5pactivity | https://www.youtube.com/watch?v=h5pvideo001 |  | 

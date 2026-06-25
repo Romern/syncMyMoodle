@@ -1,0 +1,89 @@
+[
+  {
+    "id": 203,
+    "name": "General",
+    "modules": [
+      {
+        "id": 303,
+        "name": "Visible PDF",
+        "modname": "resource",
+        "contents": [
+          {
+            "type": "file",
+            "filename": "visible.pdf",
+            "filepath": "/",
+            "fileurl": "https://moodle.rwth-aachen.de/pluginfile.php/103/mod_resource/content/1/visible.pdf",
+            "mimetype": "application/pdf",
+            "timemodified": 1710000002
+          }
+        ]
+      },
+      {
+        "id": 304,
+        "name": "Skip Module",
+        "modname": "resource",
+        "contents": [
+          {
+            "type": "file",
+            "filename": "skipped-by-module.pdf",
+            "filepath": "/",
+            "fileurl": "https://moodle.rwth-aachen.de/pluginfile.php/103/mod_resource/content/1/skipped-by-module.pdf",
+            "mimetype": "application/pdf",
+            "timemodified": 1710000003
+          }
+        ]
+      },
+      {
+        "id": 305,
+        "name": "Excluded Link",
+        "modname": "resource",
+        "contents": [
+          {
+            "type": "file",
+            "filename": "excluded.pdf",
+            "filepath": "/",
+            "fileurl": "https://moodle.rwth-aachen.de/pluginfile.php/103/mod_resource/content/1/excluded.pdf",
+            "mimetype": "application/pdf",
+            "timemodified": 1710000004
+          }
+        ]
+      },
+      {
+        "id": 306,
+        "name": "External Direct File",
+        "modname": "resource",
+        "contents": [
+          {
+            "type": "file",
+            "filename": "external.pdf",
+            "filepath": "/",
+            "fileurl": "https://external.example.test/download/external.pdf",
+            "mimetype": "application/pdf",
+            "timemodified": 1710000005
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "id": 204,
+    "name": "Hidden Week",
+    "modules": [
+      {
+        "id": 307,
+        "name": "Hidden PDF",
+        "modname": "resource",
+        "contents": [
+          {
+            "type": "file",
+            "filename": "hidden.pdf",
+            "filepath": "/",
+            "fileurl": "https://moodle.rwth-aachen.de/pluginfile.php/103/mod_resource/content/1/hidden.pdf",
+            "mimetype": "application/pdf",
+            "timemodified": 1710000006
+          }
+        ]
+      }
+    ]
+  }
+]

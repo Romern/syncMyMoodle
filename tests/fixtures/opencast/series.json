@@ -1,0 +1,16 @@
+{
+  "result": [
+    {
+      "mediapackage": {
+        "id": "bbbbbbbb-cccc-4ddd-8eee-ffffffffffff",
+        "title": "Series episode A"
+      }
+    },
+    {
+      "mediapackage": {
+        "id": "cccccccc-dddd-4eee-8fff-aaaaaaaaaaaa",
+        "title": "Series episode B"
+      }
+    }
+  ]
+}

@@ -1,0 +1,18 @@
+[
+  {
+    "id": 220,
+    "name": "Opencast",
+    "modules": [
+      {
+        "id": 501,
+        "name": "Single LTI",
+        "modname": "lti"
+      },
+      {
+        "id": 502,
+        "name": "Series LTI",
+        "modname": "lti"
+      }
+    ]
+  }
+]

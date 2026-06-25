@@ -1,0 +1,100 @@
+[
+  {
+    "id": 210,
+    "name": "Materials",
+    "modules": [
+      {
+        "id": 310,
+        "name": "Lecture slides",
+        "modname": "resource",
+        "contents": [
+          {
+            "type": "file",
+            "filename": "lecture-slides.pdf",
+            "filepath": "/",
+            "fileurl": "https://moodle.rwth-aachen.de/pluginfile.php/104/mod_resource/content/1/lecture-slides.pdf",
+            "mimetype": "application/pdf",
+            "timemodified": 1710000100
+          }
+        ]
+      },
+      {
+        "id": 311,
+        "name": "Data folder",
+        "modname": "folder",
+        "contents": [
+          {
+            "type": "file",
+            "filename": "measurements.csv",
+            "filepath": "/Data/Raw/",
+            "fileurl": "https://moodle.rwth-aachen.de/pluginfile.php/104/mod_folder/content/0/Data/Raw/measurements.csv",
+            "mimetype": "text/csv",
+            "timemodified": 1710000101
+          }
+        ]
+      },
+      {
+        "id": 312,
+        "name": "Essay upload",
+        "modname": "assign"
+      },
+      {
+        "id": 313,
+        "name": "Direct external PDF",
+        "modname": "url",
+        "contents": [
+          {
+            "type": "file",
+            "filename": "direct.pdf",
+            "filepath": "/",
+            "fileurl": "https://files.example.test/direct.pdf",
+            "mimetype": "application/pdf",
+            "timemodified": 1710000102
+          }
+        ]
+      },
+      {
+        "id": 314,
+        "name": "External HTML page",
+        "modname": "url",
+        "contents": [
+          {
+            "type": "file",
+            "filename": "overview.html",
+            "filepath": "/",
+            "fileurl": "https://files.example.test/overview.html",
+            "mimetype": "text/html",
+            "timemodified": 1710000103
+          }
+        ]
+      },
+      {
+        "id": 315,
+        "name": "Page module",
+        "modname": "page",
+        "url": "https://moodle.rwth-aachen.de/mod/page/view.php?id=315",
+        "contents": [
+          {
+            "type": "file",
+            "filename": "index.html",
+            "filepath": "/",
+            "fileurl": "https://moodle.rwth-aachen.de/pluginfile.php/104/mod_page/content/315/index.html",
+            "mimetype": "text/html",
+            "timemodified": 1710000104
+          }
+        ]
+      },
+      {
+        "id": 316,
+        "name": "Label module",
+        "modname": "label",
+        "description": "<p>Label video https://youtu.be/labelvid001</p>"
+      },
+      {
+        "id": 317,
+        "name": "H5P module",
+        "modname": "h5pactivity"
+      }
+    ]
+  }
+]

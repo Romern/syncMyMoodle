@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<d:multistatus xmlns:d="DAV:" xmlns:oc="http://owncloud.org/ns">
+  <d:response>
+    <d:href>/public.php/webdav/slides/</d:href>
+    <d:propstat>
+      <d:prop>
+        <d:getetag>"folder-slides"</d:getetag>
+      </d:prop>
+    </d:propstat>
+  </d:response>
+  <d:response>
+    <d:href>/public.php/webdav/slides/deck.pdf</d:href>
+    <d:propstat>
+      <d:prop>
+        <d:getetag>"etag-deck"</d:getetag>
+        <oc:checksums>
+          <oc:checksum>SHA1:2222222222222222222222222222222222222222</oc:checksum>
+        </oc:checksums>
+      </d:prop>
+    </d:propstat>
+  </d:response>
+</d:multistatus>

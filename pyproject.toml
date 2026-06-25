@@ -39,11 +39,15 @@ test = [
   "flake8",
   "flake8-bugbear",
   "mypy",
+  "pytest",
   "types-requests"
 ]
 
 [tool.isort]
 profile = "black"
+
+[tool.black]
+target-version = ["py311"]
 
 [tool.mypy]
 warn_unused_configs = true
