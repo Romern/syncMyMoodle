@@ -1,0 +1,17 @@
+{
+  "assignments": [
+    {
+      "id": 412,
+      "cmid": 312,
+      "intro": "<p>Use the template and upload your answer.</p>",
+      "introattachments": [
+        {
+          "filename": "essay-template.docx",
+          "filepath": "/",
+          "fileurl": "https://moodle.rwth-aachen.de/pluginfile.php/104/mod_assign/introattachment/essay-template.docx",
+          "timemodified": 1710000105
+        }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,31 @@
+[
+  {
+    "id": 201,
+    "name": "General",
+    "modules": [
+      {
+        "id": 301,
+        "name": "Dataset folder",
+        "modname": "folder",
+        "contents": [
+          {
+            "type": "file",
+            "filename": "anscombe.csv",
+            "filepath": "/Data/CSV/",
+            "fileurl": "https://moodle.rwth-aachen.de/pluginfile.php/101/mod_folder/content/0/Data/CSV/anscombe.csv?forcedownload=1",
+            "mimetype": "text/csv",
+            "timemodified": 1710000000
+          },
+          {
+            "type": "file",
+            "filename": "iris.csv",
+            "filepath": "/Data/CSV/",
+            "fileurl": "https://moodle.rwth-aachen.de/pluginfile.php/101/mod_folder/content/0/Data/CSV/iris.csv?forcedownload=1",
+            "mimetype": "text/csv",
+            "timemodified": 1710000001
+          }
+        ]
+      }
+    ]
+  }
+]

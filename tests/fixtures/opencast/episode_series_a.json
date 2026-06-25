@@ -1,0 +1,17 @@
+{
+  "result": [
+    {
+      "mediapackage": {
+        "media": {
+          "track": {
+            "mimetype": "video/mp4",
+            "url": "https://video.example.test/opencast/series-a.mp4",
+            "video": {
+              "resolution": "1280x720"
+            }
+          }
+        }
+      }
+    }
+  ]
+}

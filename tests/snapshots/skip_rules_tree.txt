@@ -1,0 +1,4 @@
+Semester | 26ss |  |  | 
+Course | 26ss/Robust Moodle Fixtures |  |  | 
+Section | 26ss/Robust Moodle Fixtures/General |  |  | 
+Linked file [application/pdf] | 26ss/Robust Moodle Fixtures/General/visible.pdf | https://moodle.rwth-aachen.de/pluginfile.php/103/mod_resource/content/1/visible.pdf | 1710000002 | 

@@ -132,7 +132,7 @@ class Node:
     ):
         if url:
             url = url.replace("?forcedownload=1", "").replace(
-                "mod_page/content/3", "mod_page/content"
+                "mod_page/content/3/", "mod_page/content/"
             )
             url = url.replace("webservice/pluginfile.php", "pluginfile.php")
 
@@ -1825,7 +1825,7 @@ class SyncMyMoodle:
                             info_res = bs(
                                 self.session.get(info_url).text, features="lxml"
                             )
-                            attempts = info_res.findAll(
+                            attempts = info_res.find_all(
                                 "a",
                                 {
                                     "title": "Überprüfung der eigenen Antworten dieses Versuchs"
@@ -2055,6 +2055,7 @@ class SyncMyMoodle:
 
             local_conflict = False
             old_etag = getattr(old_node, "etag", None) if old_node is not None else None
+            etag_check_failed = False
             if old_etag:
                 # Prefer using the old ETag (hash) to detect whether the local file
                 # still matches the previously downloaded version.
@@ -2062,11 +2063,12 @@ class SyncMyMoodle:
                     if not self._local_file_matches_etag(downloadpath, old_etag):
                         local_conflict = True
                 except Exception:
-                    # If we cannot safely compare using the ETag, fall back to the
-                    # timestamp-based heuristic below.
-                    local_conflict = False
+                    # A faulty/unusable ETag cache is treated as if we had no
+                    # cached ETag at all: fall back to the timestamp/HEAD
+                    # heuristic below to decide whether this is a conflict.
+                    etag_check_failed = True
 
-            if not old_etag:
+            if not old_etag or etag_check_failed:
                 if cached_timemodified is not None:
                     # Fallback: compare local mtime with the previous Moodle timestamp.
                     try:
@@ -2267,7 +2269,7 @@ class SyncMyMoodle:
     def _extract_lti_form_data(self, soup):
         return {
             input_tag["name"]: input_tag.get("value", "")
-            for input_tag in soup.findAll("input")
+            for input_tag in soup.find_all("input")
             if input_tag.get("name")
         }
 

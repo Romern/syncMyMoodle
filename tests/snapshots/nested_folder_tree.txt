@@ -1,0 +1,8 @@
+Semester | 26ss |  |  | 
+Course | 26ss/(VO) Data Science |  |  | 
+Section | 26ss/(VO) Data Science/General |  |  | 
+Folder | 26ss/(VO) Data Science/General/Dataset folder |  |  | 
+Folder | 26ss/(VO) Data Science/General/Dataset folder/Data |  |  | 
+Folder | 26ss/(VO) Data Science/General/Dataset folder/Data/CSV |  |  | 
+Folder File | 26ss/(VO) Data Science/General/Dataset folder/Data/CSV/anscombe.csv | https://moodle.rwth-aachen.de/pluginfile.php/101/mod_folder/content/0/Data/CSV/anscombe.csv | 1710000000 | 
+Folder File | 26ss/(VO) Data Science/General/Dataset folder/Data/CSV/iris.csv | https://moodle.rwth-aachen.de/pluginfile.php/101/mod_folder/content/0/Data/CSV/iris.csv | 1710000001 | 
