@@ -357,17 +357,56 @@ class SyncMyMoodle:
             )
             return None
 
-    def _node_to_cache_data(self, node: Node):
+    def _match_old_cache_child(self, old_node, child):
+        """Find the previous cache node corresponding to ``child``, if any."""
+        if old_node is None:
+            return None
+        candidates = [
+            c
+            for c in getattr(old_node, "children", [])
+            if c.name == child.name and c.type == child.type
+        ]
+        if not candidates:
+            return None
+        for candidate in candidates:
+            if candidate.url == child.url:
+                return candidate
+        return candidates[0]
+
+    def _node_to_cache_data(self, node: Node, old_node: Node | None = None):
+        timemodified = node.timemodified
+        etag = node.etag
+        is_downloaded = node.is_downloaded
+        # If this file was not (re)downloaded this run but a previously
+        # downloaded version is still on disk, keep the previously cached version
+        # markers. Otherwise the cache would record Moodle's new timemodified/etag
+        # for a file we never actually fetched, which either skips the file
+        # forever or moves the on-disk copy aside as a spurious conflict on the
+        # next run's retry.
+        if (
+            not node.is_downloaded
+            and old_node is not None
+            and getattr(old_node, "is_downloaded", False)
+            and self.get_sanitized_node_path(node).exists()
+        ):
+            timemodified = getattr(old_node, "timemodified", None)
+            etag = getattr(old_node, "etag", None)
+            is_downloaded = True
         return {
             "name": node.name,
             "id": node.id,
             "type": node.type,
             "url": node.url,
-            "timemodified": node.timemodified,
-            "etag": node.etag,
+            "timemodified": timemodified,
+            "etag": etag,
             "name_clash_id": node.name_clash_id,
-            "is_downloaded": node.is_downloaded,
-            "children": [self._node_to_cache_data(child) for child in node.children],
+            "is_downloaded": is_downloaded,
+            "children": [
+                self._node_to_cache_data(
+                    child, self._match_old_cache_child(old_node, child)
+                )
+                for child in node.children
+            ],
         }
 
     def _node_from_cache_data(self, data, parent=None):
@@ -448,13 +487,19 @@ class SyncMyMoodle:
                 if course_node.type != "Course":
                     continue
                 course_path = self.get_sanitized_node_path(course_node)
+                # Read the previous course cache before overwriting it, so we can
+                # preserve version markers for files that were not downloaded
+                # this run (see _node_to_cache_data).
+                old_course_root = self._get_course_cache_root(course_node)
                 course_path.mkdir(parents=True, exist_ok=True)
                 cache_path = course_path / ".syncmymoodle_cache"
                 self._write_private_gzip_json(
                     cache_path,
                     {
                         "format": "syncmymoodle.course-cache.v1",
-                        "course": self._node_to_cache_data(course_node),
+                        "course": self._node_to_cache_data(
+                            course_node, old_course_root
+                        ),
                     },
                 )
 
@@ -2042,6 +2087,16 @@ class SyncMyMoodle:
         if self._should_skip_url(node.url, f"{node.type} file"):
             return True
 
+        # Respect filetype/name exclusions up front so that excluded files never
+        # trigger conflict handling, displace local files, or create temp files.
+        if node.name.split(".")[-1] in self.config.get("exclude_filetypes", []):
+            return True
+        if any(
+            fnmatchcase(node.name, pattern)
+            for pattern in self.config.get("exclude_files", [])
+        ):
+            return True
+
         # If we already downloaded this path during the current run, skip any
         # further processing. This avoids duplicate downloads and spurious
         # conflicts when the same remote file appears multiple times in the
@@ -2056,17 +2111,30 @@ class SyncMyMoodle:
         # Decide whether we need to (re-)download the file at all
         cached_timemodified = None
         old_node = None
+        conflict_rename_pending = False
         if downloadpath.exists():
             if not self.config.get("updatefiles"):
                 return True
 
             # Try to find a cached node for this file from the per-course cache.
             old_node = self._get_old_node_for(node)
+            # Only trust the cached version markers when the previous run
+            # actually downloaded the file. Otherwise an update that failed last
+            # time (e.g. an expired session) gets cached with Moodle's new
+            # timemodified and would be skipped forever, leaving a stale file.
+            # Treat a non-downloaded cache entry as if there were no cache at all.
+            if old_node is not None and not getattr(old_node, "is_downloaded", False):
+                old_node = None
             if old_node is not None:
                 cached_timemodified = getattr(old_node, "timemodified", None)
                 old_etag = getattr(old_node, "etag", None)
-                # If Moodle did not change the file, skip re-download.
-                if node.timemodified == cached_timemodified:
+                # If Moodle did not change the file, skip re-download. Only when
+                # timemodified is meaningful: Sciebo files have no timemodified
+                # (always None), so this must fall through to the etag check
+                # below instead of treating None == None as "unchanged".
+                if cached_timemodified is not None and (
+                    node.timemodified == cached_timemodified
+                ):
                     return True
                 # For Sciebo, we use the etag from the previous run as the
                 # remote version marker. If it matches the current etag from
@@ -2164,44 +2232,40 @@ class SyncMyMoodle:
                     )
                     return True
                 if conflict_mode == "rename":
-                    # Move the locally modified file out of the way before download
-                    conflict_path = self._make_conflict_path(downloadpath)
-                    try:
-                        downloadpath.rename(conflict_path)
-                        logger.warning(
-                            "Detected local changes for %s, moving to %s before "
-                            "downloading updated file from Moodle",
-                            downloadpath,
-                            conflict_path,
-                        )
-                    except OSError:
-                        logger.exception(
-                            "Failed to move locally modified file %s to %s, "
-                            "skipping Moodle update to avoid data loss",
-                            downloadpath,
-                            conflict_path,
-                        )
-                        return True
+                    # Defer moving the locally modified file aside until the
+                    # replacement has been fully downloaded, so an aborted or
+                    # failed download (e.g. an expired session returning an HTML
+                    # error page) never leaves the canonical path empty.
+                    conflict_rename_pending = True
                 # conflict_mode == "overwrite": fall through and overwrite
 
-        if len(node.name.split(".")) > 0 and node.name.split(".")[
-            -1
-        ] in self.config.get("exclude_filetypes", []):
-            return True
+        # Hidden, namespaced temp/sidecar names so we never resume from or
+        # overwrite a file the user happens to own. The sidecar records the
+        # ETag a partial download was fetched against.
+        tmp_downloadpath = downloadpath.parent / f".{downloadpath.name}.smmpart"
+        etag_sidecar = tmp_downloadpath.with_name(tmp_downloadpath.name + ".etag")
 
-        if any(
-            fnmatchcase(node.name, pattern)
-            for pattern in self.config.get("exclude_files")
-        ):
-            return True
-
-        tmp_downloadpath = downloadpath.with_suffix(downloadpath.suffix + ".temp")
+        # Only resume a previous partial when we recorded the ETag it was fetched
+        # against, so we can ask the server (via If-Range) to confirm the remote
+        # content is unchanged. Without that proof a blind range request could
+        # splice bytes from a newer version onto an older partial and silently
+        # corrupt the file.
+        resume_size = 0
+        partial_etag: str | None = None
+        header = dict()
         if tmp_downloadpath.exists():
-            resume_size = tmp_downloadpath.stat().st_size
-            header = {"Range": f"bytes={resume_size}-"}
-        else:
-            resume_size = 0
-            header = dict()
+            if etag_sidecar.exists():
+                try:
+                    partial_etag = etag_sidecar.read_text(encoding="utf-8").strip()
+                except OSError:
+                    partial_etag = None
+            if partial_etag:
+                resume_size = tmp_downloadpath.stat().st_size
+                header = {"Range": f"bytes={resume_size}-", "If-Range": partial_etag}
+            else:
+                # Cannot validate the partial; discard it and start fresh.
+                tmp_downloadpath.unlink(missing_ok=True)
+                etag_sidecar.unlink(missing_ok=True)
         if node.type.lower() == "sciebo file":
             header = {**header, **node.additional_info}
 
@@ -2209,25 +2273,27 @@ class SyncMyMoodle:
             self.session.get(node.url, headers=header, stream=True)
         ) as response:
             etag_header = response.headers.get("ETag")
-            # If we attempted to resume but the server did not honor the Range
-            # header (status != 206), fallback to a full download and ignore
-            # the existing partial file to avoid corrupting PDFs or other
-            # content by appending a second full copy.
-            if resume_size and response.status_code == 200:
-                resume_size = 0
-                tmp_downloadpath.unlink(missing_ok=True)
+
+            if resume_size:
+                # The remote content differs from our partial when the server
+                # ignores the range (any non-206) or, for servers that ignore
+                # If-Range, when the returned ETag no longer matches what the
+                # partial was fetched against.
+                version_changed = response.status_code != 206 or (
+                    etag_header is not None
+                    and partial_etag is not None
+                    and etag_header != partial_etag
+                )
+                if version_changed:
+                    resume_size = 0
+                    tmp_downloadpath.unlink(missing_ok=True)
+                    etag_sidecar.unlink(missing_ok=True)
+                    if response.status_code == 206:
+                        # This 206 body is only the tail of a now-changed file
+                        # and cannot be used; restart fresh on the next run.
+                        return False
 
             if not self._download_response_is_usable(node, response, downloadpath):
-                return False
-
-            if resume_size and response.status_code != 206:
-                logger.warning(
-                    "Skipping download of %s from %s because the server returned "
-                    "HTTP %s instead of partial content for a resumed download",
-                    downloadpath,
-                    node.url,
-                    response.status_code,
-                )
                 return False
 
             content = response.iter_content(self.block_size)
@@ -2255,6 +2321,13 @@ class SyncMyMoodle:
             if resume_size:
                 progress_bar.update(resume_size)
             downloadpath.parent.mkdir(parents=True, exist_ok=True)
+            # Record the ETag this partial is being fetched against so an
+            # interrupted download can be safely resumed next time.
+            if etag_header:
+                try:
+                    etag_sidecar.write_text(etag_header, encoding="utf-8")
+                except OSError:
+                    pass
             mode = "ab" if resume_size else "wb"
             with tmp_downloadpath.open(mode) as file:
                 if first_chunk:
@@ -2264,7 +2337,34 @@ class SyncMyMoodle:
                     progress_bar.update(len(data))
                     file.write(data)
             progress_bar.close()
-            tmp_downloadpath.rename(downloadpath)
+
+            # The replacement is now fully on disk. Only at this point do we move
+            # a conflicting local file aside, so a failure above never empties
+            # the canonical path.
+            if conflict_rename_pending:
+                conflict_path = self._make_conflict_path(downloadpath)
+                try:
+                    downloadpath.rename(conflict_path)
+                    logger.warning(
+                        "Detected local changes for %s, moved to %s before "
+                        "installing the updated file from Moodle",
+                        downloadpath,
+                        conflict_path,
+                    )
+                except OSError:
+                    logger.exception(
+                        "Failed to move locally modified file %s to %s; keeping "
+                        "it and discarding the downloaded update to avoid data "
+                        "loss",
+                        downloadpath,
+                        conflict_path,
+                    )
+                    tmp_downloadpath.unlink(missing_ok=True)
+                    etag_sidecar.unlink(missing_ok=True)
+                    return True
+
+            os.replace(tmp_downloadpath, downloadpath)
+            etag_sidecar.unlink(missing_ok=True)
             # Align the local mtime with Moodle's timemodified to detect local
             # changes on subsequent runs.
             if getattr(node, "timemodified", None) is not None:

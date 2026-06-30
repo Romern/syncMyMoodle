@@ -50,6 +50,8 @@ def test_download_uses_course_cache_to_skip_unchanged_file(tmp_path):
         url="https://moodle.rwth-aachen.de/pluginfile.php/301/slides.pdf",
         timemodified=1710000300,
     )
+    # A real cache is written after a successful download.
+    cached_file.is_downloaded = True
     cached_syncer.root_node = cached_root
     cached_syncer.cache_root_node()
 
