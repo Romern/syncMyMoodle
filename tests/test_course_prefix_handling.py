@@ -116,3 +116,32 @@ def test_same_name_with_different_urls_still_gets_stable_suffixes():
     assert "Slides" not in names
     for name in names:
         assert name.startswith("Slides_")
+
+
+def test_clashing_files_without_name_clash_id_use_url_for_distinct_names():
+    # Direct-link / direct-content / embedded nodes pass name_clash_id=None.
+    # Two such same-named files with different URLs must still get distinct
+    # names (falling back to the URL) instead of both hashing md5("None").
+    root = Node("", -1, "Root", None)
+    section = root.add_child("General", None, "Section")
+    section.add_child(
+        "slides.pdf",
+        None,
+        "Linked file [application/pdf]",
+        url="https://a.example/slides.pdf",
+        name_clash_id=None,
+    )
+    section.add_child(
+        "slides.pdf",
+        None,
+        "Linked file [application/pdf]",
+        url="https://b.example/slides.pdf",
+        name_clash_id=None,
+    )
+
+    root.remove_children_nameclashes()
+
+    names = [child.name for child in section.children]
+    assert len(names) == 2
+    assert len(set(names)) == 2
+    assert "slides.pdf" not in names
