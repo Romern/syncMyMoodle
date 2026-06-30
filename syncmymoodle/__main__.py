@@ -2276,21 +2276,20 @@ class SyncMyMoodle:
 
             if resume_size:
                 # The remote content differs from our partial when the server
-                # ignores the range (any non-206) or, for servers that ignore
-                # If-Range, when the returned ETag no longer matches what the
-                # partial was fetched against.
-                version_changed = response.status_code != 206 or (
-                    etag_header is not None
-                    and partial_etag is not None
-                    and etag_header != partial_etag
+                # ignores the range (any non-206) or cannot prove that the
+                # returned tail belongs to the same ETag as the saved partial.
+                valid_resume = (
+                    response.status_code == 206 and etag_header == partial_etag
                 )
+                version_changed = not valid_resume
                 if version_changed:
                     resume_size = 0
                     tmp_downloadpath.unlink(missing_ok=True)
                     etag_sidecar.unlink(missing_ok=True)
                     if response.status_code == 206:
-                        # This 206 body is only the tail of a now-changed file
-                        # and cannot be used; restart fresh on the next run.
+                        # This 206 body is only a tail, and without an exact
+                        # ETag match it cannot be safely appended. Restart fresh
+                        # on the next run.
                         return False
 
             if not self._download_response_is_usable(node, response, downloadpath):

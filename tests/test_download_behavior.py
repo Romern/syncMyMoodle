@@ -434,6 +434,27 @@ def test_resume_aborts_when_server_ignores_if_range(tmp_path):
     assert list(download_path.parent.glob(".*.smmpart*")) == []
 
 
+def test_resume_aborts_when_partial_response_has_no_etag(tmp_path):
+    # A 206 response without an ETag cannot prove that the returned tail belongs
+    # to the same remote version as the saved partial.
+    config = {"basedir": str(tmp_path)}
+    syncer, file_node = make_run_syncer(config, timemodified=1710000500)
+    download_path = _seed_partial(syncer, file_node, b"OLD-PARTIAL", '"v1"')
+    syncer.session.add(
+        "GET",
+        URL,
+        FakeResponse(
+            status_code=206,
+            headers={"Content-Type": "application/pdf"},
+            chunks=[b"UNVERIFIED-TAIL"],
+        ),
+    )
+
+    assert syncer.download_file(file_node) is False
+    assert not download_path.exists()
+    assert list(download_path.parent.glob(".*.smmpart*")) == []
+
+
 def test_unrecognized_partial_without_sidecar_is_not_resumed(tmp_path):
     # A leftover partial with no etag sidecar cannot be validated, so it is
     # discarded and a fresh full download is performed.
