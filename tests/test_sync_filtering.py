@@ -49,3 +49,50 @@ def test_skip_courses_and_semester_filter_limit_synced_courses():
         "Semester | 26ss |  |  | ",
         "Course | 26ss/Current Semester |  |  | ",
     ]
+
+
+# Course ids that are substrings of one another, to pin down exact-id matching.
+SUBSTRING_COURSES = [
+    {"id": 1, "shortname": "Course One", "idnumber": "26ss-1"},
+    {"id": 2, "shortname": "Course Two", "idnumber": "26ss-2"},
+    {"id": 12, "shortname": "Course Twelve", "idnumber": "26ss-12"},
+    {"id": 123, "shortname": "Course OneTwoThree", "idnumber": "26ss-123"},
+]
+
+
+def _run_filter(config):
+    synced = []
+    syncer = make_syncer(config)
+    syncer.get_all_courses = lambda: SUBSTRING_COURSES  # type: ignore[method-assign]
+    syncer.get_course = lambda course_id: synced.append(course_id) or []  # type: ignore[method-assign]
+    syncer.session = FakeSession()
+    syncer.sync()
+    return synced
+
+
+def test_selected_courses_match_by_exact_id_not_substring():
+    # Selecting course 12 must not also pull in courses 1 and 2.
+    synced = _run_filter(
+        {"selected_courses": ["https://moodle.rwth-aachen.de/course/view.php?id=12"]}
+    )
+    assert synced == [12]
+
+
+def test_skip_courses_match_by_exact_id_not_substring():
+    # Skipping course 12 must not silently drop courses 1 and 2.
+    synced = _run_filter(
+        {"skip_courses": ["https://moodle.rwth-aachen.de/course/view.php?id=12"]}
+    )
+    assert synced == [1, 2, 123]
+
+
+def test_bare_numeric_id_entry_is_accepted():
+    synced = _run_filter({"selected_courses": ["12"]})
+    assert synced == [12]
+
+
+def test_selected_courses_override_skip_courses():
+    # A course present in both lists is synced: selected_courses wins.
+    url = "https://moodle.rwth-aachen.de/course/view.php?id=12"
+    synced = _run_filter({"selected_courses": [url], "skip_courses": [url]})
+    assert synced == [12]

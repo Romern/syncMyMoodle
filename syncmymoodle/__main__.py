@@ -645,6 +645,23 @@ class SyncMyMoodle:
             return value
         return [value]
 
+    def _course_id_in_filter(self, course_id, entries) -> bool:
+        """Return True if ``course_id`` is referenced by a configured entry.
+
+        Entries are course URLs (``.../course/view.php?id=NNN``). The ``id``
+        query parameter is compared exactly, so e.g. ``id=12`` does not also
+        match courses ``1`` or ``2``. A bare numeric id entry is also accepted.
+        """
+        course_id = str(course_id)
+        for entry in entries or []:
+            entry = str(entry)
+            parsed = urllib.parse.urlparse(entry)
+            if course_id in urllib.parse.parse_qs(parsed.query).get("id", []):
+                return True
+            if entry.strip() == course_id:
+                return True
+        return False
+
     def _configured_patterns(self, *keys, course_id=None):
         patterns = []
         for key in keys:
@@ -1371,39 +1388,26 @@ class SyncMyMoodle:
 
         # Syncing all courses
         for course in self.get_all_courses():
-            course_name = self._format_course_name(course["shortname"])
+            course_name = self._format_course_name(
+                course.get("shortname") or f"course-{course.get('id')}"
+            )
             course_id = course["id"]
 
-            if (
-                len(
-                    [
-                        c
-                        for c in self.config.get("skip_courses", [])
-                        if str(course_id) in c
-                    ]
-                )
-                > 0
+            selected_courses = self.config.get("selected_courses", [])
+            if selected_courses:
+                # selected_courses is an explicit allowlist that overrides
+                # skip_courses (and, below, only_sync_semester).
+                if not self._course_id_in_filter(course_id, selected_courses):
+                    continue
+            elif self._course_id_in_filter(
+                course_id, self.config.get("skip_courses", [])
             ):
                 continue
 
-            # Skip not selected courses
+            semestername = (course.get("idnumber") or "")[:4] or "unknown-semester"
+            # Skip not selected semesters (selected_courses overrides this)
             if (
-                len(self.config.get("selected_courses", [])) > 0
-                and len(
-                    [
-                        c
-                        for c in self.config.get("selected_courses", [])
-                        if str(course["id"]) in c
-                    ]
-                )
-                == 0
-            ):
-                continue
-
-            semestername = course["idnumber"][:4]
-            # Skip not selected semesters
-            if (
-                len(self.config.get("selected_courses", [])) == 0
+                not selected_courses
                 and self.config.get("only_sync_semester", [])
                 and semestername not in self.config.get("only_sync_semester", [])
             ):
