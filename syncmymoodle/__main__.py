@@ -1004,13 +1004,33 @@ class SyncMyMoodle:
     def login(self):
         def get_session_key(soup):
             script = soup.find("script", string=lambda text: text and "sesskey" in text)
-            js_text = script.text
-            match = re.search(r'"sesskey":"(.*?)"', js_text)
+            match = (
+                re.search(r'"sesskey":"(.*?)"', script.text)
+                if script is not None
+                else None
+            )
             if match:
                 return match.group(1)
             else:
                 logger.critical("Can't retrieve session key from JavaScript config")
-                exit(1)
+                sys.exit(1)
+
+        def require_input_value(soup, name, context):
+            value = self._get_input_value(soup, name)
+            if value is None:
+                logger.critical(
+                    "Failed to login: expected form field %r was missing at the "
+                    "%s. The RWTH login flow may have changed or the servers may "
+                    "have difficulties. For current service status, see %s.",
+                    name,
+                    context,
+                    RWTH_STATUS_URL,
+                )
+                self._check_rwth_status_page()
+                logger.info("-------Login-Error-Soup--------")
+                logger.info(soup)
+                sys.exit(1)
+            return value
 
         self.session = requests.Session()
         cookie_file = Path(self.config.get("cookie_file", "./session")).expanduser()
@@ -1046,7 +1066,8 @@ class SyncMyMoodle:
             alert.decompose()
 
         # Extract body text after cleanup
-        body_text = soup_check.find("body").get_text(separator=" ", strip=True)
+        body = soup_check.find("body")
+        body_text = body.get_text(separator=" ", strip=True) if body else ""
 
         # Check for maintenance notice
         if "Wartungsarbeiten" in body_text:
@@ -1058,7 +1079,9 @@ class SyncMyMoodle:
 
         soup = bs(resp.text, features="lxml")
         if soup.find("input", {"name": "RelayState"}) is None:
-            csrf_token = soup.find("input", {"name": "csrf_token"})["value"]
+            csrf_token = require_input_value(
+                soup, "csrf_token", "username/password form"
+            )
             login_data = {
                 "j_username": self.config["user"],
                 "j_password": self.config["password"],
@@ -1081,7 +1104,9 @@ class SyncMyMoodle:
                 logger.info(soup)
                 sys.exit(1)
 
-            csrf_token = soup.find("input", {"name": "csrf_token"})["value"]
+            csrf_token = require_input_value(
+                soup, "csrf_token", "TOTP generator selection form"
+            )
 
             print("Setting TOTP generator")
             totp_selection_data = {
@@ -1106,7 +1131,7 @@ class SyncMyMoodle:
                 logger.info(soup)
                 sys.exit(1)
 
-            csrf_token = soup.find("input", {"name": "csrf_token"})["value"]
+            csrf_token = require_input_value(soup, "csrf_token", "TOTP entry form")
             if not self.config.get("totpsecret"):
                 totp_input = input(f"Enter TOTP for generator {self.config['totp']}:\n")
             else:
@@ -1135,8 +1160,8 @@ class SyncMyMoodle:
             logger.info(soup)
             sys.exit(1)
         data = {
-            "RelayState": soup.find("input", {"name": "RelayState"})["value"],
-            "SAMLResponse": soup.find("input", {"name": "SAMLResponse"})["value"],
+            "RelayState": require_input_value(soup, "RelayState", "SAML response"),
+            "SAMLResponse": require_input_value(soup, "SAMLResponse", "SAML response"),
         }
         resp = self.session.post(
             "https://moodle.rwth-aachen.de/Shibboleth.sso/SAML2/POST", data=data
@@ -1221,9 +1246,23 @@ class SyncMyMoodle:
                 )
             sys.exit(1)
 
-        token_base64d = location.split("token=")[1]
+        # The redirect looks like moodlemobile://token=BASE64[&...]; isolate the
+        # token value and decode it defensively so a malformed redirect yields a
+        # clear message instead of a traceback.
+        token_base64d = location.split("token=", 1)[1].split("&")[0]
         conn.close()
-        self.wstoken = base64.b64decode(token_base64d).decode().split(":::")[1]
+        try:
+            token_parts = base64.b64decode(token_base64d).decode().split(":::")
+        except (ValueError, UnicodeDecodeError):
+            token_parts = []
+        if len(token_parts) < 2 or not token_parts[1]:
+            logger.critical(
+                "Failed to parse the Moodle webservice token from the mobile "
+                "launch redirect. Your saved session may be stale; delete the "
+                "cookie file and try again."
+            )
+            sys.exit(1)
+        self.wstoken = token_parts[1]
         return self.wstoken
 
     def get_all_courses(self):
