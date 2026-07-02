@@ -8,7 +8,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from syncmymoodle.__main__ import SyncMyMoodle
+from syncmymoodle.app import SyncMyMoodle
 from syncmymoodle.node import Node
 
 FIXTURES = Path(__file__).parent / "fixtures"
