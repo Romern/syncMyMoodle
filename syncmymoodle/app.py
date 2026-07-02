@@ -1,5 +1,4 @@
 import base64
-import gzip
 import hashlib
 import http.client
 import json
@@ -7,7 +6,6 @@ import logging
 import os
 import re
 import sys
-import tempfile
 import time
 import urllib.parse
 from contextlib import closing
@@ -34,6 +32,12 @@ from syncmymoodle.constants import (
     YOUTUBE_LINK_RE,
 )
 from syncmymoodle.node import NAME_CLASH_ID_UNSET, Node
+from syncmymoodle.storage import (
+    load_cookies_from_data,
+    read_private_gzip_json,
+    save_session_cookies,
+    write_private_gzip_json,
+)
 from syncmymoodle.totp import totp as generate_totp
 
 logger = logging.getLogger(__name__)
@@ -67,56 +71,6 @@ class SyncMyMoodle:
         # repeating identical LTI/API requests.
         self._opencast_episode_auth_cache = set()
         self._opencast_track_cache = {}
-
-    def _harden_private_file(self, path: Path, description: str) -> bool:
-        if not path.exists():
-            return True
-        if path.is_symlink():
-            logger.warning("Refusing to use symlinked %s file: %s", description, path)
-            return False
-        try:
-            path.chmod(0o600)
-        except OSError:
-            logger.warning(
-                "Could not restrict permissions for %s file: %s", description, path
-            )
-        return True
-
-    def _write_private_gzip_json(self, path: Path, payload) -> None:
-        path = path.expanduser()
-        path.parent.mkdir(parents=True, exist_ok=True)
-
-        json_bytes = json.dumps(payload, separators=(",", ":")).encode("utf-8")
-        data = gzip.compress(json_bytes)
-
-        fd, tmp_name = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
-        tmp_path = Path(tmp_name)
-        try:
-            os.fchmod(fd, 0o600)
-            with os.fdopen(fd, "wb") as f:
-                f.write(data)
-            os.replace(tmp_path, path)
-            path.chmod(0o600)
-        finally:
-            if tmp_path.exists():
-                tmp_path.unlink()
-
-    def _read_private_gzip_json(self, path: Path, description: str):
-        path = path.expanduser()
-        if not path.exists():
-            return None
-        if not self._harden_private_file(path, description):
-            return None
-        try:
-            with path.open("rb") as f:
-                return json.loads(gzip.decompress(f.read()).decode("utf-8"))
-        except (OSError, gzip.BadGzipFile, UnicodeDecodeError, json.JSONDecodeError):
-            logger.warning(
-                "Ignoring legacy or invalid %s file %s. Delete it if this warning repeats.",
-                description,
-                path,
-            )
-            return None
 
     def _match_old_cache_child(self, old_node, child):
         """Find the previous cache node corresponding to ``child``, if any."""
@@ -189,48 +143,6 @@ class SyncMyMoodle:
         ]
         return node
 
-    def _cookies_to_data(self):
-        cookies = []
-        for cookie in self.session.cookies:
-            cookies.append(
-                {
-                    "name": cookie.name,
-                    "value": cookie.value,
-                    "domain": cookie.domain,
-                    "path": cookie.path,
-                    "secure": cookie.secure,
-                    "expires": cookie.expires,
-                    "rest": getattr(cookie, "_rest", {}),
-                }
-            )
-        return {"format": "syncmymoodle.cookies.v1", "cookies": cookies}
-
-    def _load_cookies_from_data(self, payload):
-        if not isinstance(payload, dict):
-            return
-        if payload.get("format") != "syncmymoodle.cookies.v1":
-            logger.warning("Ignoring unsupported cookie file format")
-            return
-
-        for cookie_data in payload.get("cookies", []):
-            if not isinstance(cookie_data, dict):
-                continue
-            if not cookie_data.get("name"):
-                continue
-            cookie = requests.cookies.create_cookie(
-                name=cookie_data["name"],
-                value=cookie_data.get("value", ""),
-                domain=cookie_data.get("domain") or "",
-                path=cookie_data.get("path") or "/",
-                secure=bool(cookie_data.get("secure")),
-                expires=cookie_data.get("expires"),
-                rest=cookie_data.get("rest") or {},
-            )
-            self.session.cookies.set_cookie(cookie)
-
-    def _save_session_cookies(self, cookie_file: Path) -> None:
-        self._write_private_gzip_json(cookie_file, self._cookies_to_data())
-
     def cache_root_node(self):
         """Persist per-course caches into .syncmymoodle_cache files.
 
@@ -254,7 +166,7 @@ class SyncMyMoodle:
                 old_course_root = self._get_course_cache_root(course_node)
                 course_path.mkdir(parents=True, exist_ok=True)
                 cache_path = course_path / ".syncmymoodle_cache"
-                self._write_private_gzip_json(
+                write_private_gzip_json(
                     cache_path,
                     {
                         "format": "syncmymoodle.course-cache.v1",
@@ -294,7 +206,7 @@ class SyncMyMoodle:
         if not cache_path.exists():
             return None
 
-        payload = self._read_private_gzip_json(cache_path, "course cache")
+        payload = read_private_gzip_json(cache_path, "course cache")
         if not isinstance(payload, dict):
             return None
         if payload.get("format") != "syncmymoodle.course-cache.v1":
@@ -840,9 +752,9 @@ class SyncMyMoodle:
 
         self.session = requests.Session()
         cookie_file = Path(self.config.get("cookie_file", "./session")).expanduser()
-        cookie_payload = self._read_private_gzip_json(cookie_file, "session cookie")
+        cookie_payload = read_private_gzip_json(cookie_file, "session cookie")
         if cookie_payload is not None:
-            self._load_cookies_from_data(cookie_payload)
+            load_cookies_from_data(self.session.cookies, cookie_payload)
         self._check_moodle_availability()
         try:
             resp = self.session.get(
@@ -857,7 +769,7 @@ class SyncMyMoodle:
         if resp.url.startswith("https://moodle.rwth-aachen.de/my/"):
             soup = bs(resp.text, features="lxml")
             self.session_key = get_session_key(soup)
-            self._save_session_cookies(cookie_file)
+            save_session_cookies(cookie_file, self.session.cookies)
             return
 
         # Create a separate soup for maintenance detection
@@ -974,7 +886,7 @@ class SyncMyMoodle:
         )
         soup = bs(resp.text, features="lxml")
         self.session_key = get_session_key(soup)
-        self._save_session_cookies(cookie_file)
+        save_session_cookies(cookie_file, self.session.cookies)
 
     # Moodle Web Services API
 

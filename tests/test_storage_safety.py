@@ -3,6 +3,7 @@ import json
 import stat
 
 from syncmymoodle.node import Node
+from syncmymoodle.storage import read_private_gzip_json, write_private_gzip_json
 
 from .helpers import FakeSession, make_syncer
 
@@ -19,10 +20,9 @@ def test_sanitized_node_path_stays_inside_basedir(tmp_path):
 
 
 def test_private_gzip_json_roundtrip_uses_private_permissions(tmp_path):
-    syncer = make_syncer()
     target = tmp_path / "session"
 
-    syncer._write_private_gzip_json(target, {"format": "test", "value": 1})
+    write_private_gzip_json(target, {"format": "test", "value": 1})
 
     assert stat.S_IMODE(target.stat().st_mode) == 0o600
     with target.open("rb") as handle:
@@ -30,7 +30,7 @@ def test_private_gzip_json_roundtrip_uses_private_permissions(tmp_path):
             "format": "test",
             "value": 1,
         }
-    assert syncer._read_private_gzip_json(target, "test data") == {
+    assert read_private_gzip_json(target, "test data") == {
         "format": "test",
         "value": 1,
     }
