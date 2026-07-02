@@ -15,6 +15,7 @@ from tqdm import tqdm
 from syncmymoodle import links as links_api
 from syncmymoodle import moodle as moodle_api
 from syncmymoodle import opencast as opencast_api
+from syncmymoodle import sync_handlers
 from syncmymoodle.constants import YOUTUBE_ID_LENGTH
 from syncmymoodle.context import SyncContext
 from syncmymoodle.course_cache import (
@@ -416,6 +417,14 @@ class SyncMyMoodle:
         if not self.user_id:
             raise Exception("You need to get_userid() first.")
         self.root_node = Node("", -1, "Root", None)
+        module_services = sync_handlers.ModuleServices(
+            add_moodle_file_node=self._add_moodle_file_node,
+            add_moodle_content_file_node=self._add_moodle_content_file_node,
+            get_assignment_submission_files=self.get_assignment_submission_files,
+            is_direct_moodle_file_content=self._is_direct_moodle_file_content,
+            scan_for_links=self.scanForLinks,
+            should_skip_url=self._should_skip_url,
+        )
 
         # Syncing all courses
         for course in self.get_all_courses():
@@ -508,107 +517,29 @@ class SyncMyMoodle:
                         if self._should_skip_module(module, course_id):
                             continue
 
-                        # Get Assignments
-                        if module["modname"] == "assign" and self.config.get(
-                            "used_modules", {}
-                        ).get("assign", {}):
-                            ass = assignments_by_cmid.get(module["id"])
-                            if not ass:
-                                continue
-                            assignment_id = ass["id"]
-                            assignment_name = module["name"]
-                            assignment_node = section_node.add_child(
-                                assignment_name, assignment_id, "Assignment"
-                            )
-
-                            assignment_intro = ass.get("intro")
-                            if assignment_intro:
-                                self.scanForLinks(
-                                    assignment_intro,
-                                    assignment_node,
-                                    course_id,
-                                    module_title=assignment_name,
-                                )
-
-                            ass = ass[
-                                "introattachments"
-                            ] + self.get_assignment_submission_files(assignment_id)
-                            for c in ass:
-                                if self._should_skip_url(
-                                    c.get("fileurl"), "assignment file"
-                                ):
-                                    continue
-                                self._add_moodle_file_node(
-                                    assignment_node,
-                                    c.get("filepath", "/"),
-                                    c["filename"],
-                                    c["fileurl"],
-                                    "Assignment File",
-                                    c["fileurl"],
-                                    timemodified=c.get("timemodified"),
-                                )
-
-                        # Get Resources or URLs
-                        if module["modname"] in [
-                            "resource",
-                            "url",
-                            "book",
-                            "page",
-                            "pdfannotator",
-                        ]:
-                            if module["modname"] == "resource" and not self.config.get(
-                                "used_modules", {}
-                            ).get("resource", {}):
-                                continue
-                            for c in module.get("contents", []):
-                                file_url = c.get("fileurl")
-                                if not file_url:
-                                    continue
-                                if self._should_skip_url(file_url, "resource link"):
-                                    continue
-                                if self._is_direct_moodle_file_content(module, c):
-                                    self._add_moodle_content_file_node(section_node, c)
-                                elif not (
-                                    module["modname"] == "page"
-                                    and c.get("filename") == "index.html"
-                                ):
-                                    self.scanForLinks(
-                                        file_url,
-                                        section_node,
-                                        course_id,
-                                        single=True,
-                                        module_title=module["name"],
-                                    )
-
-                        # Get Folders
-                        if module["modname"] == "folder" and self.config.get(
-                            "used_modules", {}
-                        ).get("folder", {}):
-                            folder_node = section_node.add_child(
-                                module["name"], module["id"], "Folder"
-                            )
-
-                            # Scan intro for links
-                            folder_info = folders_by_coursemodule.get(module["id"])
-                            if folder_info and folder_info.get("intro"):
-                                self.scanForLinks(
-                                    folder_info["intro"], folder_node, course_id
-                                )
-
-                            for c in module.get("contents", []):
-                                if self._should_skip_url(
-                                    c.get("fileurl"), "folder file"
-                                ):
-                                    continue
-                                self._add_moodle_file_node(
-                                    folder_node,
-                                    c.get("filepath", "/"),
-                                    c["filename"],
-                                    c["fileurl"],
-                                    "Folder File",
-                                    c["fileurl"],
-                                    timemodified=c.get("timemodified"),
-                                )
+                        sync_handlers.handle_assignment_module(
+                            self.ctx,
+                            module,
+                            section_node,
+                            course_id,
+                            assignments_by_cmid,
+                            module_services,
+                        )
+                        sync_handlers.handle_resource_like_module(
+                            self.ctx,
+                            module,
+                            section_node,
+                            course_id,
+                            module_services,
+                        )
+                        sync_handlers.handle_folder_module(
+                            self.ctx,
+                            module,
+                            section_node,
+                            course_id,
+                            folders_by_coursemodule,
+                            module_services,
+                        )
 
                         # Get embedded videos in pages or labels
                         if module["modname"] in [
