@@ -31,6 +31,7 @@ from syncmymoodle.constants import (
     YOUTUBE_ID_LENGTH,
     YOUTUBE_LINK_RE,
 )
+from syncmymoodle.context import SyncContext
 from syncmymoodle.node import NAME_CLASH_ID_UNSET, Node
 from syncmymoodle.storage import (
     load_cookies_from_data,
@@ -49,28 +50,121 @@ class SyncMyMoodle:
     invalid_chars = '~"#%&*:<>?/\\{|}'
 
     def __init__(self, config):
-        self.config = config
-        self.session = None
-        self.session_key = None
-        self.wstoken = None
-        self.user_id = None
-        self.root_node = None
-        # Per-course caches: mapping from course directory path to cached
-        # course root node loaded from `.syncmymoodle_cache`.
-        self._course_caches = {}
-        # Track repeated Opencast errors so we can hint at the RWTH
-        # status page without spamming messages
-        self._opencast_error_count = 0
-        self._opencast_status_hint_logged = False
-        # Sciebo shares often appear multiple times in Moodle pages. Cache the
-        # resolved node tree during one run so repeated links do not trigger
-        # duplicate page fetches and WebDAV PROPFIND walks.
-        self._sciebo_link_cache = {}
-        # Opencast episodes can be discovered through multiple Moodle surfaces
-        # in one sync run. Cache successful launches and track lookups to avoid
-        # repeating identical LTI/API requests.
-        self._opencast_episode_auth_cache = set()
-        self._opencast_track_cache = {}
+        self.ctx = SyncContext(config=config)
+
+    @property
+    def config(self):
+        return self.ctx.config
+
+    @config.setter
+    def config(self, value):
+        self.ctx.config = value
+
+    @property
+    def session(self):
+        return self.ctx.session
+
+    @session.setter
+    def session(self, value):
+        self.ctx.session = value
+
+    @property
+    def session_key(self):
+        return self.ctx.session_key
+
+    @session_key.setter
+    def session_key(self, value):
+        self.ctx.session_key = value
+
+    @property
+    def wstoken(self):
+        return self.ctx.wstoken
+
+    @wstoken.setter
+    def wstoken(self, value):
+        self.ctx.wstoken = value
+
+    @property
+    def user_id(self):
+        return self.ctx.user_id
+
+    @user_id.setter
+    def user_id(self, value):
+        self.ctx.user_id = value
+
+    @property
+    def user_private_access_key(self):
+        return self.ctx.user_private_access_key
+
+    @user_private_access_key.setter
+    def user_private_access_key(self, value):
+        self.ctx.user_private_access_key = value
+
+    @property
+    def root_node(self):
+        return self.ctx.root_node
+
+    @root_node.setter
+    def root_node(self, value):
+        self.ctx.root_node = value
+
+    @property
+    def _course_caches(self):
+        return self.ctx.course_caches
+
+    @_course_caches.setter
+    def _course_caches(self, value):
+        self.ctx.course_caches = value
+
+    @property
+    def _opencast_error_count(self):
+        return self.ctx.opencast_error_count
+
+    @_opencast_error_count.setter
+    def _opencast_error_count(self, value):
+        self.ctx.opencast_error_count = value
+
+    @property
+    def _opencast_status_hint_logged(self):
+        return self.ctx.opencast_status_hint_logged
+
+    @_opencast_status_hint_logged.setter
+    def _opencast_status_hint_logged(self, value):
+        self.ctx.opencast_status_hint_logged = value
+
+    @property
+    def _sciebo_link_cache(self):
+        return self.ctx.sciebo_link_cache
+
+    @_sciebo_link_cache.setter
+    def _sciebo_link_cache(self, value):
+        self.ctx.sciebo_link_cache = value
+
+    @property
+    def _opencast_episode_auth_cache(self):
+        return self.ctx.opencast_episode_auth_cache
+
+    @_opencast_episode_auth_cache.setter
+    def _opencast_episode_auth_cache(self, value):
+        self.ctx.opencast_episode_auth_cache = value
+
+    @property
+    def _opencast_track_cache(self):
+        return self.ctx.opencast_track_cache
+
+    @_opencast_track_cache.setter
+    def _opencast_track_cache(self, value):
+        self.ctx.opencast_track_cache = value
+
+    @property
+    def _downloaded_paths(self):
+        if self.ctx.downloaded_paths is None:
+            raise AttributeError("_downloaded_paths")
+        return self.ctx.downloaded_paths
+
+    @_downloaded_paths.setter
+    def _downloaded_paths(self, value):
+        self.ctx.downloaded_paths = value
 
     def _match_old_cache_child(self, old_node, child):
         """Find the previous cache node corresponding to ``child``, if any."""
