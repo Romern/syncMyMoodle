@@ -24,6 +24,20 @@ import yt_dlp
 from bs4 import BeautifulSoup as bs
 from tqdm import tqdm
 
+from syncmymoodle.constants import (
+    COURSE_PREFIX_HANDLING_OPTIONS,
+    COURSE_PREFIX_RE,
+    MOODLE_URL,
+    OPENCAST_LINK_RE,
+    RWTH_DISRUPTIVE_STATUS_CLASSES,
+    RWTH_HOMEPAGE_URL,
+    RWTH_MOODLE_STATUS_URL,
+    RWTH_SSO_STATUS_URL,
+    RWTH_STATUS_URL,
+    SCIEBO_LINK_RE,
+    YOUTUBE_ID_LENGTH,
+    YOUTUBE_LINK_RE,
+)
 from syncmymoodle.node import NAME_CLASH_ID_UNSET, Node
 from syncmymoodle.totp import totp as generate_totp
 
@@ -33,32 +47,6 @@ try:
     keyring: ModuleType | None = imported_keyring
 except ImportError:
     keyring = None
-
-YOUTUBE_ID_LENGTH = 11
-YOUTUBE_LINK_RE = re.compile(
-    r"(https?://(www\.)?(youtube\.com/(watch\?[a-zA-Z0-9_=&-]*v=|embed/)|youtu.be/).{11})"
-)
-OPENCAST_LINK_RE = re.compile(
-    r"https://engage\.streaming\.rwth-aachen\.de/play/[a-zA-Z0-9-]+"
-)
-SCIEBO_LINK_RE = re.compile(r"https://rwth-aachen\.sciebo\.de/s/[a-zA-Z0-9-]+")
-MOODLE_URL = "https://moodle.rwth-aachen.de/"
-RWTH_HOMEPAGE_URL = "https://www.rwth-aachen.de/"
-RWTH_STATUS_URL = "https://maintenance.itc.rwth-aachen.de/ticket/status/messages"
-RWTH_MOODLE_STATUS_URL = (
-    "https://maintenance.itc.rwth-aachen.de/ticket/status/messages/499?locale=en"
-)
-RWTH_SSO_STATUS_URL = (
-    "https://maintenance.itc.rwth-aachen.de/ticket/status/messages/462?locale=en"
-)
-RWTH_DISRUPTIVE_STATUS_CLASSES = {
-    "statuslabel_stoerung",
-    "statuslabel_teilstoerung",
-    "statuslabel_wartung",
-    "statuslabel_warnung",
-}
-COURSE_PREFIX_RE = re.compile(r"^\((?P<prefix>[^()]{2})\) +(?P<course_name>.+)$")
-COURSE_PREFIX_HANDLING_OPTIONS = ("keep", "remove", "suffix")
 
 logger = logging.getLogger(__name__)
 
