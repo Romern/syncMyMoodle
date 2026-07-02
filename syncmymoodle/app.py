@@ -1,8 +1,6 @@
-import hashlib
 import json
 import logging
 import os
-import re
 import urllib.parse
 from contextlib import closing
 from fnmatch import fnmatchcase
@@ -11,6 +9,7 @@ from pathlib import Path
 import yt_dlp
 from tqdm import tqdm
 
+from syncmymoodle import downloader
 from syncmymoodle import links as links_api
 from syncmymoodle import moodle as moodle_api
 from syncmymoodle import moodle_files
@@ -281,32 +280,7 @@ class SyncMyMoodle:
         return make_conflict_path(path)
 
     def _local_file_matches_etag(self, path: Path, etag: str) -> bool:
-        """Return True if the local file content matches the given ETag hash.
-
-        We currently support strong ETags that contain a plain hex digest for
-        MD5 (32 chars), SHA1 (40 chars) or SHA256 (64 chars). Other formats are
-        ignored and treated as non-matching.
-        """
-        # Extract a plausible hex digest from the ETag value, ignoring weak
-        # prefixes (W/) and surrounding quotes or algorithm markers.
-        match = re.search(r"([0-9a-fA-F]{32,64})", etag)
-        if not match:
-            return False
-        hex_str = match.group(1).lower()
-
-        algo = None
-        if len(hex_str) == 32:
-            algo = "md5"
-        elif len(hex_str) == 40:
-            algo = "sha1"
-        elif len(hex_str) == 64:
-            algo = "sha256"
-        else:
-            return False
-
-        with path.open("rb") as f:
-            digest = hashlib.file_digest(f, algo)
-            return digest.hexdigest() == hex_str
+        return downloader.local_file_matches_etag(path, etag)
 
     def _log_opencast_backend_issue(self, response_body: str | None = None) -> None:
         return opencast_api.log_backend_issue(self.ctx, response_body, logger)
@@ -556,56 +530,18 @@ class SyncMyMoodle:
         return sanitize_path_part(path, self.invalid_chars)
 
     def _content_type_without_parameters(self, response):
-        content_type = response.headers.get("Content-Type", "")
-        return content_type.split(";", 1)[0].strip().lower()
+        return downloader.content_type_without_parameters(response)
 
     def _node_allows_html_download(self, node):
-        html_suffixes = {".htm", ".html", ".xhtml"}
-        node_suffix = Path(str(node.name or "")).suffix.lower()
-        url_suffix = Path(
-            urllib.parse.urlparse(str(node.url or "")).path
-        ).suffix.lower()
-        return node_suffix in html_suffixes or url_suffix in html_suffixes
+        return downloader.node_allows_html_download(node)
 
     def _chunk_looks_like_html(self, chunk):
-        body_start = chunk.lstrip().lower()
-        return body_start.startswith(b"<!doctype html") or body_start.startswith(
-            b"<html"
-        )
+        return downloader.chunk_looks_like_html(chunk)
 
     def _download_response_is_usable(self, node, response, downloadpath):
-        if response.status_code == 204:
-            logger.warning(
-                "Skipping download of %s from %s because the server returned no "
-                "content",
-                downloadpath,
-                node.url,
-            )
-            return False
-
-        if not (200 <= response.status_code < 300):
-            logger.warning(
-                "Skipping download of %s from %s because the server returned "
-                "HTTP %s",
-                downloadpath,
-                node.url,
-                response.status_code,
-            )
-            return False
-
-        content_type = self._content_type_without_parameters(response)
-        if content_type in {"text/html", "application/xhtml+xml"}:
-            if not self._node_allows_html_download(node):
-                logger.warning(
-                    "Skipping download of %s from %s because the server returned "
-                    "HTML instead of the expected file. This usually means the "
-                    "link requires a separate login or points to an error page.",
-                    downloadpath,
-                    node.url,
-                )
-                return False
-
-        return True
+        return downloader.download_response_is_usable(
+            node, response, downloadpath, logger
+        )
 
     def download_file(self, node):
         """Download file with progress bar if it isn't already downloaded"""
