@@ -4,23 +4,18 @@ import json
 import logging
 import os
 import re
-import sys
-import time
 import urllib.parse
 from contextlib import closing
 from fnmatch import fnmatchcase
 from pathlib import Path
 
-import requests
 import yt_dlp
 from bs4 import BeautifulSoup as bs
 from tqdm import tqdm
 
 from syncmymoodle import moodle as moodle_api
 from syncmymoodle.constants import (
-    MOODLE_URL,
     OPENCAST_LINK_RE,
-    RWTH_STATUS_URL,
     SCIEBO_LINK_RE,
     YOUTUBE_ID_LENGTH,
     YOUTUBE_LINK_RE,
@@ -59,12 +54,7 @@ from syncmymoodle.rwth import (
     check_rwth_status_page,
     current_rwth_service_issues,
 )
-from syncmymoodle.storage import (
-    load_cookies_from_data,
-    read_private_gzip_json,
-    save_session_cookies,
-)
-from syncmymoodle.totp import totp as generate_totp
+from syncmymoodle.rwth import login as rwth_login
 
 logger = logging.getLogger(__name__)
 
@@ -419,173 +409,7 @@ class SyncMyMoodle:
     # RWTH SSO Login
 
     def login(self):
-        def get_session_key(soup):
-            script = soup.find("script", string=lambda text: text and "sesskey" in text)
-            match = (
-                re.search(r'"sesskey":"(.*?)"', script.text)
-                if script is not None
-                else None
-            )
-            if match:
-                return match.group(1)
-            else:
-                logger.critical("Can't retrieve session key from JavaScript config")
-                sys.exit(1)
-
-        def require_input_value(soup, name, context):
-            value = self._get_input_value(soup, name)
-            if value is None:
-                logger.critical(
-                    "Failed to login: expected form field %r was missing at the "
-                    "%s. The RWTH login flow may have changed or the servers may "
-                    "have difficulties. For current service status, see %s.",
-                    name,
-                    context,
-                    RWTH_STATUS_URL,
-                )
-                self._check_rwth_status_page()
-                logger.info("-------Login-Error-Soup--------")
-                logger.info(soup)
-                sys.exit(1)
-            return value
-
-        self.session = requests.Session()
-        cookie_file = Path(self.config.get("cookie_file", "./session")).expanduser()
-        cookie_payload = read_private_gzip_json(cookie_file, "session cookie")
-        if cookie_payload is not None:
-            load_cookies_from_data(self.session.cookies, cookie_payload)
-        self._check_moodle_availability()
-        try:
-            resp = self.session.get(
-                urllib.parse.urljoin(MOODLE_URL, "auth/shibboleth/index.php"),
-                timeout=15,
-            )
-        except requests.RequestException as exc:
-            logger.critical("Could not reach RWTH SSO login endpoint: %s", exc)
-            self._check_general_connectivity()
-            self._check_rwth_status_page()
-            sys.exit(1)
-        if resp.url.startswith("https://moodle.rwth-aachen.de/my/"):
-            soup = bs(resp.text, features="lxml")
-            self.session_key = get_session_key(soup)
-            save_session_cookies(cookie_file, self.session.cookies)
-            return
-
-        # Create a separate soup for maintenance detection
-        soup_check = bs(resp.text, features="lxml")
-
-        # Remove known info banners by class
-        for banner in soup_check.select(".themeboostunioninfobanner"):
-            banner.decompose()
-
-        # Also remove Bootstrap-style alert boxes marked as informational alerts
-        for alert in soup_check.select('div.alert[role="alert"]'):
-            alert.decompose()
-
-        # Extract body text after cleanup
-        body = soup_check.find("body")
-        body_text = body.get_text(separator=" ", strip=True) if body else ""
-
-        # Check for maintenance notice
-        if "Wartungsarbeiten" in body_text:
-            logger.critical(
-                "Detected Maintenance mode! If this is an error, please report it on GitHub."
-            )
-            logger.info(f"Cleaned page body:\n{body_text}")
-            sys.exit()
-
-        soup = bs(resp.text, features="lxml")
-        if soup.find("input", {"name": "RelayState"}) is None:
-            csrf_token = require_input_value(
-                soup, "csrf_token", "username/password form"
-            )
-            login_data = {
-                "j_username": self.config["user"],
-                "j_password": self.config["password"],
-                "_eventId_proceed": "",
-                "csrf_token": csrf_token,
-            }
-            resp2 = self.session.post(resp.url, data=login_data)
-
-            soup = bs(resp2.text, features="lxml")
-
-            if soup.find(id="fudis_selected_token_ids_input") is None:
-                logger.critical(
-                    "Failed to login. Maybe your login-info was wrong or the "
-                    "RWTH servers have difficulties. For current service "
-                    "status, see %s. For more info use the --verbose argument.",
-                    RWTH_STATUS_URL,
-                )
-                self._check_rwth_status_page()
-                logger.info("-------Login-Error-Soup--------")
-                logger.info(soup)
-                sys.exit(1)
-
-            csrf_token = require_input_value(
-                soup, "csrf_token", "TOTP generator selection form"
-            )
-
-            print("Setting TOTP generator")
-            totp_selection_data = {
-                "fudis_selected_token_ids_input": self.config["totp"],
-                "_eventId_proceed": "",
-                "csrf_token": csrf_token,
-            }
-
-            resp3 = self.session.post(resp2.url, data=totp_selection_data)
-
-            soup = bs(resp3.text, features="lxml")
-            if soup.find(id="fudis_otp_input") is None:
-                logger.critical(
-                    "Failed to select TOTP generator. Maybe your TOTP serial "
-                    "number is wrong or the RWTH servers have difficulties. "
-                    "For current service status, see %s. For more info use "
-                    "the --verbose argument.",
-                    RWTH_STATUS_URL,
-                )
-                self._check_rwth_status_page()
-                logger.info("-------Login-Error-Soup--------")
-                logger.info(soup)
-                sys.exit(1)
-
-            csrf_token = require_input_value(soup, "csrf_token", "TOTP entry form")
-            if not self.config.get("totpsecret"):
-                totp_input = input(f"Enter TOTP for generator {self.config['totp']}:\n")
-            else:
-                totp_input = generate_totp(self.config.get("totpsecret"))
-                print(f"Generated TOTP from provided secret: {totp_input}")
-
-            totp_login_data = {
-                "fudis_otp_input": totp_input,
-                "_eventId_proceed": "",
-                "csrf_token": csrf_token,
-            }
-
-            resp4 = self.session.post(resp3.url, data=totp_login_data)
-
-            time.sleep(1)  # if we go too fast, we might have our connection closed
-            soup = bs(resp4.text, features="lxml")
-        if soup.find("input", {"name": "RelayState"}) is None:
-            logger.critical(
-                "Failed to login. Maybe your login-info was wrong or the RWTH "
-                "servers have difficulties. For current service status, see "
-                "%s. For more info use the --verbose argument.",
-                RWTH_STATUS_URL,
-            )
-            self._check_rwth_status_page()
-            logger.info("-------Login-Error-Soup--------")
-            logger.info(soup)
-            sys.exit(1)
-        data = {
-            "RelayState": require_input_value(soup, "RelayState", "SAML response"),
-            "SAMLResponse": require_input_value(soup, "SAMLResponse", "SAML response"),
-        }
-        resp = self.session.post(
-            "https://moodle.rwth-aachen.de/Shibboleth.sso/SAML2/POST", data=data
-        )
-        soup = bs(resp.text, features="lxml")
-        self.session_key = get_session_key(soup)
-        save_session_cookies(cookie_file, self.session.cookies)
+        return rwth_login(self.ctx, logger)
 
     # Moodle Web Services API
 
