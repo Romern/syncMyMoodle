@@ -9,7 +9,6 @@ from fnmatch import fnmatchcase
 from pathlib import Path
 
 import yt_dlp
-from bs4 import BeautifulSoup as bs
 from tqdm import tqdm
 
 from syncmymoodle import links as links_api
@@ -430,6 +429,7 @@ class SyncMyMoodle:
             get_opencast_result_list=self._get_opencast_result_list,
             is_direct_moodle_file_content=self._is_direct_moodle_file_content,
             log_opencast_backend_issue=self._log_opencast_backend_issue,
+            sanitize=self.sanitize,
             scan_html_text_for_links=self._scan_html_text_for_links,
             scan_for_links=self.scanForLinks,
             should_skip_url=self._should_skip_url,
@@ -566,41 +566,12 @@ class SyncMyMoodle:
                             module_services,
                             logger,
                         )
-                        # Integration for Quizzes
-                        if module["modname"] == "quiz" and self.config.get(
-                            "used_modules", {}
-                        ).get("url", {}).get("quiz", {}):
-                            info_url = f'https://moodle.rwth-aachen.de/mod/quiz/view.php?id={module["id"]}'
-                            info_res = bs(
-                                self.session.get(info_url).text, features="lxml"
-                            )
-                            attempts = info_res.find_all(
-                                "a",
-                                {
-                                    "title": "Überprüfung der eigenen Antworten dieses Versuchs"
-                                },
-                            )
-                            attempt_cnt = 0
-                            for attempt in attempts:
-                                attempt_cnt += 1
-                                review_url = attempt.get("href")
-                                quiz_res = bs(
-                                    self.session.get(review_url).text,
-                                    features="lxml",
-                                )
-                                name = (
-                                    quiz_res.find("title")
-                                    .get_text()
-                                    .replace(": Überprüfung des Testversuchs", "")
-                                    + ", Versuch "
-                                    + str(attempt_cnt)
-                                )
-                                section_node.add_child(
-                                    self.sanitize(name),
-                                    urllib.parse.urlparse(review_url)[1],
-                                    "Quiz",
-                                    url=review_url,
-                                )
+                        sync_handlers.handle_quiz_module(
+                            self.ctx,
+                            module,
+                            section_node,
+                            module_services,
+                        )
 
                     except Exception:
                         logger.exception(f"Failed to download the module {module}")

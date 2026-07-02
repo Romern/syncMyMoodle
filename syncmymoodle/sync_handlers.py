@@ -22,6 +22,7 @@ class ModuleServices:
     get_opencast_result_list: Any
     is_direct_moodle_file_content: Any
     log_opencast_backend_issue: Any
+    sanitize: Any
     scan_html_text_for_links: Any
     scan_for_links: Any
     should_skip_url: Any
@@ -390,3 +391,43 @@ def handle_opencast_lti_module(
                 url=vid,
                 additional_info=module["id"],
             )
+
+
+def handle_quiz_module(
+    ctx,
+    module,
+    section_node,
+    services: ModuleServices,
+) -> None:
+    # Integration for Quizzes
+    if module["modname"] != "quiz" or not ctx.config.get("used_modules", {}).get(
+        "url", {}
+    ).get("quiz", {}):
+        return
+
+    info_url = f'https://moodle.rwth-aachen.de/mod/quiz/view.php?id={module["id"]}'
+    info_res = bs(ctx.session.get(info_url).text, features="lxml")
+    attempts = info_res.find_all(
+        "a",
+        {"title": "Überprüfung der eigenen Antworten dieses Versuchs"},
+    )
+    attempt_cnt = 0
+    for attempt in attempts:
+        attempt_cnt += 1
+        review_url = cast(str, attempt.get("href"))
+        quiz_res = bs(
+            ctx.session.get(review_url).text,
+            features="lxml",
+        )
+        title = cast(Any, quiz_res.find("title"))
+        name = (
+            title.get_text().replace(": Überprüfung des Testversuchs", "")
+            + ", Versuch "
+            + str(attempt_cnt)
+        )
+        section_node.add_child(
+            services.sanitize(name),
+            urllib.parse.urlparse(review_url)[1],
+            "Quiz",
+            url=review_url,
+        )
