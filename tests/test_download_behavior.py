@@ -1,7 +1,7 @@
 import hashlib
 import os
 
-from syncmymoodle.__main__ import Node
+from syncmymoodle.node import Node
 
 from .helpers import FakeResponse, FakeSession, build_single_file_tree, make_syncer
 

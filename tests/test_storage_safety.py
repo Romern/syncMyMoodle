@@ -2,7 +2,7 @@ import gzip
 import json
 import stat
 
-from syncmymoodle.__main__ import Node
+from syncmymoodle.node import Node
 
 from .helpers import FakeSession, make_syncer
 

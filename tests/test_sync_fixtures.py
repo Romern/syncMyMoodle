@@ -1,4 +1,4 @@
-from syncmymoodle.__main__ import Node
+from syncmymoodle.node import Node
 
 from .helpers import (
     FakeResponse,

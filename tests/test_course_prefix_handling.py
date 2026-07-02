@@ -1,6 +1,7 @@
 import logging
 
-from syncmymoodle.__main__ import Node, SyncMyMoodle
+from syncmymoodle.__main__ import SyncMyMoodle
+from syncmymoodle.node import Node
 
 
 def format_course_name(handling, name):
