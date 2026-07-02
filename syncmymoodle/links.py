@@ -1,9 +1,12 @@
 import logging
 import urllib.parse
-from typing import Any, Callable, cast
+from typing import Any, cast
 
 from bs4 import BeautifulSoup as bs
 
+from syncmymoodle import downloader as downloader_api
+from syncmymoodle import filters
+from syncmymoodle import opencast as opencast_api
 from syncmymoodle import sciebo as sciebo_api
 from syncmymoodle.constants import OPENCAST_LINK_RE, YOUTUBE_LINK_RE
 from syncmymoodle.context import SyncContext
@@ -13,13 +16,12 @@ logger = logging.getLogger(__name__)
 
 
 def scan_html_text_for_links(
+    ctx: SyncContext,
     html_text: str,
     base_url: str | None,
     parent_node: Node,
     course_id: Any,
-    module_title: Any,
-    should_skip_url: Callable[[str | None, str], bool],
-    scan_for_links: Callable[..., Any],
+    module_title: Any = None,
     log: logging.Logger = logger,
 ) -> None:
     if "video-js" in html_text and "<source" in html_text.lower():
@@ -30,7 +32,7 @@ def scan_html_text_for_links(
             if videojs and videojs.get("src"):
                 video_src = cast(str, videojs["src"])
                 link = urllib.parse.urljoin(str(base_url or ""), video_src)
-                if not should_skip_url(link, "embedded video"):
+                if not filters.should_skip_url(ctx.config, link, "embedded video", log):
                     parent_node.add_child(
                         video_src.split("/")[-1],
                         None,
@@ -39,6 +41,7 @@ def scan_html_text_for_links(
                     )
 
     scan_for_links(
+        ctx,
         html_text,
         parent_node,
         course_id,
@@ -52,24 +55,18 @@ def scan_for_links(
     text: str,
     parent_node: Node,
     course_id: Any,
-    module_title: Any,
-    single: bool,
-    should_skip_url: Callable[[str | None, str], bool],
-    content_type_without_parameters: Callable[[Any], str],
-    scan_html_text_for_links: Callable[..., Any],
-    extract_opencast_episode_id: Callable[[Any], str | None],
-    authenticate_opencast_episode: Callable[[Any, str], bool],
-    extract_track_from_episode: Callable[[str], str | bool],
+    module_title: Any = None,
+    single: bool = False,
     log: logging.Logger = logger,
 ) -> None:
     # A single link is supplied and the contents of it are checked
     if single:
         try:
             text = text.replace("webservice/pluginfile.php", "pluginfile.php")
-            if should_skip_url(text, "link"):
+            if filters.should_skip_url(ctx.config, text, "link", log):
                 return
             response = ctx.require_session().head(text, allow_redirects=True)
-            content_type = content_type_without_parameters(response)
+            content_type = downloader_api.content_type_without_parameters(response)
             if "youtube.com" in text or "youtu.be" in text:
                 # workaround for youtube providing bad headers when using HEAD
                 pass
@@ -91,6 +88,7 @@ def scan_for_links(
             elif not ctx.config.get("nolinks"):
                 response = ctx.require_session().get(text)
                 scan_html_text_for_links(
+                    ctx,
                     response.text,
                     response.url or text,
                     parent_node,
@@ -111,7 +109,7 @@ def scan_for_links(
             for match in YOUTUBE_LINK_RE.finditer(text)
         ]
         for link in youtube_links:
-            if should_skip_url(link, "YouTube link"):
+            if filters.should_skip_url(ctx.config, link, "YouTube link", log):
                 continue
             parent_node.add_child(
                 f"Youtube: {module_title or link}", link, "Youtube", url=link
@@ -121,18 +119,18 @@ def scan_for_links(
     if ctx.config.get("used_modules", {}).get("url", {}).get("opencast", {}):
         opencast_links = OPENCAST_LINK_RE.findall(text)
         for vid in opencast_links:
-            if should_skip_url(vid, "Opencast link"):
+            if filters.should_skip_url(ctx.config, vid, "Opencast link", log):
                 continue
-            vid_id = extract_opencast_episode_id(vid)
+            vid_id = opencast_api.extract_episode_id(vid)
             if not vid_id:
                 log.warning(f"Opencast: could not extract episode id from url {vid}")
                 continue
-            if not authenticate_opencast_episode(course_id, vid_id):
+            if not opencast_api.authenticate_episode(ctx, course_id, vid_id, log):
                 continue
-            vid = extract_track_from_episode(vid_id)
+            vid = opencast_api.extract_track_from_episode(ctx, vid_id, log)
             if not isinstance(vid, str) or not vid:
                 continue
-            if should_skip_url(vid, "Opencast video URL"):
+            if filters.should_skip_url(ctx.config, vid, "Opencast video URL", log):
                 continue
 
             parent_node.add_child(
@@ -145,4 +143,4 @@ def scan_for_links(
 
     # https://rwth-aachen.sciebo.de/s/XXX
     if ctx.config.get("used_modules", {}).get("url", {}).get("sciebo", {}):
-        sciebo_api.scan_public_shares(ctx, text, parent_node, should_skip_url, log)
+        sciebo_api.scan_public_shares(ctx, text, parent_node, log)

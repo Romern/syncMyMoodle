@@ -1,35 +1,21 @@
 import logging
 import urllib.parse
 from dataclasses import dataclass
-from typing import Any, Callable, cast
+from typing import Any, cast
 
 from bs4 import BeautifulSoup as bs
 
+from syncmymoodle import filters
+from syncmymoodle import links as links_api
+from syncmymoodle import moodle as moodle_api
+from syncmymoodle import moodle_files
+from syncmymoodle import opencast as opencast_api
+from syncmymoodle import pathing
+from syncmymoodle.constants import INVALID_CHARS
 from syncmymoodle.context import SyncContext
 from syncmymoodle.node import Node
 
 logger = logging.getLogger(__name__)
-
-
-@dataclass
-class ModuleServices:
-    add_moodle_file_node: Callable[..., Any]
-    add_moodle_content_file_node: Callable[..., Any]
-    get_assignment_submission_files: Callable[..., Any]
-    authenticate_opencast_episode: Callable[..., Any]
-    extract_lti_form_data: Callable[..., Any]
-    extract_opencast_episode_id: Callable[..., Any]
-    extract_track_from_episode: Callable[..., Any]
-    fetch_opencast_json: Callable[..., Any]
-    get_input_value: Callable[..., Any]
-    get_opencast_result_list: Callable[..., Any]
-    is_direct_moodle_file_content: Callable[..., Any]
-    log_opencast_backend_issue: Callable[..., Any]
-    sanitize: Callable[..., Any]
-    scan_html_text_for_links: Callable[..., Any]
-    scan_for_links: Callable[..., Any]
-    should_skip_url: Callable[..., Any]
-    submit_opencast_lti_form: Callable[..., Any]
 
 
 @dataclass
@@ -40,7 +26,6 @@ class ModuleContext:
     section_node: Node
     assignments_by_cmid: Any
     folders_by_coursemodule: Any
-    services: ModuleServices
     log: logging.Logger = logger
 
 
@@ -50,7 +35,6 @@ def handle_assignment_module(
     section_node: Node,
     course_id: Any,
     assignments_by_cmid: dict[Any, Any],
-    services: ModuleServices,
 ) -> None:
     # Get Assignments
     if module["modname"] == "assign" and ctx.config.get("used_modules", {}).get(
@@ -64,24 +48,31 @@ def handle_assignment_module(
         assignment_node = section_node.add_child(
             assignment_name, assignment_id, "Assignment"
         )
+        if assignment_node is None:
+            return
 
         assignment_intro = ass.get("intro")
         if assignment_intro:
-            services.scan_for_links(
+            links_api.scan_for_links(
+                ctx,
                 assignment_intro,
                 assignment_node,
                 course_id,
                 module_title=assignment_name,
             )
 
-        ass = ass["introattachments"] + services.get_assignment_submission_files(
-            assignment_id
+        ass = ass["introattachments"] + moodle_api.get_assignment_submission_files(
+            ctx.require_session(),
+            cast(str, ctx.wstoken),
+            ctx.user_id,
+            assignment_id,
         )
         for c in ass:
-            if services.should_skip_url(c.get("fileurl"), "assignment file"):
+            if filters.should_skip_url(ctx.config, c.get("fileurl"), "assignment file"):
                 continue
-            services.add_moodle_file_node(
+            moodle_files.add_moodle_file_node(
                 assignment_node,
+                INVALID_CHARS,
                 c.get("filepath", "/"),
                 c["filename"],
                 c["fileurl"],
@@ -96,7 +87,6 @@ def handle_resource_like_module(
     module: dict[str, Any],
     section_node: Node,
     course_id: Any,
-    services: ModuleServices,
 ) -> None:
     # Get Resources or URLs
     if module["modname"] not in [
@@ -115,12 +105,13 @@ def handle_resource_like_module(
         file_url = c.get("fileurl")
         if not file_url:
             continue
-        if services.should_skip_url(file_url, "resource link"):
+        if filters.should_skip_url(ctx.config, file_url, "resource link"):
             continue
-        if services.is_direct_moodle_file_content(module, c):
-            services.add_moodle_content_file_node(section_node, c)
+        if moodle_files.is_direct_moodle_file_content(module, c):
+            moodle_files.add_moodle_content_file_node(section_node, INVALID_CHARS, c)
         elif not (module["modname"] == "page" and c.get("filename") == "index.html"):
-            services.scan_for_links(
+            links_api.scan_for_links(
+                ctx,
                 file_url,
                 section_node,
                 course_id,
@@ -135,24 +126,26 @@ def handle_folder_module(
     section_node: Node,
     course_id: Any,
     folders_by_coursemodule: dict[Any, Any],
-    services: ModuleServices,
 ) -> None:
     # Get Folders
     if module["modname"] == "folder" and ctx.config.get("used_modules", {}).get(
         "folder", {}
     ):
         folder_node = section_node.add_child(module["name"], module["id"], "Folder")
+        if folder_node is None:
+            return
 
         # Scan intro for links
         folder_info = folders_by_coursemodule.get(module["id"])
         if folder_info and folder_info.get("intro"):
-            services.scan_for_links(folder_info["intro"], folder_node, course_id)
+            links_api.scan_for_links(ctx, folder_info["intro"], folder_node, course_id)
 
         for c in module.get("contents", []):
-            if services.should_skip_url(c.get("fileurl"), "folder file"):
+            if filters.should_skip_url(ctx.config, c.get("fileurl"), "folder file"):
                 continue
-            services.add_moodle_file_node(
+            moodle_files.add_moodle_file_node(
                 folder_node,
+                INVALID_CHARS,
                 c.get("filepath", "/"),
                 c["filename"],
                 c["fileurl"],
@@ -167,7 +160,6 @@ def handle_embedded_link_module(
     module: dict[str, Any],
     section_node: Node,
     course_id: Any,
-    services: ModuleServices,
     log: logging.Logger = logger,
 ) -> None:
     # Get embedded videos in pages or labels
@@ -188,9 +180,9 @@ def handle_embedded_link_module(
             module.get("url")
             or f'https://moodle.rwth-aachen.de/mod/page/view.php?id={module["id"]}'
         )
-        scan_page_links = not ctx.config.get(
-            "nolinks"
-        ) and not services.should_skip_url(html_url, "page link")
+        scan_page_links = not ctx.config.get("nolinks") and not filters.should_skip_url(
+            ctx.config, html_url, "page link"
+        )
         if opencast_enabled or scan_page_links:
             try:
                 response = ctx.require_session().get(html_url)
@@ -221,18 +213,20 @@ def handle_embedded_link_module(
                             response.url or html_url,
                             cast(str, iframe_src_value),
                         )
-                        vid_id = services.extract_opencast_episode_id(iframe_src)
+                        vid_id = opencast_api.extract_episode_id(iframe_src)
                         if not vid_id:
                             continue
-                        if not services.authenticate_opencast_episode(
-                            course_id, vid_id
+                        if not opencast_api.authenticate_episode(
+                            ctx, course_id, vid_id, log
                         ):
                             continue
-                        vid = services.extract_track_from_episode(vid_id)
-                        if not vid:
+                        vid = opencast_api.extract_track_from_episode(ctx, vid_id, log)
+                        if not isinstance(vid, str) or not vid:
                             continue
 
-                        if services.should_skip_url(vid, "Opencast video URL"):
+                        if filters.should_skip_url(
+                            ctx.config, vid, "Opencast video URL"
+                        ):
                             continue
 
                         section_node.add_child(
@@ -244,7 +238,8 @@ def handle_embedded_link_module(
                         )
 
                 if scan_page_links:
-                    services.scan_html_text_for_links(
+                    links_api.scan_html_text_for_links(
+                        ctx,
                         response.text,
                         response.url or html_url,
                         section_node,
@@ -277,7 +272,8 @@ def handle_embedded_link_module(
             # H5P outside iframes
             sanitized_html = str(html).replace("\\", "")
 
-        services.scan_for_links(
+        links_api.scan_for_links(
+            ctx,
             sanitized_html,
             section_node,
             course_id,
@@ -285,7 +281,8 @@ def handle_embedded_link_module(
             single=False,
         )
     else:
-        services.scan_for_links(
+        links_api.scan_for_links(
+            ctx,
             module.get("description", ""),
             section_node,
             course_id,
@@ -298,7 +295,6 @@ def handle_opencast_lti_module(
     module: dict[str, Any],
     section_node: Node,
     course_node: Node,
-    services: ModuleServices,
     log: logging.Logger = logger,
 ) -> None:
     # New OpenCast integration
@@ -325,15 +321,17 @@ def handle_opencast_lti_module(
             module["id"],
             info_response.status_code,
         )
-        services.log_opencast_backend_issue(info_response.text)
+        opencast_api.log_backend_issue(ctx, info_response.text, log)
         return
 
     info_res = bs(info_response.text, features="lxml")
 
-    engage_series_id = services.get_input_value(info_res, "custom_series")
-    engage_single_id = services.get_input_value(info_res, "custom_id")
-    name = services.get_input_value(info_res, "resource_link_title") or module["name"]
-    engage_data = services.extract_lti_form_data(info_res)
+    engage_series_id = opencast_api.get_input_value(info_res, "custom_series")
+    engage_single_id = opencast_api.get_input_value(info_res, "custom_id")
+    name = (
+        opencast_api.get_input_value(info_res, "resource_link_title") or module["name"]
+    )
+    engage_data = opencast_api.extract_lti_form_data(info_res)
 
     if engage_series_id:
         # Found an Opencast "series" page
@@ -341,8 +339,8 @@ def handle_opencast_lti_module(
 
         series_node = cast(Node, course_node.add_child(name, series_id, "Section"))
 
-        if not services.submit_opencast_lti_form(
-            engage_data, f"LTI series module {module['id']}"
+        if not opencast_api.submit_lti_form(
+            ctx, engage_data, f"LTI series module {module['id']}", log
         ):
             return
 
@@ -350,14 +348,14 @@ def handle_opencast_lti_module(
             "https://engage.streaming.rwth-aachen.de/search/episode.json"
             f"?limit=100&offset=0&sid={series_id}"
         )
-        series_response = services.fetch_opencast_json(
-            series_url, f"series {series_id}"
+        series_response = opencast_api.fetch_json(
+            ctx, series_url, f"series {series_id}", log
         )
         if series_response is None:
             return
 
-        for episode in services.get_opencast_result_list(
-            series_response, f"series {series_id}"
+        for episode in opencast_api.get_result_list(
+            ctx, series_response, f"series {series_id}", log
         ):
             if not isinstance(episode, dict):
                 continue
@@ -371,10 +369,10 @@ def handle_opencast_lti_module(
                     series_id,
                 )
                 continue
-            vid = services.extract_track_from_episode(episode_id)
-            if not vid:
+            vid = opencast_api.extract_track_from_episode(ctx, episode_id, log)
+            if not isinstance(vid, str) or not vid:
                 continue
-            if services.should_skip_url(vid, "Opencast video URL"):
+            if filters.should_skip_url(ctx.config, vid, "Opencast video URL"):
                 continue
             series_node.add_child(
                 mediapackage.get("title") or episode_id,
@@ -390,14 +388,14 @@ def handle_opencast_lti_module(
             log.info(f"url: {info_url}")
             log.info(info_res)
         else:
-            if not services.submit_opencast_lti_form(
-                engage_data, f"LTI module {module['id']}"
+            if not opencast_api.submit_lti_form(
+                ctx, engage_data, f"LTI module {module['id']}", log
             ):
                 return
-            vid = services.extract_track_from_episode(engage_single_id)
-            if not vid:
+            vid = opencast_api.extract_track_from_episode(ctx, engage_single_id, log)
+            if not isinstance(vid, str) or not vid:
                 return
-            if services.should_skip_url(vid, "Opencast video URL"):
+            if filters.should_skip_url(ctx.config, vid, "Opencast video URL"):
                 return
             section_node.add_child(
                 name,
@@ -412,7 +410,6 @@ def handle_quiz_module(
     ctx: SyncContext,
     module: dict[str, Any],
     section_node: Node,
-    services: ModuleServices,
 ) -> None:
     # Integration for Quizzes
     if module["modname"] != "quiz" or not ctx.config.get("used_modules", {}).get(
@@ -441,7 +438,7 @@ def handle_quiz_module(
             + str(attempt_cnt)
         )
         section_node.add_child(
-            services.sanitize(name),
+            pathing.sanitize_path_part(name, INVALID_CHARS),
             urllib.parse.urlparse(review_url)[1],
             "Quiz",
             url=review_url,
@@ -455,7 +452,6 @@ def _assignment_handler(module_context: ModuleContext, module: dict[str, Any]) -
         module_context.section_node,
         module_context.course_id,
         module_context.assignments_by_cmid,
-        module_context.services,
     )
 
 
@@ -467,7 +463,6 @@ def _resource_like_handler(
         module,
         module_context.section_node,
         module_context.course_id,
-        module_context.services,
     )
 
 
@@ -478,7 +473,6 @@ def _folder_handler(module_context: ModuleContext, module: dict[str, Any]) -> No
         module_context.section_node,
         module_context.course_id,
         module_context.folders_by_coursemodule,
-        module_context.services,
     )
 
 
@@ -490,7 +484,6 @@ def _embedded_link_handler(
         module,
         module_context.section_node,
         module_context.course_id,
-        module_context.services,
         module_context.log,
     )
 
@@ -503,7 +496,6 @@ def _opencast_lti_handler(
         module,
         module_context.section_node,
         module_context.course_node,
-        module_context.services,
         module_context.log,
     )
 
@@ -513,7 +505,6 @@ def _quiz_handler(module_context: ModuleContext, module: dict[str, Any]) -> None
         module_context.ctx,
         module,
         module_context.section_node,
-        module_context.services,
     )
 
 

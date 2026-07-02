@@ -151,6 +151,7 @@ def make_syncer(config: dict[str, Any] | None = None) -> SyncMyMoodle:
 
 def install_moodle_fixtures(
     syncer: SyncMyMoodle,
+    monkeypatch: Any,
     courses: list[dict[str, Any]],
     course_contents: dict[int, list[dict[str, Any]]],
     assignments: dict[int, dict[str, Any] | None] | None = None,
@@ -162,13 +163,16 @@ def install_moodle_fixtures(
     syncer.get_assignment = lambda course_id: (assignments or {}).get(  # type: ignore[method-assign]
         int(course_id)
     )
-    syncer.get_assignment_submission_files = lambda assignment_id: (  # type: ignore[method-assign]
-        submission_files or {}
-    ).get(
-        int(assignment_id), []
-    )
     syncer.get_folders_by_courses = lambda course_id: (folders or {}).get(  # type: ignore[method-assign]
         int(course_id), []
+    )
+    # The assignment handler fetches submission files via the moodle module
+    # directly, so stub it there (leak-safe via monkeypatch).
+    monkeypatch.setattr(
+        "syncmymoodle.moodle.get_assignment_submission_files",
+        lambda session, wstoken, user_id, assignment_id, *a, **k: (
+            submission_files or {}
+        ).get(int(assignment_id), []),
     )
 
 

@@ -6,9 +6,8 @@ from typing import Any, cast
 from syncmymoodle import downloader
 from syncmymoodle import links as links_api
 from syncmymoodle import moodle as moodle_api
-from syncmymoodle import moodle_files
-from syncmymoodle import opencast as opencast_api
 from syncmymoodle import sync_handlers
+from syncmymoodle.constants import INVALID_CHARS
 from syncmymoodle.context import SyncContext
 from syncmymoodle.course_cache import (
     cache_root_node,
@@ -21,22 +20,14 @@ from syncmymoodle.course_cache import (
     node_to_cache_data,
 )
 from syncmymoodle.filters import (
-    as_list,
-    configured_patterns,
     course_id_in_filter,
-    domain_matches,
     format_course_name,
-    matches_any_pattern,
     should_skip_module,
     should_skip_section,
     should_skip_url,
 )
-from syncmymoodle.node import NAME_CLASH_ID_UNSET, Node
-from syncmymoodle.pathing import (
-    get_sanitized_node_path,
-    make_conflict_path,
-    sanitize_path_part,
-)
+from syncmymoodle.node import Node
+from syncmymoodle.pathing import get_sanitized_node_path, make_conflict_path
 from syncmymoodle.rwth import (
     check_general_connectivity,
     check_moodle_availability,
@@ -51,7 +42,7 @@ logger = logging.getLogger(__name__)
 class SyncMyMoodle:
     params = {"lang": "en"}  # Titles for some pages differ
     block_size = 1024
-    invalid_chars = '~"#%&*:<>?/\\{|}'
+    invalid_chars = INVALID_CHARS
 
     def __init__(self, config: dict[str, Any]) -> None:
         self.ctx = SyncContext(config=config)
@@ -198,89 +189,11 @@ class SyncMyMoodle:
     def _get_old_node_for(self, node: Node) -> Node | None:
         return get_old_node_for(self.ctx, self.invalid_chars, node, logger)
 
-    def _get_or_add_child(
-        self,
-        parent_node: Node,
-        name: str,
-        id: Any,  # noqa: A002 - keep Moodle payload name
-        type: str,  # noqa: A002 - keep Moodle payload name
-    ) -> Node | None:
-        return moodle_files.get_or_add_child(parent_node, name, id, type)
-
-    def _add_moodle_file_node(
-        self,
-        parent_node: Node,
-        moodle_filepath: Any,
-        filename: str,
-        id: Any,  # noqa: A002 - keep Moodle payload name
-        type: str,  # noqa: A002 - keep Moodle payload name
-        url: str | None,
-        timemodified: Any = None,
-        name_clash_id: Any = NAME_CLASH_ID_UNSET,
-    ) -> Node | None:
-        return moodle_files.add_moodle_file_node(
-            parent_node,
-            self.invalid_chars,
-            moodle_filepath,
-            filename,
-            id,
-            type,
-            url,
-            timemodified=timemodified,
-            name_clash_id=name_clash_id,
-        )
-
-    def _add_moodle_content_file_node(
-        self,
-        parent_node: Node,
-        content: dict[str, Any],
-        file_type: str | None = None,
-    ) -> Node | None:
-        return moodle_files.add_moodle_content_file_node(
-            parent_node, self.invalid_chars, content, file_type
-        )
-
-    def _is_direct_moodle_file_content(
-        self, module: dict[str, Any], content: dict[str, Any]
-    ) -> bool:
-        return moodle_files.is_direct_moodle_file_content(module, content)
-
-    def _scan_html_text_for_links(
-        self,
-        html_text: str,
-        base_url: str | None,
-        parent_node: Node,
-        course_id: Any,
-        module_title: Any = None,
-    ) -> None:
-        return links_api.scan_html_text_for_links(
-            html_text,
-            base_url,
-            parent_node,
-            course_id,
-            module_title,
-            self._should_skip_url,
-            self.scanForLinks,
-            logger,
-        )
-
-    def _as_list(self, value: Any) -> list[Any]:
-        return as_list(value)
-
     def _course_id_in_filter(self, course_id: Any, entries: Any) -> bool:
         return course_id_in_filter(course_id, entries)
 
-    def _configured_patterns(self, *keys: str, course_id: Any = None) -> list[str]:
-        return configured_patterns(self.config, *keys, course_id=course_id)
-
     def _format_course_name(self, course_name: str) -> str:
         return format_course_name(course_name, self.config, logger)
-
-    def _matches_any_pattern(self, values: list[Any], patterns: list[str]) -> bool:
-        return matches_any_pattern(values, patterns)
-
-    def _domain_matches(self, netloc: str, allowed_domain: str) -> bool:
-        return domain_matches(netloc, allowed_domain)
 
     def _should_skip_url(self, url: str | None, context: str = "link") -> bool:
         return should_skip_url(self.config, url, context, logger)
@@ -296,9 +209,6 @@ class SyncMyMoodle:
 
     def _local_file_matches_etag(self, path: Path, etag: str) -> bool:
         return downloader.local_file_matches_etag(path, etag)
-
-    def _log_opencast_backend_issue(self, response_body: str | None = None) -> None:
-        return opencast_api.log_backend_issue(self.ctx, response_body, logger)
 
     def _check_general_connectivity(self) -> bool:
         return check_general_connectivity(logger)
@@ -373,25 +283,6 @@ class SyncMyMoodle:
             raise Exception("You need to get_userid() first.")
         root_node = Node("", -1, "Root", None)
         self.root_node = root_node
-        module_services = sync_handlers.ModuleServices(
-            add_moodle_file_node=self._add_moodle_file_node,
-            add_moodle_content_file_node=self._add_moodle_content_file_node,
-            get_assignment_submission_files=self.get_assignment_submission_files,
-            authenticate_opencast_episode=self._authenticate_opencast_episode,
-            extract_lti_form_data=self._extract_lti_form_data,
-            extract_opencast_episode_id=self._extract_opencast_episode_id,
-            extract_track_from_episode=self.extractTrackFromEpisode,
-            fetch_opencast_json=self._fetch_opencast_json,
-            get_input_value=self._get_input_value,
-            get_opencast_result_list=self._get_opencast_result_list,
-            is_direct_moodle_file_content=self._is_direct_moodle_file_content,
-            log_opencast_backend_issue=self._log_opencast_backend_issue,
-            sanitize=self.sanitize,
-            scan_html_text_for_links=self._scan_html_text_for_links,
-            scan_for_links=self.scanForLinks,
-            should_skip_url=self._should_skip_url,
-            submit_opencast_lti_form=self._submit_opencast_lti_form,
-        )
 
         # Syncing all courses
         for course in self.get_all_courses():
@@ -489,7 +380,6 @@ class SyncMyMoodle:
                     section_node=section_node,
                     assignments_by_cmid=assignments_by_cmid,
                     folders_by_coursemodule=folders_by_coursemodule,
-                    services=module_services,
                     log=logger,
                 )
                 for module in section["modules"]:
@@ -529,12 +419,6 @@ class SyncMyMoodle:
             node, Path(self.config.get("basedir", "./")), self.invalid_chars
         )
 
-    def sanitize(self, path: str) -> str:
-        return sanitize_path_part(path, self.invalid_chars)
-
-    def _content_type_without_parameters(self, response: Any) -> str:
-        return downloader.content_type_without_parameters(response)
-
     def _node_allows_html_download(self, node: Node) -> bool:
         return downloader.node_allows_html_download(node)
 
@@ -566,40 +450,6 @@ class SyncMyMoodle:
             logger,
         )
 
-    def _extract_opencast_episode_id(self, url: Any) -> str | None:
-        return opencast_api.extract_episode_id(url)
-
-    def _extract_lti_form_data(self, soup: Any) -> dict[str, Any]:
-        return opencast_api.extract_lti_form_data(soup)
-
-    def _get_input_value(self, soup: Any, name: str) -> str | None:
-        return opencast_api.get_input_value(soup, name)
-
-    def _submit_opencast_lti_form(
-        self, engage_data: dict[str, Any], context: str
-    ) -> bool:
-        return opencast_api.submit_lti_form(self.ctx, engage_data, context, logger)
-
-    def _fetch_lti_form_data(self, url: str, context: str) -> dict[str, Any] | None:
-        return opencast_api.fetch_lti_form_data(self.ctx, url, context, logger)
-
-    def _authenticate_opencast_episode(self, course_id: Any, episode_id: str) -> bool:
-        return opencast_api.authenticate_episode(
-            self.ctx, course_id, episode_id, logger
-        )
-
-    def _fetch_opencast_json(self, url: str, context: str) -> dict[str, Any] | None:
-        return opencast_api.fetch_json(self.ctx, url, context, logger)
-
-    def _get_opencast_result_list(self, payload: Any, context: str) -> list[Any]:
-        return opencast_api.get_result_list(self.ctx, payload, context, logger)
-
-    def _resolution_width(self, resolution: Any) -> int:
-        return opencast_api.resolution_width(resolution)
-
-    def extractTrackFromEpisode(self, episode_id: str) -> str | bool:
-        return opencast_api.extract_track_from_episode(self.ctx, episode_id, logger)
-
     def scanAndDownloadYouTube(self, node: Node) -> bool:
         return downloader.scan_and_download_youtube(
             node, self.get_sanitized_node_path, self._should_skip_url
@@ -623,11 +473,5 @@ class SyncMyMoodle:
             course_id,
             module_title,
             single,
-            self._should_skip_url,
-            self._content_type_without_parameters,
-            self._scan_html_text_for_links,
-            self._extract_opencast_episode_id,
-            self._authenticate_opencast_episode,
-            self.extractTrackFromEpisode,
             logger,
         )

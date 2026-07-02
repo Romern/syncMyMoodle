@@ -1,9 +1,10 @@
 import base64
 import logging
-from typing import Any, Callable, cast
+from typing import Any, cast
 
 from bs4 import BeautifulSoup as bs
 
+from syncmymoodle import filters
 from syncmymoodle.constants import SCIEBO_LINK_RE
 from syncmymoodle.context import SyncContext
 from syncmymoodle.node import Node
@@ -26,12 +27,11 @@ def scan_public_shares(
     ctx: SyncContext,
     text: str,
     parent_node: Node,
-    should_skip_url: Callable[[str | None, str], bool],
     log: logging.Logger = logger,
 ) -> None:
     for link in set(SCIEBO_LINK_RE.findall(text)):
         log.info(f"Found Sciebo Link: {link}")
-        if should_skip_url(link, "Sciebo link"):
+        if filters.should_skip_url(ctx.config, link, "Sciebo link", log):
             continue
         cached_sciebo_root = ctx.sciebo_link_cache.get(link)
         if cached_sciebo_root is not None:
