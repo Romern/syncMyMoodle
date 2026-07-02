@@ -12,14 +12,10 @@ import yt_dlp
 from bs4 import BeautifulSoup as bs
 from tqdm import tqdm
 
+from syncmymoodle import links as links_api
 from syncmymoodle import moodle as moodle_api
 from syncmymoodle import opencast as opencast_api
-from syncmymoodle import sciebo as sciebo_api
-from syncmymoodle.constants import (
-    OPENCAST_LINK_RE,
-    YOUTUBE_ID_LENGTH,
-    YOUTUBE_LINK_RE,
-)
+from syncmymoodle.constants import YOUTUBE_ID_LENGTH
 from syncmymoodle.context import SyncContext
 from syncmymoodle.course_cache import (
     cache_root_node,
@@ -293,27 +289,15 @@ class SyncMyMoodle:
     def _scan_html_text_for_links(
         self, html_text, base_url, parent_node, course_id, module_title=None
     ):
-        if "video-js" in html_text and "<source" in html_text.lower():
-            soup = bs(html_text, features="lxml")
-            videojs = soup.select_one(".video-js")
-            if videojs:
-                videojs = videojs.select_one("source")
-                if videojs and videojs.get("src"):
-                    link = urllib.parse.urljoin(str(base_url or ""), videojs["src"])
-                    if not self._should_skip_url(link, "embedded video"):
-                        parent_node.add_child(
-                            videojs["src"].split("/")[-1],
-                            None,
-                            "Embedded videojs",
-                            url=link,
-                        )
-
-        self.scanForLinks(
+        return links_api.scan_html_text_for_links(
             html_text,
+            base_url,
             parent_node,
             course_id,
-            module_title=module_title,
-            single=False,
+            module_title,
+            self._should_skip_url,
+            self.scanForLinks,
+            logger,
         )
 
     def _as_list(self, value):
@@ -1386,91 +1370,18 @@ class SyncMyMoodle:
     def scanForLinks(
         self, text, parent_node, course_id, module_title=None, single=False
     ):
-        # A single link is supplied and the contents of it are checked
-        if single:
-            try:
-                text = text.replace("webservice/pluginfile.php", "pluginfile.php")
-                if self._should_skip_url(text, "link"):
-                    return
-                response = self.session.head(text, allow_redirects=True)
-                content_type = self._content_type_without_parameters(response)
-                if "youtube.com" in text or "youtu.be" in text:
-                    # workaround for youtube providing bad headers when using HEAD
-                    pass
-                elif (
-                    200 <= response.status_code < 300
-                    and content_type
-                    and content_type not in {"text/html", "application/xhtml+xml"}
-                ):
-                    # non html links, assume the filename is in the path
-                    filename = urllib.parse.urlsplit(text).path.split("/")[-1]
-                    parent_node.add_child(
-                        filename,
-                        None,
-                        f'Linked file [{response.headers["Content-Type"]}]',
-                        url=text,
-                    )
-                    # instantly return as it was a direct link
-                    return
-                elif not self.config.get("nolinks"):
-                    response = self.session.get(text)
-                    self._scan_html_text_for_links(
-                        response.text,
-                        response.url or text,
-                        parent_node,
-                        course_id,
-                        module_title=module_title,
-                    )
-            except Exception:
-                # Maybe the url is down?
-                logger.exception(f"Error while downloading url {text}")
-        if self.config.get("nolinks"):
-            return
-
-        # Youtube videos
-        if self.config.get("used_modules", {}).get("url", {}).get("youtube", {}):
-            youtube_links = [
-                match.group(1)
-                # finds youtube.com, youtu.be and embed links
-                for match in YOUTUBE_LINK_RE.finditer(text)
-            ]
-            for link in youtube_links:
-                if self._should_skip_url(link, "YouTube link"):
-                    continue
-                parent_node.add_child(
-                    f"Youtube: {module_title or link}", link, "Youtube", url=link
-                )
-
-        # OpenCast videos
-        if self.config.get("used_modules", {}).get("url", {}).get("opencast", {}):
-            opencast_links = OPENCAST_LINK_RE.findall(text)
-            for vid in opencast_links:
-                if self._should_skip_url(vid, "Opencast link"):
-                    continue
-                vid_id = self._extract_opencast_episode_id(vid)
-                if not vid_id:
-                    logger.warning(
-                        f"Opencast: could not extract episode id from url {vid}"
-                    )
-                    continue
-                if not self._authenticate_opencast_episode(course_id, vid_id):
-                    continue
-                vid = self.extractTrackFromEpisode(vid_id)
-                if not vid:
-                    continue
-                if self._should_skip_url(vid, "Opencast video URL"):
-                    continue
-
-                parent_node.add_child(
-                    module_title or vid.split("/")[-1],
-                    vid_id,
-                    "Opencast",
-                    url=vid,
-                    additional_info=course_id,
-                )
-
-        # https://rwth-aachen.sciebo.de/s/XXX
-        if self.config.get("used_modules", {}).get("url", {}).get("sciebo", {}):
-            sciebo_api.scan_public_shares(
-                self.ctx, text, parent_node, self._should_skip_url, logger
-            )
+        return links_api.scan_for_links(
+            self.ctx,
+            text,
+            parent_node,
+            course_id,
+            module_title,
+            single,
+            self._should_skip_url,
+            self._content_type_without_parameters,
+            self._scan_html_text_for_links,
+            self._extract_opencast_episode_id,
+            self._authenticate_opencast_episode,
+            self.extractTrackFromEpisode,
+            logger,
+        )
