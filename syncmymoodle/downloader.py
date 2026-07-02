@@ -7,32 +7,33 @@ from contextlib import closing
 from dataclasses import dataclass
 from fnmatch import fnmatchcase
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 import yt_dlp
 from tqdm import tqdm
 
 from syncmymoodle.constants import YOUTUBE_ID_LENGTH
+from syncmymoodle.context import SyncContext
 
 logger = logging.getLogger(__name__)
 
 
 @dataclass
 class DownloadServices:
-    chunk_looks_like_html: Any
-    download_response_is_usable: Any
-    get_old_node_for: Any
-    get_sanitized_node_path: Any
-    local_file_matches_etag: Any
-    make_conflict_path: Any
-    node_allows_html_download: Any
-    should_skip_url: Any
+    chunk_looks_like_html: Callable[[bytes], bool]
+    download_response_is_usable: Callable[[Any, Any, Path], bool]
+    get_old_node_for: Callable[[Any], Any]
+    get_sanitized_node_path: Callable[[Any], Path]
+    local_file_matches_etag: Callable[[Path, str], bool]
+    make_conflict_path: Callable[[Path], Path]
+    node_allows_html_download: Callable[[Any], bool]
+    should_skip_url: Callable[[str | None, str], bool]
 
 
 @dataclass
 class DownloadTreeServices:
-    download_file: Any
-    scan_and_download_youtube: Any
+    download_file: Callable[[Any], bool]
+    scan_and_download_youtube: Callable[[Any], bool]
 
 
 def local_file_matches_etag(path: Path, etag: str) -> bool:
@@ -64,26 +65,31 @@ def local_file_matches_etag(path: Path, etag: str) -> bool:
         return digest.hexdigest() == hex_str
 
 
-def content_type_without_parameters(response):
-    content_type = response.headers.get("Content-Type", "")
+def content_type_without_parameters(response: Any) -> str:
+    content_type = str(response.headers.get("Content-Type", ""))
     return content_type.split(";", 1)[0].strip().lower()
 
 
-def node_allows_html_download(node) -> bool:
+def node_allows_html_download(node: Any) -> bool:
     html_suffixes = {".htm", ".html", ".xhtml"}
     node_suffix = Path(str(node.name or "")).suffix.lower()
     url_suffix = Path(urllib.parse.urlparse(str(node.url or "")).path).suffix.lower()
     return node_suffix in html_suffixes or url_suffix in html_suffixes
 
 
-def chunk_looks_like_html(chunk) -> bool:
+def chunk_looks_like_html(chunk: bytes) -> bool:
     body_start = chunk.lstrip().lower()
     return bool(
         body_start.startswith(b"<!doctype html") or body_start.startswith(b"<html")
     )
 
 
-def download_response_is_usable(node, response, downloadpath, log=logger) -> bool:
+def download_response_is_usable(
+    node: Any,
+    response: Any,
+    downloadpath: Path,
+    log: logging.Logger = logger,
+) -> bool:
     if response.status_code == 204:
         log.warning(
             "Skipping download of %s from %s because the server returned no " "content",
@@ -117,12 +123,12 @@ def download_response_is_usable(node, response, downloadpath, log=logger) -> boo
 
 
 def download_file(
-    ctx,
-    node,
+    ctx: SyncContext,
+    node: Any,
     services: DownloadServices,
     block_size: int,
-    log=logger,
-):
+    log: logging.Logger = logger,
+) -> bool:
     """Download file with progress bar if it isn't already downloaded."""
     downloadpath = services.get_sanitized_node_path(node)
 
@@ -234,7 +240,9 @@ def download_file(
                 remote_etag = getattr(node, "etag", None)
                 if remote_etag is None and node.url:
                     try:
-                        head_resp = ctx.session.head(node.url, allow_redirects=True)
+                        head_resp = ctx.require_session().head(
+                            node.url, allow_redirects=True
+                        )
                         remote_etag = head_resp.headers.get("ETag")
                     except Exception:
                         remote_etag = None
@@ -307,7 +315,9 @@ def download_file(
     if node.type.lower() == "sciebo file":
         header = {**header, **node.additional_info}
 
-    with closing(ctx.session.get(node.url, headers=header, stream=True)) as response:
+    with closing(
+        ctx.require_session().get(node.url, headers=header, stream=True)
+    ) as response:
         etag_header = response.headers.get("ETag")
 
         if resume_size:
@@ -419,7 +429,11 @@ def download_file(
         return True
 
 
-def download_all_files(ctx, services: DownloadTreeServices, log=logger) -> None:
+def download_all_files(
+    ctx: SyncContext,
+    services: DownloadTreeServices,
+    log: logging.Logger = logger,
+) -> None:
     if not ctx.session:
         raise Exception("You need to login() first.")
     if not ctx.wstoken:
@@ -432,7 +446,11 @@ def download_all_files(ctx, services: DownloadTreeServices, log=logger) -> None:
     download_node_tree(ctx.root_node, services, log)
 
 
-def download_node_tree(cur_node, services: DownloadTreeServices, log=logger) -> None:
+def download_node_tree(
+    cur_node: Any,
+    services: DownloadTreeServices,
+    log: logging.Logger = logger,
+) -> None:
     if len(cur_node.children) == 0:
         if cur_node.url and not cur_node.is_downloaded:
             if cur_node.type == "Youtube":
@@ -475,10 +493,10 @@ def download_node_tree(cur_node, services: DownloadTreeServices, log=logger) -> 
 
 
 def scan_and_download_youtube(
-    node,
-    get_sanitized_node_path,
-    should_skip_url,
-):
+    node: Any,
+    get_sanitized_node_path: Callable[[Any], Path],
+    should_skip_url: Callable[[str | None, str], bool],
+) -> bool:
     """Download Youtube-Videos using yt_dlp."""
     path = get_sanitized_node_path(node.parent)
     link = node.url
@@ -500,7 +518,7 @@ def scan_and_download_youtube(
     return True
 
 
-def download_quiz(node, log=logger):
+def download_quiz(node: Any, log: logging.Logger = logger) -> bool:
     log.warning(
         "Quiz PDF generation is disabled until the pdfkit/wkhtmltopdf "
         "renderer is replaced with a safer implementation."

@@ -35,7 +35,7 @@ def course_id_in_filter(course_id: Any, entries: Any) -> bool:
 
 
 def configured_patterns(
-    config: dict[str, Any], *keys: str, course_id=None
+    config: dict[str, Any], *keys: str, course_id: Any = None
 ) -> list[str]:
     patterns = []
     for key in keys:

@@ -4,7 +4,7 @@ import sys
 import time
 import urllib.parse
 from pathlib import Path
-from typing import cast
+from typing import Any, cast
 
 import requests
 from bs4 import BeautifulSoup as bs
@@ -28,23 +28,23 @@ from syncmymoodle.totp import totp as generate_totp
 logger = logging.getLogger(__name__)
 
 
-def _tag_classes(tag):
+def _tag_classes(tag: Any) -> set[str]:
     if tag is None:
         return set()
     classes = tag.get("class", [])
     if isinstance(classes, str):
         return {classes}
-    return set(classes or [])
+    return {str(class_name) for class_name in classes or []}
 
 
-def _get_input_value(soup, name):
+def _get_input_value(soup: Any, name: str) -> str | None:
     input_tag = soup.find("input", {"name": name})
     if input_tag and input_tag.get("value"):
-        return input_tag["value"]
+        return cast(str, input_tag["value"])
     return None
 
 
-def _get_session_key(soup, log: logging.Logger = logger):
+def _get_session_key(soup: Any, log: logging.Logger = logger) -> str:
     script = soup.find("script", string=lambda text: text and "sesskey" in text)
     match = re.search(r'"sesskey":"(.*?)"', script.text) if script is not None else None
     if match:
@@ -53,7 +53,12 @@ def _get_session_key(soup, log: logging.Logger = logger):
     sys.exit(1)
 
 
-def _require_input_value(soup, name, context, log: logging.Logger = logger):
+def _require_input_value(
+    soup: Any,
+    name: str,
+    context: str,
+    log: logging.Logger = logger,
+) -> str:
     value = _get_input_value(soup, name)
     if value is None:
         log.critical(
@@ -71,7 +76,7 @@ def _require_input_value(soup, name, context, log: logging.Logger = logger):
     return value
 
 
-def check_general_connectivity(log: logging.Logger = logger):
+def check_general_connectivity(log: logging.Logger = logger) -> bool:
     try:
         response = requests.get(RWTH_HOMEPAGE_URL, timeout=10)
     except requests.RequestException as exc:
@@ -94,7 +99,11 @@ def check_general_connectivity(log: logging.Logger = logger):
     return True
 
 
-def current_rwth_service_issues(service_name, status_url, log: logging.Logger = logger):
+def current_rwth_service_issues(
+    service_name: str,
+    status_url: str,
+    log: logging.Logger = logger,
+) -> list[dict[str, str]]:
     try:
         response = requests.get(status_url, timeout=10)
     except requests.RequestException as exc:
@@ -112,7 +121,7 @@ def current_rwth_service_issues(service_name, status_url, log: logging.Logger = 
         return []
 
     soup = bs(response.text, features="lxml")
-    issues = []
+    issues: list[dict[str, str]] = []
     for card in soup.select(".notification-card"):
         indicator = card.select_one(".notification-status-indicator")
         status_label = card.select_one(".incident_queue-statuses div")
@@ -148,7 +157,7 @@ def current_rwth_service_issues(service_name, status_url, log: logging.Logger = 
     return issues
 
 
-def check_rwth_status_page(log: logging.Logger = logger):
+def check_rwth_status_page(log: logging.Logger = logger) -> None:
     log.warning("Check the RWTH ITC status page: %s", RWTH_STATUS_URL)
     issues = []
     for service_name, status_url in [
@@ -174,7 +183,9 @@ def check_rwth_status_page(log: logging.Logger = logger):
         )
 
 
-def check_moodle_availability(session, log: logging.Logger = logger):
+def check_moodle_availability(
+    session: requests.Session | None, log: logging.Logger = logger
+) -> requests.Response:
     if not session:
         raise Exception("You need a requests session first.")
 
@@ -205,14 +216,15 @@ def check_moodle_availability(session, log: logging.Logger = logger):
 
 
 def login(ctx: SyncContext, log: logging.Logger = logger) -> None:
-    ctx.session = requests.Session()
+    session = requests.Session()
+    ctx.session = session
     cookie_file = Path(ctx.config.get("cookie_file", "./session")).expanduser()
     cookie_payload = read_private_gzip_json(cookie_file, "session cookie")
     if cookie_payload is not None:
-        load_cookies_from_data(ctx.session.cookies, cookie_payload)
-    check_moodle_availability(ctx.session, log)
+        load_cookies_from_data(session.cookies, cookie_payload)
+    check_moodle_availability(session, log)
     try:
-        resp = ctx.session.get(
+        resp = session.get(
             urllib.parse.urljoin(MOODLE_URL, "auth/shibboleth/index.php"),
             timeout=15,
         )
@@ -224,7 +236,7 @@ def login(ctx: SyncContext, log: logging.Logger = logger) -> None:
     if resp.url.startswith("https://moodle.rwth-aachen.de/my/"):
         soup = bs(resp.text, features="lxml")
         ctx.session_key = _get_session_key(soup, log)
-        save_session_cookies(cookie_file, ctx.session.cookies)
+        save_session_cookies(cookie_file, session.cookies)
         return
 
     # Create a separate soup for maintenance detection
@@ -261,7 +273,7 @@ def login(ctx: SyncContext, log: logging.Logger = logger) -> None:
             "_eventId_proceed": "",
             "csrf_token": csrf_token,
         }
-        resp2 = ctx.session.post(resp.url, data=login_data)
+        resp2 = session.post(resp.url, data=login_data)
 
         soup = bs(resp2.text, features="lxml")
 
@@ -288,7 +300,7 @@ def login(ctx: SyncContext, log: logging.Logger = logger) -> None:
             "csrf_token": csrf_token,
         }
 
-        resp3 = ctx.session.post(resp2.url, data=totp_selection_data)
+        resp3 = session.post(resp2.url, data=totp_selection_data)
 
         soup = bs(resp3.text, features="lxml")
         if soup.find(id="fudis_otp_input") is None:
@@ -318,7 +330,7 @@ def login(ctx: SyncContext, log: logging.Logger = logger) -> None:
             "csrf_token": csrf_token,
         }
 
-        resp4 = ctx.session.post(resp3.url, data=totp_login_data)
+        resp4 = session.post(resp3.url, data=totp_login_data)
 
         time.sleep(1)  # if we go too fast, we might have our connection closed
         soup = bs(resp4.text, features="lxml")
@@ -339,9 +351,9 @@ def login(ctx: SyncContext, log: logging.Logger = logger) -> None:
             soup, "SAMLResponse", "SAML response", log
         ),
     }
-    resp = ctx.session.post(
+    resp = session.post(
         "https://moodle.rwth-aachen.de/Shibboleth.sso/SAML2/POST", data=data
     )
     soup = bs(resp.text, features="lxml")
     ctx.session_key = _get_session_key(soup, log)
-    save_session_cookies(cookie_file, ctx.session.cookies)
+    save_session_cookies(cookie_file, session.cookies)

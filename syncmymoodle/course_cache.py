@@ -1,5 +1,6 @@
 import logging
 from pathlib import Path
+from typing import Any
 
 from syncmymoodle.context import SyncContext
 from syncmymoodle.node import NAME_CLASH_ID_UNSET, Node
@@ -15,14 +16,12 @@ def _node_path(ctx: SyncContext, invalid_chars: str, node: Node) -> Path:
     )
 
 
-def match_old_cache_child(old_node, child):
+def match_old_cache_child(old_node: Node | None, child: Node) -> Node | None:
     """Find the previous cache node corresponding to ``child``, if any."""
     if old_node is None:
         return None
     candidates = [
-        c
-        for c in getattr(old_node, "children", [])
-        if c.name == child.name and c.type == child.type
+        c for c in old_node.children if c.name == child.name and c.type == child.type
     ]
     if not candidates:
         return None
@@ -37,7 +36,7 @@ def node_to_cache_data(
     invalid_chars: str,
     node: Node,
     old_node: Node | None = None,
-):
+) -> dict[str, Any]:
     timemodified = node.timemodified
     etag = node.etag
     is_downloaded = node.is_downloaded
@@ -74,7 +73,7 @@ def node_to_cache_data(
     }
 
 
-def node_from_cache_data(data, parent=None):
+def node_from_cache_data(data: dict[str, Any], parent: Node | None = None) -> Node:
     node = Node(
         data.get("name", ""),
         data.get("id"),
@@ -94,7 +93,7 @@ def node_from_cache_data(data, parent=None):
     return node
 
 
-def ensure_timemodified_attribute(node) -> None:
+def ensure_timemodified_attribute(node: Node) -> None:
     # Old cached root nodes might not have the timemodified attribute yet.
     if not hasattr(node, "timemodified"):
         node.timemodified = None
@@ -121,7 +120,7 @@ def get_course_cache_root(
     invalid_chars: str,
     course_node: Node,
     log: logging.Logger = logger,
-):
+) -> Node | None:
     """Load and return the cached course root for the given course node."""
     course_path = _node_path(ctx, invalid_chars, course_node)
     if course_path in ctx.course_caches:
@@ -153,7 +152,7 @@ def get_old_node_for(
     invalid_chars: str,
     node: Node,
     log: logging.Logger = logger,
-):
+) -> Node | None:
     """Return the cached node for this node from the course cache, if any."""
     try:
         course_node = get_course_node(node)

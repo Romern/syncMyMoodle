@@ -1,6 +1,6 @@
 import base64
 import logging
-from typing import cast
+from typing import Any, Callable, cast
 
 from bs4 import BeautifulSoup as bs
 
@@ -24,9 +24,9 @@ PROPFIND_BODY = """<?xml version="1.0" encoding="UTF-8"?>
 
 def scan_public_shares(
     ctx: SyncContext,
-    text,
+    text: str,
     parent_node: Node,
-    should_skip_url,
+    should_skip_url: Callable[[str | None, str], bool],
     log: logging.Logger = logger,
 ) -> None:
     for link in set(SCIEBO_LINK_RE.findall(text)):
@@ -46,7 +46,7 @@ def scan_public_shares(
 
         # get the download page
         try:
-            response = ctx.session.get(link)
+            response = ctx.require_session().get(link)
         except Exception:
             log.exception(f"Failed to fetch Sciebo link {link}")
             continue
@@ -55,8 +55,9 @@ def scan_public_shares(
         soup = bs(response.text, features="lxml")
 
         # get the requesttoken
-        requestToken = (
-            soup.head.get("data-requesttoken") if soup.head is not None else None
+        requestToken = cast(
+            str | None,
+            soup.head.get("data-requesttoken") if soup.head is not None else None,
         )
         if not requestToken:
             log.warning("Sciebo: missing request token for link %s, skipping", link)
@@ -97,7 +98,7 @@ def _add_sciebo_files(
     href: str,
     parent_node: Node,
     sharingToken: str,
-    auth_header: dict,
+    auth_header: dict[str, str],
     log: logging.Logger = logger,
 ) -> None:
     # request the URL with the PROPFIND method and a body that also asks
@@ -111,7 +112,7 @@ def _add_sciebo_files(
         "Content-Type": "application/xml",
     }
     try:
-        propfind_response = ctx.session.request(
+        propfind_response = ctx.require_session().request(
             "PROPFIND",
             SCIEBO_URL + href,
             headers=headers,
@@ -188,7 +189,7 @@ def _add_sciebo_files(
             )
 
 
-def _extract_stable_etag(response_tag):
+def _extract_stable_etag(response_tag: Any) -> str | None:
     # Extract a stable content hash for this item. Prefer the SHA1 checksum
     # from oc:checksums if available; fall back to the raw ETag otherwise.
     prop = response_tag.find("d:prop")
@@ -204,6 +205,6 @@ def _extract_stable_etag(response_tag):
 
     etag_tag = prop.find("d:getetag")
     if etag_tag and etag_tag.text:
-        return etag_tag.text.strip()
+        return str(etag_tag.text).strip()
 
     return None

@@ -1,24 +1,25 @@
 import logging
 import urllib.parse
-from typing import cast
+from typing import Any, Callable, cast
 
 from bs4 import BeautifulSoup as bs
 
 from syncmymoodle import sciebo as sciebo_api
 from syncmymoodle.constants import OPENCAST_LINK_RE, YOUTUBE_LINK_RE
 from syncmymoodle.context import SyncContext
+from syncmymoodle.node import Node
 
 logger = logging.getLogger(__name__)
 
 
 def scan_html_text_for_links(
-    html_text,
-    base_url,
-    parent_node,
-    course_id,
-    module_title,
-    should_skip_url,
-    scan_for_links,
+    html_text: str,
+    base_url: str | None,
+    parent_node: Node,
+    course_id: Any,
+    module_title: Any,
+    should_skip_url: Callable[[str | None, str], bool],
+    scan_for_links: Callable[..., Any],
     log: logging.Logger = logger,
 ) -> None:
     if "video-js" in html_text and "<source" in html_text.lower():
@@ -48,17 +49,17 @@ def scan_html_text_for_links(
 
 def scan_for_links(
     ctx: SyncContext,
-    text,
-    parent_node,
-    course_id,
-    module_title,
-    single,
-    should_skip_url,
-    content_type_without_parameters,
-    scan_html_text_for_links,
-    extract_opencast_episode_id,
-    authenticate_opencast_episode,
-    extract_track_from_episode,
+    text: str,
+    parent_node: Node,
+    course_id: Any,
+    module_title: Any,
+    single: bool,
+    should_skip_url: Callable[[str | None, str], bool],
+    content_type_without_parameters: Callable[[Any], str],
+    scan_html_text_for_links: Callable[..., Any],
+    extract_opencast_episode_id: Callable[[Any], str | None],
+    authenticate_opencast_episode: Callable[[Any, str], bool],
+    extract_track_from_episode: Callable[[str], str | bool],
     log: logging.Logger = logger,
 ) -> None:
     # A single link is supplied and the contents of it are checked
@@ -67,7 +68,7 @@ def scan_for_links(
             text = text.replace("webservice/pluginfile.php", "pluginfile.php")
             if should_skip_url(text, "link"):
                 return
-            response = ctx.session.head(text, allow_redirects=True)
+            response = ctx.require_session().head(text, allow_redirects=True)
             content_type = content_type_without_parameters(response)
             if "youtube.com" in text or "youtu.be" in text:
                 # workaround for youtube providing bad headers when using HEAD
@@ -88,7 +89,7 @@ def scan_for_links(
                 # instantly return as it was a direct link
                 return
             elif not ctx.config.get("nolinks"):
-                response = ctx.session.get(text)
+                response = ctx.require_session().get(text)
                 scan_html_text_for_links(
                     response.text,
                     response.url or text,
@@ -129,7 +130,7 @@ def scan_for_links(
             if not authenticate_opencast_episode(course_id, vid_id):
                 continue
             vid = extract_track_from_episode(vid_id)
-            if not vid:
+            if not isinstance(vid, str) or not vid:
                 continue
             if should_skip_url(vid, "Opencast video URL"):
                 continue

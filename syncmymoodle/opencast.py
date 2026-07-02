@@ -2,6 +2,7 @@ import json
 import logging
 import re
 import urllib.parse
+from typing import Any, cast
 
 from bs4 import BeautifulSoup as bs
 
@@ -37,7 +38,7 @@ def log_backend_issue(
         ctx.opencast_status_hint_logged = True
 
 
-def extract_episode_id(url):
+def extract_episode_id(url: Any) -> str | None:
     if not url:
         return None
 
@@ -45,7 +46,7 @@ def extract_episode_id(url):
     parsed = urllib.parse.urlparse(url)
     episode_ids = urllib.parse.parse_qs(parsed.query).get("episodeid", [])
     if episode_ids and episode_ids[0]:
-        return episode_ids[0]
+        return str(episode_ids[0])
 
     match = re.match(
         r"^https://engage\.streaming\.rwth-aachen\.de/play/([a-zA-Z0-9-]{36})(?:[/?#].*)?$",
@@ -57,7 +58,7 @@ def extract_episode_id(url):
     return None
 
 
-def extract_lti_form_data(soup):
+def extract_lti_form_data(soup: Any) -> dict[str, Any]:
     return {
         input_tag["name"]: input_tag.get("value", "")
         for input_tag in soup.find_all("input")
@@ -65,25 +66,25 @@ def extract_lti_form_data(soup):
     }
 
 
-def get_input_value(soup, name):
+def get_input_value(soup: Any, name: str) -> str | None:
     input_tag = soup.find("input", {"name": name})
     if input_tag and input_tag.get("value"):
-        return input_tag["value"]
+        return cast(str, input_tag["value"])
     return None
 
 
 def submit_lti_form(
     ctx: SyncContext,
-    engage_data,
-    context,
+    engage_data: dict[str, Any],
+    context: str,
     log: logging.Logger = logger,
-):
+) -> bool:
     if not engage_data:
         log.warning("Opencast: missing LTI form fields for %s", context)
         return False
 
     try:
-        response = ctx.session.post(OPENCAST_LTI_URL, data=engage_data)
+        response = ctx.require_session().post(OPENCAST_LTI_URL, data=engage_data)
     except Exception:
         log.exception("Opencast: failed to submit LTI form for %s", context)
         log_backend_issue(ctx, None, log)
@@ -103,12 +104,12 @@ def submit_lti_form(
 
 def fetch_lti_form_data(
     ctx: SyncContext,
-    url,
-    context,
+    url: str,
+    context: str,
     log: logging.Logger = logger,
-):
+) -> dict[str, Any] | None:
     try:
-        response = ctx.session.get(url)
+        response = ctx.require_session().get(url)
     except Exception:
         log.exception("Opencast: failed to fetch LTI form for %s", context)
         log_backend_issue(ctx, None, log)
@@ -137,10 +138,10 @@ def fetch_lti_form_data(
 
 def authenticate_episode(
     ctx: SyncContext,
-    course_id,
-    episode_id,
+    course_id: Any,
+    episode_id: str,
     log: logging.Logger = logger,
-):
+) -> bool:
     if not ctx.session_key:
         log.warning("Opencast: cannot launch episode without Moodle sesskey")
         return False
@@ -170,12 +171,12 @@ def authenticate_episode(
 
 def fetch_json(
     ctx: SyncContext,
-    url,
-    context,
+    url: str,
+    context: str,
     log: logging.Logger = logger,
-):
+) -> dict[str, Any] | None:
     try:
-        response = ctx.session.get(url)
+        response = ctx.require_session().get(url)
     except Exception:
         log.exception("Opencast: failed to fetch %s from %s", context, url)
         log_backend_issue(ctx, None, log)
@@ -222,10 +223,10 @@ def fetch_json(
 
 def get_result_list(
     ctx: SyncContext,
-    payload,
-    context,
+    payload: Any,
+    context: str,
     log: logging.Logger = logger,
-):
+) -> list[Any]:
     result = payload.get("result") if isinstance(payload, dict) else None
     if not isinstance(result, list):
         log.warning("Opencast: missing result list for %s", context)
@@ -241,7 +242,7 @@ def get_result_list(
     return result
 
 
-def resolution_width(resolution):
+def resolution_width(resolution: Any) -> int:
     match = re.match(r"(\d+)\s*x\s*\d+", str(resolution or ""))
     if not match:
         return 0
@@ -250,9 +251,9 @@ def resolution_width(resolution):
 
 def extract_track_from_episode(
     ctx: SyncContext,
-    episode_id,
+    episode_id: str,
     log: logging.Logger = logger,
-):
+) -> str | bool:
     if episode_id in ctx.opencast_track_cache:
         return ctx.opencast_track_cache[episode_id]
 
@@ -264,7 +265,7 @@ def extract_track_from_episode(
     if episodejson is None:
         return False
 
-    tracks = []
+    tracks: list[tuple[int, str]] = []
     for entry in get_result_list(ctx, episodejson, f"episode {episode_id}", log):
         if not isinstance(entry, dict):
             continue

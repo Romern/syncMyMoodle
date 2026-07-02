@@ -1,40 +1,43 @@
 import logging
 import urllib.parse
 from dataclasses import dataclass
-from typing import Any, cast
+from typing import Any, Callable, cast
 
 from bs4 import BeautifulSoup as bs
+
+from syncmymoodle.context import SyncContext
+from syncmymoodle.node import Node
 
 logger = logging.getLogger(__name__)
 
 
 @dataclass
 class ModuleServices:
-    add_moodle_file_node: Any
-    add_moodle_content_file_node: Any
-    get_assignment_submission_files: Any
-    authenticate_opencast_episode: Any
-    extract_lti_form_data: Any
-    extract_opencast_episode_id: Any
-    extract_track_from_episode: Any
-    fetch_opencast_json: Any
-    get_input_value: Any
-    get_opencast_result_list: Any
-    is_direct_moodle_file_content: Any
-    log_opencast_backend_issue: Any
-    sanitize: Any
-    scan_html_text_for_links: Any
-    scan_for_links: Any
-    should_skip_url: Any
-    submit_opencast_lti_form: Any
+    add_moodle_file_node: Callable[..., Any]
+    add_moodle_content_file_node: Callable[..., Any]
+    get_assignment_submission_files: Callable[..., Any]
+    authenticate_opencast_episode: Callable[..., Any]
+    extract_lti_form_data: Callable[..., Any]
+    extract_opencast_episode_id: Callable[..., Any]
+    extract_track_from_episode: Callable[..., Any]
+    fetch_opencast_json: Callable[..., Any]
+    get_input_value: Callable[..., Any]
+    get_opencast_result_list: Callable[..., Any]
+    is_direct_moodle_file_content: Callable[..., Any]
+    log_opencast_backend_issue: Callable[..., Any]
+    sanitize: Callable[..., Any]
+    scan_html_text_for_links: Callable[..., Any]
+    scan_for_links: Callable[..., Any]
+    should_skip_url: Callable[..., Any]
+    submit_opencast_lti_form: Callable[..., Any]
 
 
 @dataclass
 class ModuleContext:
-    ctx: Any
+    ctx: SyncContext
     course_id: Any
-    course_node: Any
-    section_node: Any
+    course_node: Node
+    section_node: Node
     assignments_by_cmid: Any
     folders_by_coursemodule: Any
     services: ModuleServices
@@ -42,11 +45,11 @@ class ModuleContext:
 
 
 def handle_assignment_module(
-    ctx,
-    module,
-    section_node,
-    course_id,
-    assignments_by_cmid,
+    ctx: SyncContext,
+    module: dict[str, Any],
+    section_node: Node,
+    course_id: Any,
+    assignments_by_cmid: dict[Any, Any],
     services: ModuleServices,
 ) -> None:
     # Get Assignments
@@ -89,10 +92,10 @@ def handle_assignment_module(
 
 
 def handle_resource_like_module(
-    ctx,
-    module,
-    section_node,
-    course_id,
+    ctx: SyncContext,
+    module: dict[str, Any],
+    section_node: Node,
+    course_id: Any,
     services: ModuleServices,
 ) -> None:
     # Get Resources or URLs
@@ -127,11 +130,11 @@ def handle_resource_like_module(
 
 
 def handle_folder_module(
-    ctx,
-    module,
-    section_node,
-    course_id,
-    folders_by_coursemodule,
+    ctx: SyncContext,
+    module: dict[str, Any],
+    section_node: Node,
+    course_id: Any,
+    folders_by_coursemodule: dict[Any, Any],
     services: ModuleServices,
 ) -> None:
     # Get Folders
@@ -160,10 +163,10 @@ def handle_folder_module(
 
 
 def handle_embedded_link_module(
-    ctx,
-    module,
-    section_node,
-    course_id,
+    ctx: SyncContext,
+    module: dict[str, Any],
+    section_node: Node,
+    course_id: Any,
     services: ModuleServices,
     log: logging.Logger = logger,
 ) -> None:
@@ -190,7 +193,7 @@ def handle_embedded_link_module(
         ) and not services.should_skip_url(html_url, "page link")
         if opencast_enabled or scan_page_links:
             try:
-                response = ctx.session.get(html_url)
+                response = ctx.require_session().get(html_url)
             except Exception:
                 log.exception(
                     "Failed to fetch page module %s",
@@ -254,7 +257,7 @@ def handle_embedded_link_module(
             f'https://moodle.rwth-aachen.de/mod/h5pactivity/view.php?id={module["id"]}'
         )
         html = bs(
-            ctx.session.get(html_url).text,
+            ctx.require_session().get(html_url).text,
             features="lxml",
         )
         # Get h5p iframe
@@ -264,7 +267,7 @@ def handle_embedded_link_module(
             iframe_src = urllib.parse.urljoin(html_url, cast(str, iframe_src_value))
             iframe_html = str(
                 bs(
-                    ctx.session.get(iframe_src).text,
+                    ctx.require_session().get(iframe_src).text,
                     features="lxml",
                 )
             )
@@ -291,10 +294,10 @@ def handle_embedded_link_module(
 
 
 def handle_opencast_lti_module(
-    ctx,
-    module,
-    section_node,
-    course_node,
+    ctx: SyncContext,
+    module: dict[str, Any],
+    section_node: Node,
+    course_node: Node,
     services: ModuleServices,
     log: logging.Logger = logger,
 ) -> None:
@@ -309,7 +312,7 @@ def handle_opencast_lti_module(
         "&triggerview=0"
     )
     try:
-        info_response = ctx.session.get(info_url)
+        info_response = ctx.require_session().get(info_url)
     except Exception:
         log.exception(
             "Opencast: failed to fetch LTI module %s",
@@ -336,7 +339,7 @@ def handle_opencast_lti_module(
         # Found an Opencast "series" page
         series_id = engage_series_id
 
-        series_node = course_node.add_child(name, series_id, "Section")
+        series_node = cast(Node, course_node.add_child(name, series_id, "Section"))
 
         if not services.submit_opencast_lti_form(
             engage_data, f"LTI series module {module['id']}"
@@ -406,9 +409,9 @@ def handle_opencast_lti_module(
 
 
 def handle_quiz_module(
-    ctx,
-    module,
-    section_node,
+    ctx: SyncContext,
+    module: dict[str, Any],
+    section_node: Node,
     services: ModuleServices,
 ) -> None:
     # Integration for Quizzes
@@ -418,7 +421,7 @@ def handle_quiz_module(
         return
 
     info_url = f'https://moodle.rwth-aachen.de/mod/quiz/view.php?id={module["id"]}'
-    info_res = bs(ctx.session.get(info_url).text, features="lxml")
+    info_res = bs(ctx.require_session().get(info_url).text, features="lxml")
     attempts = info_res.find_all(
         "a",
         {"title": "Überprüfung der eigenen Antworten dieses Versuchs"},
@@ -428,7 +431,7 @@ def handle_quiz_module(
         attempt_cnt += 1
         review_url = cast(str, attempt.get("href"))
         quiz_res = bs(
-            ctx.session.get(review_url).text,
+            ctx.require_session().get(review_url).text,
             features="lxml",
         )
         title = cast(Any, quiz_res.find("title"))
@@ -445,7 +448,7 @@ def handle_quiz_module(
         )
 
 
-def _assignment_handler(module_context: ModuleContext, module) -> None:
+def _assignment_handler(module_context: ModuleContext, module: dict[str, Any]) -> None:
     handle_assignment_module(
         module_context.ctx,
         module,
@@ -456,7 +459,9 @@ def _assignment_handler(module_context: ModuleContext, module) -> None:
     )
 
 
-def _resource_like_handler(module_context: ModuleContext, module) -> None:
+def _resource_like_handler(
+    module_context: ModuleContext, module: dict[str, Any]
+) -> None:
     handle_resource_like_module(
         module_context.ctx,
         module,
@@ -466,7 +471,7 @@ def _resource_like_handler(module_context: ModuleContext, module) -> None:
     )
 
 
-def _folder_handler(module_context: ModuleContext, module) -> None:
+def _folder_handler(module_context: ModuleContext, module: dict[str, Any]) -> None:
     handle_folder_module(
         module_context.ctx,
         module,
@@ -477,7 +482,9 @@ def _folder_handler(module_context: ModuleContext, module) -> None:
     )
 
 
-def _embedded_link_handler(module_context: ModuleContext, module) -> None:
+def _embedded_link_handler(
+    module_context: ModuleContext, module: dict[str, Any]
+) -> None:
     handle_embedded_link_module(
         module_context.ctx,
         module,
@@ -488,7 +495,9 @@ def _embedded_link_handler(module_context: ModuleContext, module) -> None:
     )
 
 
-def _opencast_lti_handler(module_context: ModuleContext, module) -> None:
+def _opencast_lti_handler(
+    module_context: ModuleContext, module: dict[str, Any]
+) -> None:
     handle_opencast_lti_module(
         module_context.ctx,
         module,
@@ -499,7 +508,7 @@ def _opencast_lti_handler(module_context: ModuleContext, module) -> None:
     )
 
 
-def _quiz_handler(module_context: ModuleContext, module) -> None:
+def _quiz_handler(module_context: ModuleContext, module: dict[str, Any]) -> None:
     handle_quiz_module(
         module_context.ctx,
         module,
@@ -518,6 +527,6 @@ MODULE_HANDLERS = (
 )
 
 
-def handle_module(module_context: ModuleContext, module) -> None:
+def handle_module(module_context: ModuleContext, module: dict[str, Any]) -> None:
     for handler in MODULE_HANDLERS:
         handler(module_context, module)

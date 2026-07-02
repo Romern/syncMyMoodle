@@ -1,10 +1,16 @@
 import urllib.parse
+from typing import Any
 
-from syncmymoodle.node import NAME_CLASH_ID_UNSET
+from syncmymoodle.node import NAME_CLASH_ID_UNSET, Node
 from syncmymoodle.pathing import sanitize_path_part
 
 
-def get_or_add_child(parent_node, name, id, type):
+def get_or_add_child(
+    parent_node: Node,
+    name: str,
+    id: Any,  # noqa: A002 - keep Moodle payload name
+    type: str,  # noqa: A002 - keep Moodle payload name
+) -> Node | None:
     for child in parent_node.children:
         if child.name == name and child.type == type:
             return child
@@ -12,17 +18,17 @@ def get_or_add_child(parent_node, name, id, type):
 
 
 def add_moodle_file_node(
-    parent_node,
-    invalid_chars,
-    moodle_filepath,
-    filename,
-    id,
-    type,
-    url,
-    timemodified=None,
-    name_clash_id=NAME_CLASH_ID_UNSET,
-):
-    target_node = parent_node
+    parent_node: Node,
+    invalid_chars: str,
+    moodle_filepath: Any,
+    filename: str,
+    id: Any,  # noqa: A002 - keep Moodle payload name
+    type: str,  # noqa: A002 - keep Moodle payload name
+    url: str | None,
+    timemodified: Any = None,
+    name_clash_id: Any = NAME_CLASH_ID_UNSET,
+) -> Node | None:
+    target_node: Node | None = parent_node
     path_segments = [
         sanitize_path_part(segment, invalid_chars)
         for segment in str(moodle_filepath or "").strip("/").split("/")
@@ -30,9 +36,15 @@ def add_moodle_file_node(
     ]
 
     for segment in path_segments:
-        target_node = get_or_add_child(target_node, segment, None, "Folder")
         if target_node is None:
             return None
+        child_node = get_or_add_child(target_node, segment, None, "Folder")
+        if child_node is None:
+            return None
+        target_node = child_node
+
+    if target_node is None:
+        return None
 
     return target_node.add_child(
         filename,
@@ -45,11 +57,11 @@ def add_moodle_file_node(
 
 
 def add_moodle_content_file_node(
-    parent_node,
-    invalid_chars,
-    content,
-    file_type=None,
-):
+    parent_node: Node,
+    invalid_chars: str,
+    content: dict[str, Any],
+    file_type: str | None = None,
+) -> Node | None:
     file_url = content.get("fileurl")
     if not file_url:
         return None
@@ -71,7 +83,9 @@ def add_moodle_content_file_node(
     )
 
 
-def is_direct_moodle_file_content(module, content):
+def is_direct_moodle_file_content(
+    module: dict[str, Any], content: dict[str, Any]
+) -> bool:
     file_url = content.get("fileurl")
     if not file_url or content.get("type") != "file":
         return False

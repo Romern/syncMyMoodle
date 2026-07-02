@@ -4,6 +4,9 @@ import json
 import logging
 import sys
 import urllib.parse
+from typing import Any
+
+import requests
 
 logger = logging.getLogger(__name__)
 
@@ -11,14 +14,16 @@ MOODLE_HOST = "moodle.rwth-aachen.de"
 MOODLE_REST_URL = f"https://{MOODLE_HOST}/webservice/rest/server.php"
 
 
-def _cookie_header(cookie_jar, domain):
+def _cookie_header(cookie_jar: Any, domain: str) -> str:
     # workaround for macos
     cookie_dict = cookie_jar.get_dict(domain=domain)
     found = ["%s=%s" % (name, value) for (name, value) in cookie_dict.items()]
     return ";".join(found)
 
 
-def get_moodle_wstoken(session, log=logger):
+def get_moodle_wstoken(
+    session: requests.Session | None, log: logging.Logger = logger
+) -> str:
     if not session:
         raise Exception("You need to login() first.")
     params = {
@@ -102,7 +107,7 @@ def get_moodle_wstoken(session, log=logger):
     return token_parts[1]
 
 
-def get_all_courses(session, wstoken, user_id):
+def get_all_courses(session: requests.Session, wstoken: str, user_id: Any) -> Any:
     data = {
         "requests[0][function]": "core_enrol_get_users_courses",
         "requests[0][arguments]": json.dumps(
@@ -121,7 +126,7 @@ def get_all_courses(session, wstoken, user_id):
     return json.loads(resp.json()["responses"][0]["data"])
 
 
-def get_course(session, wstoken, course_id):
+def get_course(session: requests.Session, wstoken: str, course_id: Any) -> Any:
     data = {
         "courseid": int(course_id),
         "moodlewssettingfilter": True,
@@ -137,7 +142,11 @@ def get_course(session, wstoken, course_id):
     return resp.json()
 
 
-def get_userid(session, wstoken, log=logger):
+def get_userid(
+    session: requests.Session,
+    wstoken: str,
+    log: logging.Logger = logger,
+) -> tuple[Any, str]:
     data = {
         "moodlewssettingfilter": True,
         "moodlewssettingfileurl": True,
@@ -158,7 +167,7 @@ def get_userid(session, wstoken, log=logger):
     return payload["userid"], payload["userprivateaccesskey"]
 
 
-def get_assignment(session, wstoken, course_id):
+def get_assignment(session: requests.Session, wstoken: str, course_id: Any) -> Any:
     data = {
         "courseids[0]": int(course_id),
         "includenotenrolledcourses": 1,
@@ -177,8 +186,12 @@ def get_assignment(session, wstoken, course_id):
 
 
 def get_assignment_submission_files(
-    session, wstoken, user_id, assignment_id, log=logger
-):
+    session: requests.Session,
+    wstoken: str,
+    user_id: Any,
+    assignment_id: Any,
+    log: logging.Logger = logger,
+) -> list[Any]:
     data = {
         "assignid": assignment_id,
         "userid": user_id,
@@ -213,7 +226,9 @@ def get_assignment_submission_files(
     return files
 
 
-def get_folders_by_courses(session, wstoken, course_id):
+def get_folders_by_courses(
+    session: requests.Session, wstoken: str, course_id: Any
+) -> Any:
     data = {
         "courseids[0]": str(course_id),
         "moodlewssettingfilter": True,
