@@ -1,5 +1,11 @@
+import logging
+import urllib.parse
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, cast
+
+from bs4 import BeautifulSoup as bs
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -7,7 +13,11 @@ class ModuleServices:
     add_moodle_file_node: Any
     add_moodle_content_file_node: Any
     get_assignment_submission_files: Any
+    authenticate_opencast_episode: Any
+    extract_opencast_episode_id: Any
+    extract_track_from_episode: Any
     is_direct_moodle_file_content: Any
+    scan_html_text_for_links: Any
     scan_for_links: Any
     should_skip_url: Any
 
@@ -128,3 +138,134 @@ def handle_folder_module(
                 c["fileurl"],
                 timemodified=c.get("timemodified"),
             )
+
+
+def handle_embedded_link_module(
+    ctx,
+    module,
+    section_node,
+    course_id,
+    services: ModuleServices,
+    log: logging.Logger = logger,
+) -> None:
+    # Get embedded videos in pages or labels
+    if module["modname"] not in [
+        "page",
+        "label",
+        "h5pactivity",
+    ] or not ctx.config.get(
+        "used_modules", {}
+    ).get("url", {}):
+        return
+
+    if module["modname"] == "page":
+        opencast_enabled = (
+            ctx.config.get("used_modules", {}).get("url", {}).get("opencast", {})
+        )
+        html_url = (
+            module.get("url")
+            or f'https://moodle.rwth-aachen.de/mod/page/view.php?id={module["id"]}'
+        )
+        scan_page_links = not ctx.config.get(
+            "nolinks"
+        ) and not services.should_skip_url(html_url, "page link")
+        if opencast_enabled or scan_page_links:
+            try:
+                response = ctx.session.get(html_url)
+            except Exception:
+                log.exception(
+                    "Failed to fetch page module %s",
+                    module["id"],
+                )
+                response = None
+            if response and not (200 <= response.status_code < 300):
+                log.warning(
+                    "Page module %s returned status %s",
+                    module["id"],
+                    response.status_code,
+                )
+                response = None
+            if response:
+                if opencast_enabled:
+                    html = bs(
+                        response.text,
+                        features="lxml",
+                    )
+                    for iframe in html.find_all("iframe"):
+                        iframe_src_value = iframe.get("src")
+                        if not iframe_src_value:
+                            continue
+                        iframe_src = urllib.parse.urljoin(
+                            response.url or html_url,
+                            cast(str, iframe_src_value),
+                        )
+                        vid_id = services.extract_opencast_episode_id(iframe_src)
+                        if not vid_id:
+                            continue
+                        if not services.authenticate_opencast_episode(
+                            course_id, vid_id
+                        ):
+                            continue
+                        vid = services.extract_track_from_episode(vid_id)
+                        if not vid:
+                            continue
+
+                        if services.should_skip_url(vid, "Opencast video URL"):
+                            continue
+
+                        section_node.add_child(
+                            module["name"],
+                            vid_id,
+                            "Opencast",
+                            url=vid,
+                            additional_info=course_id,
+                        )
+
+                if scan_page_links:
+                    services.scan_html_text_for_links(
+                        response.text,
+                        response.url or html_url,
+                        section_node,
+                        course_id,
+                        module_title=module["name"],
+                    )
+    # "Interactive" h5p videos
+    elif module["modname"] == "h5pactivity":
+        html_url = (
+            f'https://moodle.rwth-aachen.de/mod/h5pactivity/view.php?id={module["id"]}'
+        )
+        html = bs(
+            ctx.session.get(html_url).text,
+            features="lxml",
+        )
+        # Get h5p iframe
+        h5p_iframe = html.find("iframe")
+        iframe_src_value = h5p_iframe.get("src") if h5p_iframe else None
+        if iframe_src_value:
+            iframe_src = urllib.parse.urljoin(html_url, cast(str, iframe_src_value))
+            iframe_html = str(
+                bs(
+                    ctx.session.get(iframe_src).text,
+                    features="lxml",
+                )
+            )
+            # Moodle devs dont know how to use CDATA correctly, so we need to remove all backslashes
+            sanitized_html = iframe_html.replace("\\", "")
+        else:
+            # H5P outside iframes
+            sanitized_html = str(html).replace("\\", "")
+
+        services.scan_for_links(
+            sanitized_html,
+            section_node,
+            course_id,
+            module_title=module["modname"],
+            single=False,
+        )
+    else:
+        services.scan_for_links(
+            module.get("description", ""),
+            section_node,
+            course_id,
+            module_title=module["name"],
+        )

@@ -421,7 +421,11 @@ class SyncMyMoodle:
             add_moodle_file_node=self._add_moodle_file_node,
             add_moodle_content_file_node=self._add_moodle_content_file_node,
             get_assignment_submission_files=self.get_assignment_submission_files,
+            authenticate_opencast_episode=self._authenticate_opencast_episode,
+            extract_opencast_episode_id=self._extract_opencast_episode_id,
+            extract_track_from_episode=self.extractTrackFromEpisode,
             is_direct_moodle_file_content=self._is_direct_moodle_file_content,
+            scan_html_text_for_links=self._scan_html_text_for_links,
             scan_for_links=self.scanForLinks,
             should_skip_url=self._should_skip_url,
         )
@@ -540,136 +544,14 @@ class SyncMyMoodle:
                             folders_by_coursemodule,
                             module_services,
                         )
-
-                        # Get embedded videos in pages or labels
-                        if module["modname"] in [
-                            "page",
-                            "label",
-                            "h5pactivity",
-                        ] and self.config.get("used_modules", {}).get("url", {}):
-                            if module["modname"] == "page":
-                                opencast_enabled = (
-                                    self.config.get("used_modules", {})
-                                    .get("url", {})
-                                    .get("opencast", {})
-                                )
-                                html_url = (
-                                    module.get("url")
-                                    or f'https://moodle.rwth-aachen.de/mod/page/view.php?id={module["id"]}'
-                                )
-                                scan_page_links = not self.config.get(
-                                    "nolinks"
-                                ) and not self._should_skip_url(html_url, "page link")
-                                if opencast_enabled or scan_page_links:
-                                    try:
-                                        response = self.session.get(html_url)
-                                    except Exception:
-                                        logger.exception(
-                                            "Failed to fetch page module %s",
-                                            module["id"],
-                                        )
-                                        response = None
-                                    if response and not (
-                                        200 <= response.status_code < 300
-                                    ):
-                                        logger.warning(
-                                            "Page module %s returned status %s",
-                                            module["id"],
-                                            response.status_code,
-                                        )
-                                        response = None
-                                    if response:
-                                        if opencast_enabled:
-                                            html = bs(
-                                                response.text,
-                                                features="lxml",
-                                            )
-                                            for iframe in html.find_all("iframe"):
-                                                iframe_src = iframe.get("src")
-                                                if not iframe_src:
-                                                    continue
-                                                iframe_src = urllib.parse.urljoin(
-                                                    response.url or html_url,
-                                                    iframe_src,
-                                                )
-                                                vid_id = (
-                                                    self._extract_opencast_episode_id(
-                                                        iframe_src
-                                                    )
-                                                )
-                                                if not vid_id:
-                                                    continue
-                                                if not self._authenticate_opencast_episode(
-                                                    course_id, vid_id
-                                                ):
-                                                    continue
-                                                vid = self.extractTrackFromEpisode(
-                                                    vid_id
-                                                )
-                                                if not vid:
-                                                    continue
-
-                                                if self._should_skip_url(
-                                                    vid, "Opencast video URL"
-                                                ):
-                                                    continue
-
-                                                section_node.add_child(
-                                                    module["name"],
-                                                    vid_id,
-                                                    "Opencast",
-                                                    url=vid,
-                                                    additional_info=course_id,
-                                                )
-
-                                        if scan_page_links:
-                                            self._scan_html_text_for_links(
-                                                response.text,
-                                                response.url or html_url,
-                                                section_node,
-                                                course_id,
-                                                module_title=module["name"],
-                                            )
-                            # "Interactive" h5p videos
-                            elif module["modname"] == "h5pactivity":
-                                html_url = f'https://moodle.rwth-aachen.de/mod/h5pactivity/view.php?id={module["id"]}'
-                                html = bs(
-                                    self.session.get(html_url).text,
-                                    features="lxml",
-                                )
-                                # Get h5p iframe
-                                iframe = html.find("iframe")
-                                iframe_src = iframe.get("src") if iframe else None
-                                if iframe_src:
-                                    iframe_src = urllib.parse.urljoin(
-                                        html_url, iframe_src
-                                    )
-                                    iframe_html = str(
-                                        bs(
-                                            self.session.get(iframe_src).text,
-                                            features="lxml",
-                                        )
-                                    )
-                                    # Moodle devs dont know how to use CDATA correctly, so we need to remove all backslashes
-                                    sanitized_html = iframe_html.replace("\\", "")
-                                else:
-                                    # H5P outside iframes
-                                    sanitized_html = str(html).replace("\\", "")
-
-                                self.scanForLinks(
-                                    sanitized_html,
-                                    section_node,
-                                    course_id,
-                                    module_title=module["modname"],
-                                    single=False,
-                                )
-                            else:
-                                self.scanForLinks(
-                                    module.get("description", ""),
-                                    section_node,
-                                    course_id,
-                                    module_title=module["name"],
-                                )
+                        sync_handlers.handle_embedded_link_module(
+                            self.ctx,
+                            module,
+                            section_node,
+                            course_id,
+                            module_services,
+                            logger,
+                        )
 
                         # New OpenCast integration
                         if module["modname"] == "lti" and self.config.get(
