@@ -422,12 +422,18 @@ class SyncMyMoodle:
             add_moodle_content_file_node=self._add_moodle_content_file_node,
             get_assignment_submission_files=self.get_assignment_submission_files,
             authenticate_opencast_episode=self._authenticate_opencast_episode,
+            extract_lti_form_data=self._extract_lti_form_data,
             extract_opencast_episode_id=self._extract_opencast_episode_id,
             extract_track_from_episode=self.extractTrackFromEpisode,
+            fetch_opencast_json=self._fetch_opencast_json,
+            get_input_value=self._get_input_value,
+            get_opencast_result_list=self._get_opencast_result_list,
             is_direct_moodle_file_content=self._is_direct_moodle_file_content,
+            log_opencast_backend_issue=self._log_opencast_backend_issue,
             scan_html_text_for_links=self._scan_html_text_for_links,
             scan_for_links=self.scanForLinks,
             should_skip_url=self._should_skip_url,
+            submit_opencast_lti_form=self._submit_opencast_lti_form,
         )
 
         # Syncing all courses
@@ -552,115 +558,14 @@ class SyncMyMoodle:
                             module_services,
                             logger,
                         )
-
-                        # New OpenCast integration
-                        if module["modname"] == "lti" and self.config.get(
-                            "used_modules", {}
-                        ).get("url", {}).get("opencast", {}):
-                            info_url = f'https://moodle.rwth-aachen.de/mod/lti/launch.php?id={module["id"]}&triggerview=0'
-                            try:
-                                info_response = self.session.get(info_url)
-                            except Exception:
-                                logger.exception(
-                                    "Opencast: failed to fetch LTI module %s",
-                                    module["id"],
-                                )
-                                continue
-                            if not (200 <= info_response.status_code < 300):
-                                logger.warning(
-                                    "Opencast: LTI module %s returned status %s",
-                                    module["id"],
-                                    info_response.status_code,
-                                )
-                                self._log_opencast_backend_issue(info_response.text)
-                                continue
-
-                            info_res = bs(info_response.text, features="lxml")
-
-                            engage_series_id = self._get_input_value(
-                                info_res, "custom_series"
-                            )
-                            engage_single_id = self._get_input_value(
-                                info_res, "custom_id"
-                            )
-                            name = (
-                                self._get_input_value(info_res, "resource_link_title")
-                                or module["name"]
-                            )
-                            engage_data = self._extract_lti_form_data(info_res)
-
-                            if engage_series_id:
-                                # Found an Opencast "series" page
-                                series_id = engage_series_id
-
-                                series_node = course_node.add_child(
-                                    name, series_id, "Section"
-                                )
-
-                                if not self._submit_opencast_lti_form(
-                                    engage_data, f"LTI series module {module['id']}"
-                                ):
-                                    continue
-
-                                series_url = f"https://engage.streaming.rwth-aachen.de/search/episode.json?limit=100&offset=0&sid={series_id}"
-                                series_response = self._fetch_opencast_json(
-                                    series_url, f"series {series_id}"
-                                )
-                                if series_response is None:
-                                    continue
-
-                                for episode in self._get_opencast_result_list(
-                                    series_response, f"series {series_id}"
-                                ):
-                                    if not isinstance(episode, dict):
-                                        continue
-                                    mediapackage = episode.get("mediapackage", {})
-                                    if not isinstance(mediapackage, dict):
-                                        continue
-                                    episode_id = mediapackage.get("id")
-                                    if not episode_id:
-                                        logger.warning(
-                                            "Opencast: series %s contains episode without id",
-                                            series_id,
-                                        )
-                                        continue
-                                    vid = self.extractTrackFromEpisode(episode_id)
-                                    if not vid:
-                                        continue
-                                    if self._should_skip_url(vid, "Opencast video URL"):
-                                        continue
-                                    series_node.add_child(
-                                        mediapackage.get("title") or episode_id,
-                                        episode_id,
-                                        "Opencast",
-                                        url=vid,
-                                        additional_info=module["id"],
-                                    )
-                            else:
-                                if not engage_single_id:
-                                    logger.info(
-                                        "Failed to find either custom_id or custom_series on lti page."
-                                    )
-                                    logger.info("------LTI-ERROR-HTML------")
-                                    logger.info(f"url: {info_url}")
-                                    logger.info(info_res)
-                                else:
-                                    if not self._submit_opencast_lti_form(
-                                        engage_data, f"LTI module {module['id']}"
-                                    ):
-                                        continue
-                                    vid = self.extractTrackFromEpisode(engage_single_id)
-                                    if not vid:
-                                        continue
-                                    if self._should_skip_url(vid, "Opencast video URL"):
-                                        continue
-                                    section_node.add_child(
-                                        name,
-                                        engage_single_id,
-                                        "Opencast",
-                                        url=vid,
-                                        additional_info=module["id"],
-                                    )
+                        sync_handlers.handle_opencast_lti_module(
+                            self.ctx,
+                            module,
+                            section_node,
+                            course_node,
+                            module_services,
+                            logger,
+                        )
                         # Integration for Quizzes
                         if module["modname"] == "quiz" and self.config.get(
                             "used_modules", {}

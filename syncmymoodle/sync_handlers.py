@@ -14,12 +14,18 @@ class ModuleServices:
     add_moodle_content_file_node: Any
     get_assignment_submission_files: Any
     authenticate_opencast_episode: Any
+    extract_lti_form_data: Any
     extract_opencast_episode_id: Any
     extract_track_from_episode: Any
+    fetch_opencast_json: Any
+    get_input_value: Any
+    get_opencast_result_list: Any
     is_direct_moodle_file_content: Any
+    log_opencast_backend_issue: Any
     scan_html_text_for_links: Any
     scan_for_links: Any
     should_skip_url: Any
+    submit_opencast_lti_form: Any
 
 
 def handle_assignment_module(
@@ -269,3 +275,118 @@ def handle_embedded_link_module(
             course_id,
             module_title=module["name"],
         )
+
+
+def handle_opencast_lti_module(
+    ctx,
+    module,
+    section_node,
+    course_node,
+    services: ModuleServices,
+    log: logging.Logger = logger,
+) -> None:
+    # New OpenCast integration
+    if module["modname"] != "lti" or not ctx.config.get("used_modules", {}).get(
+        "url", {}
+    ).get("opencast", {}):
+        return
+
+    info_url = (
+        f'https://moodle.rwth-aachen.de/mod/lti/launch.php?id={module["id"]}'
+        "&triggerview=0"
+    )
+    try:
+        info_response = ctx.session.get(info_url)
+    except Exception:
+        log.exception(
+            "Opencast: failed to fetch LTI module %s",
+            module["id"],
+        )
+        return
+    if not (200 <= info_response.status_code < 300):
+        log.warning(
+            "Opencast: LTI module %s returned status %s",
+            module["id"],
+            info_response.status_code,
+        )
+        services.log_opencast_backend_issue(info_response.text)
+        return
+
+    info_res = bs(info_response.text, features="lxml")
+
+    engage_series_id = services.get_input_value(info_res, "custom_series")
+    engage_single_id = services.get_input_value(info_res, "custom_id")
+    name = services.get_input_value(info_res, "resource_link_title") or module["name"]
+    engage_data = services.extract_lti_form_data(info_res)
+
+    if engage_series_id:
+        # Found an Opencast "series" page
+        series_id = engage_series_id
+
+        series_node = course_node.add_child(name, series_id, "Section")
+
+        if not services.submit_opencast_lti_form(
+            engage_data, f"LTI series module {module['id']}"
+        ):
+            return
+
+        series_url = (
+            "https://engage.streaming.rwth-aachen.de/search/episode.json"
+            f"?limit=100&offset=0&sid={series_id}"
+        )
+        series_response = services.fetch_opencast_json(
+            series_url, f"series {series_id}"
+        )
+        if series_response is None:
+            return
+
+        for episode in services.get_opencast_result_list(
+            series_response, f"series {series_id}"
+        ):
+            if not isinstance(episode, dict):
+                continue
+            mediapackage = episode.get("mediapackage", {})
+            if not isinstance(mediapackage, dict):
+                continue
+            episode_id = mediapackage.get("id")
+            if not episode_id:
+                log.warning(
+                    "Opencast: series %s contains episode without id",
+                    series_id,
+                )
+                continue
+            vid = services.extract_track_from_episode(episode_id)
+            if not vid:
+                continue
+            if services.should_skip_url(vid, "Opencast video URL"):
+                continue
+            series_node.add_child(
+                mediapackage.get("title") or episode_id,
+                episode_id,
+                "Opencast",
+                url=vid,
+                additional_info=module["id"],
+            )
+    else:
+        if not engage_single_id:
+            log.info("Failed to find either custom_id or custom_series on lti page.")
+            log.info("------LTI-ERROR-HTML------")
+            log.info(f"url: {info_url}")
+            log.info(info_res)
+        else:
+            if not services.submit_opencast_lti_form(
+                engage_data, f"LTI module {module['id']}"
+            ):
+                return
+            vid = services.extract_track_from_episode(engage_single_id)
+            if not vid:
+                return
+            if services.should_skip_url(vid, "Opencast video URL"):
+                return
+            section_node.add_child(
+                name,
+                engage_single_id,
+                "Opencast",
+                url=vid,
+                additional_info=module["id"],
+            )
