@@ -522,56 +522,22 @@ class SyncMyMoodle:
                 section_node = course_node.add_child(
                     section["name"], section["id"], "Section"
                 )
+                module_context = sync_handlers.ModuleContext(
+                    ctx=self.ctx,
+                    course_id=course_id,
+                    course_node=course_node,
+                    section_node=section_node,
+                    assignments_by_cmid=assignments_by_cmid,
+                    folders_by_coursemodule=folders_by_coursemodule,
+                    services=module_services,
+                    log=logger,
+                )
                 for module in section["modules"]:
                     try:
                         if self._should_skip_module(module, course_id):
                             continue
 
-                        sync_handlers.handle_assignment_module(
-                            self.ctx,
-                            module,
-                            section_node,
-                            course_id,
-                            assignments_by_cmid,
-                            module_services,
-                        )
-                        sync_handlers.handle_resource_like_module(
-                            self.ctx,
-                            module,
-                            section_node,
-                            course_id,
-                            module_services,
-                        )
-                        sync_handlers.handle_folder_module(
-                            self.ctx,
-                            module,
-                            section_node,
-                            course_id,
-                            folders_by_coursemodule,
-                            module_services,
-                        )
-                        sync_handlers.handle_embedded_link_module(
-                            self.ctx,
-                            module,
-                            section_node,
-                            course_id,
-                            module_services,
-                            logger,
-                        )
-                        sync_handlers.handle_opencast_lti_module(
-                            self.ctx,
-                            module,
-                            section_node,
-                            course_node,
-                            module_services,
-                            logger,
-                        )
-                        sync_handlers.handle_quiz_module(
-                            self.ctx,
-                            module,
-                            section_node,
-                            module_services,
-                        )
+                        sync_handlers.handle_module(module_context, module)
 
                     except Exception:
                         logger.exception(f"Failed to download the module {module}")

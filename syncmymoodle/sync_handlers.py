@@ -29,6 +29,18 @@ class ModuleServices:
     submit_opencast_lti_form: Any
 
 
+@dataclass
+class ModuleContext:
+    ctx: Any
+    course_id: Any
+    course_node: Any
+    section_node: Any
+    assignments_by_cmid: Any
+    folders_by_coursemodule: Any
+    services: ModuleServices
+    log: logging.Logger = logger
+
+
 def handle_assignment_module(
     ctx,
     module,
@@ -431,3 +443,81 @@ def handle_quiz_module(
             "Quiz",
             url=review_url,
         )
+
+
+def _assignment_handler(module_context: ModuleContext, module) -> None:
+    handle_assignment_module(
+        module_context.ctx,
+        module,
+        module_context.section_node,
+        module_context.course_id,
+        module_context.assignments_by_cmid,
+        module_context.services,
+    )
+
+
+def _resource_like_handler(module_context: ModuleContext, module) -> None:
+    handle_resource_like_module(
+        module_context.ctx,
+        module,
+        module_context.section_node,
+        module_context.course_id,
+        module_context.services,
+    )
+
+
+def _folder_handler(module_context: ModuleContext, module) -> None:
+    handle_folder_module(
+        module_context.ctx,
+        module,
+        module_context.section_node,
+        module_context.course_id,
+        module_context.folders_by_coursemodule,
+        module_context.services,
+    )
+
+
+def _embedded_link_handler(module_context: ModuleContext, module) -> None:
+    handle_embedded_link_module(
+        module_context.ctx,
+        module,
+        module_context.section_node,
+        module_context.course_id,
+        module_context.services,
+        module_context.log,
+    )
+
+
+def _opencast_lti_handler(module_context: ModuleContext, module) -> None:
+    handle_opencast_lti_module(
+        module_context.ctx,
+        module,
+        module_context.section_node,
+        module_context.course_node,
+        module_context.services,
+        module_context.log,
+    )
+
+
+def _quiz_handler(module_context: ModuleContext, module) -> None:
+    handle_quiz_module(
+        module_context.ctx,
+        module,
+        module_context.section_node,
+        module_context.services,
+    )
+
+
+MODULE_HANDLERS = (
+    _assignment_handler,
+    _resource_like_handler,
+    _folder_handler,
+    _embedded_link_handler,
+    _opencast_lti_handler,
+    _quiz_handler,
+)
+
+
+def handle_module(module_context: ModuleContext, module) -> None:
+    for handler in MODULE_HANDLERS:
+        handler(module_context, module)
