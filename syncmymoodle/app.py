@@ -18,8 +18,6 @@ from bs4 import BeautifulSoup as bs
 from tqdm import tqdm
 
 from syncmymoodle.constants import (
-    COURSE_PREFIX_HANDLING_OPTIONS,
-    COURSE_PREFIX_RE,
     MOODLE_URL,
     OPENCAST_LINK_RE,
     RWTH_DISRUPTIVE_STATUS_CLASSES,
@@ -32,6 +30,17 @@ from syncmymoodle.constants import (
     YOUTUBE_LINK_RE,
 )
 from syncmymoodle.context import SyncContext
+from syncmymoodle.filters import (
+    as_list,
+    configured_patterns,
+    course_id_in_filter,
+    domain_matches,
+    format_course_name,
+    matches_any_pattern,
+    should_skip_module,
+    should_skip_section,
+    should_skip_url,
+)
 from syncmymoodle.node import NAME_CLASH_ID_UNSET, Node
 from syncmymoodle.pathing import (
     get_sanitized_node_path,
@@ -456,162 +465,31 @@ class SyncMyMoodle:
         )
 
     def _as_list(self, value):
-        if value is None:
-            return []
-        if isinstance(value, list):
-            return value
-        return [value]
+        return as_list(value)
 
     def _course_id_in_filter(self, course_id, entries) -> bool:
-        """Return True if ``course_id`` is referenced by a configured entry.
-
-        Entries are course URLs (``.../course/view.php?id=NNN``). The ``id``
-        query parameter is compared exactly, so e.g. ``id=12`` does not also
-        match courses ``1`` or ``2``. A bare numeric id entry is also accepted.
-        """
-        course_id = str(course_id)
-        for entry in entries or []:
-            entry = str(entry)
-            parsed = urllib.parse.urlparse(entry)
-            if course_id in urllib.parse.parse_qs(parsed.query).get("id", []):
-                return True
-            if entry.strip() == course_id:
-                return True
-        return False
+        return course_id_in_filter(course_id, entries)
 
     def _configured_patterns(self, *keys, course_id=None):
-        patterns = []
-        for key in keys:
-            value = self.config.get(key)
-            if isinstance(value, dict):
-                patterns.extend(self._as_list(value.get("*")))
-                if course_id is not None:
-                    patterns.extend(self._as_list(value.get(str(course_id))))
-            else:
-                patterns.extend(self._as_list(value))
-        return [str(pattern) for pattern in patterns if pattern is not None]
+        return configured_patterns(self.config, *keys, course_id=course_id)
 
     def _format_course_name(self, course_name):
-        prefix_handling = self.config.get("course_prefix_handling", "keep")
-        if prefix_handling == "keep":
-            return course_name
-        if prefix_handling not in COURSE_PREFIX_HANDLING_OPTIONS:
-            logger.warning(
-                "Unsupported course_prefix_handling value %r; using keep",
-                prefix_handling,
-            )
-            return course_name
-
-        match = COURSE_PREFIX_RE.match(course_name)
-        if not match:
-            return course_name
-
-        name = match.group("course_name")
-        prefix = match.group("prefix")
-        if prefix_handling == "remove":
-            return name
-        return f"{name} ({prefix})"
+        return format_course_name(course_name, self.config, logger)
 
     def _matches_any_pattern(self, values, patterns):
-        for value in values:
-            if value is None:
-                continue
-            value = str(value)
-            for pattern in patterns:
-                if value == pattern or fnmatchcase(value, pattern):
-                    return True
-        return False
+        return matches_any_pattern(values, patterns)
 
     def _domain_matches(self, netloc, allowed_domain):
-        host = netloc.split("@")[-1].split(":")[0].lower()
-        domain = str(allowed_domain).strip().lower()
-        domain = urllib.parse.urlparse(domain).netloc or domain
-        domain = domain.split("@")[-1].split(":")[0]
-        if not domain:
-            return False
-        if fnmatchcase(host, domain):
-            return True
-        if domain.startswith("*."):
-            return host.endswith(domain[1:])
-        return host == domain or host.endswith(f".{domain}")
+        return domain_matches(netloc, allowed_domain)
 
     def _should_skip_url(self, url, context="link"):
-        if not url:
-            return False
-
-        url = str(url).replace("&amp;", "&")
-        if self._matches_any_pattern([url], self._configured_patterns("exclude_links")):
-            logger.info("Skipping %s %s because it matches exclude_links", context, url)
-            return True
-
-        allowed_domains = self._configured_patterns("allowed_domains")
-        if allowed_domains:
-            parsed_url = urllib.parse.urlparse(url)
-            if parsed_url.scheme in {"http", "https"} and parsed_url.netloc:
-                if not any(
-                    self._domain_matches(parsed_url.netloc, domain)
-                    for domain in allowed_domains
-                ):
-                    logger.info(
-                        "Skipping %s %s because it is outside allowed_domains",
-                        context,
-                        url,
-                    )
-                    return True
-
-        return False
+        return should_skip_url(self.config, url, context, logger)
 
     def _should_skip_section(self, section, course_id):
-        patterns = self._configured_patterns(
-            "exclude_sections", "skip_sections", course_id=course_id
-        )
-        if not patterns:
-            return False
-
-        values = [section.get("name"), section.get("id")]
-        if self._matches_any_pattern(values, patterns):
-            logger.info(
-                "Skipping section %s (%s) in course %s because it matches "
-                "exclude_sections",
-                section.get("name"),
-                section.get("id"),
-                course_id,
-            )
-            return True
-        return False
+        return should_skip_section(self.config, section, course_id, logger)
 
     def _should_skip_module(self, module, course_id):
-        patterns = self._configured_patterns(
-            "exclude_modules", "skip_modules", course_id=course_id
-        )
-        if not patterns:
-            return False
-
-        module_id = module.get("id")
-        module_name = module.get("name")
-        modname = module.get("modname")
-        module_urls = []
-        if module.get("url"):
-            module_urls.append(module.get("url"))
-        if module_id and modname:
-            module_urls.extend(
-                [
-                    f"https://moodle.rwth-aachen.de/mod/{modname}/view.php?id={module_id}",
-                    f"https://moodle.rwth-aachen.de/mod/{modname}/launch.php?id={module_id}",
-                ]
-            )
-
-        values = [module_id, module_name, modname, *module_urls]
-        if self._matches_any_pattern(values, patterns):
-            logger.info(
-                "Skipping module %s (%s) in course %s because it matches "
-                "exclude_modules",
-                module_name,
-                module_id,
-                course_id,
-            )
-            return True
-        return False
+        return should_skip_module(self.config, module, course_id, logger)
 
     def _make_conflict_path(self, path: Path) -> Path:
         return make_conflict_path(path)
