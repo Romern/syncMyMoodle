@@ -2,15 +2,12 @@ import json
 import logging
 from pathlib import Path
 
-import yt_dlp
-
 from syncmymoodle import downloader
 from syncmymoodle import links as links_api
 from syncmymoodle import moodle as moodle_api
 from syncmymoodle import moodle_files
 from syncmymoodle import opencast as opencast_api
 from syncmymoodle import sync_handlers
-from syncmymoodle.constants import YOUTUBE_ID_LENGTH
 from syncmymoodle.context import SyncContext
 from syncmymoodle.course_cache import (
     cache_root_node,
@@ -464,57 +461,24 @@ class SyncMyMoodle:
         self.root_node.remove_children_nameclashes()
 
     def download_all_files(self):
-        if not self.session:
-            raise Exception("You need to login() first.")
-        if not self.wstoken:
-            raise Exception("You need to get_moodle_wstoken() first.")
-        if not self.user_id:
-            raise Exception("You need to get_userid() first.")
-        if not self.root_node:
-            raise Exception("You need to sync() first.")
-
-        self._download_all_files(self.root_node)
+        return downloader.download_all_files(
+            self.ctx,
+            downloader.DownloadTreeServices(
+                download_file=self.download_file,
+                scan_and_download_youtube=self.scanAndDownloadYouTube,
+            ),
+            logger,
+        )
 
     def _download_all_files(self, cur_node):
-        if len(cur_node.children) == 0:
-            if cur_node.url and not cur_node.is_downloaded:
-                if cur_node.type == "Youtube":
-                    try:
-                        self.scanAndDownloadYouTube(cur_node)
-                        cur_node.is_downloaded = True
-                    except Exception:
-                        logger.exception(f"Failed to download the module {cur_node}")
-                        logger.error(
-                            "This could be caused by an out of date yt-dlp version. Try upgrading yt-dlp through pip or your package manager."
-                        )
-                elif cur_node.type == "Opencast":
-                    try:
-                        # download Opencast videos
-                        if ".mp4" not in cur_node.name:
-                            if cur_node.name is not None and cur_node.name != "":
-                                cur_node.name += ".mp4"
-                            else:
-                                cur_node.name = cur_node.url.split("/")[-1]
-                        if self.download_file(cur_node):
-                            cur_node.is_downloaded = True
-                    except Exception:
-                        logger.exception(f"Failed to download the module {cur_node}")
-                elif cur_node.type == "Quiz":
-                    logger.warning(
-                        "Skipping quiz PDF generation for %s because it is disabled "
-                        "for security.",
-                        cur_node.name,
-                    )
-                else:
-                    try:
-                        if self.download_file(cur_node):
-                            cur_node.is_downloaded = True
-                    except Exception:
-                        logger.exception(f"Failed to download the module {cur_node}")
-            return
-
-        for child in cur_node.children:
-            self._download_all_files(child)
+        return downloader.download_node_tree(
+            cur_node,
+            downloader.DownloadTreeServices(
+                download_file=self.download_file,
+                scan_and_download_youtube=self.scanAndDownloadYouTube,
+            ),
+            logger,
+        )
 
     def get_sanitized_node_path(self, node: Node) -> Path:
         return get_sanitized_node_path(
@@ -589,32 +553,12 @@ class SyncMyMoodle:
         return opencast_api.extract_track_from_episode(self.ctx, episode_id, logger)
 
     def scanAndDownloadYouTube(self, node):
-        """Download Youtube-Videos using yt_dlp"""
-        path = self.get_sanitized_node_path(node.parent)
-        link = node.url
-        if self._should_skip_url(link, "YouTube link"):
-            return True
-        if path.exists():
-            if any(link[-YOUTUBE_ID_LENGTH:] in f.name for f in path.iterdir()):
-                return False
-        ydl_opts = {
-            "outtmpl": "{}/%(title)s-%(id)s.%(ext)s".format(path),
-            "ignoreerrors": True,
-            "nooverwrites": True,
-            "retries": 15,
-            "match_filter": yt_dlp.match_filter_func("!is_live"),
-        }
-        path.mkdir(parents=True, exist_ok=True)
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            ydl.download([link])
-        return True
+        return downloader.scan_and_download_youtube(
+            node, self.get_sanitized_node_path, self._should_skip_url
+        )
 
     def downloadQuiz(self, node):
-        logger.warning(
-            "Quiz PDF generation is disabled until the pdfkit/wkhtmltopdf "
-            "renderer is replaced with a safer implementation."
-        )
-        return False
+        return downloader.download_quiz(node, logger)
 
     def scanForLinks(
         self, text, parent_node, course_id, module_title=None, single=False

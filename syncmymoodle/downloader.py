@@ -9,7 +9,10 @@ from fnmatch import fnmatchcase
 from pathlib import Path
 from typing import Any
 
+import yt_dlp
 from tqdm import tqdm
+
+from syncmymoodle.constants import YOUTUBE_ID_LENGTH
 
 logger = logging.getLogger(__name__)
 
@@ -24,6 +27,12 @@ class DownloadServices:
     make_conflict_path: Any
     node_allows_html_download: Any
     should_skip_url: Any
+
+
+@dataclass
+class DownloadTreeServices:
+    download_file: Any
+    scan_and_download_youtube: Any
 
 
 def local_file_matches_etag(path: Path, etag: str) -> bool:
@@ -408,3 +417,92 @@ def download_file(
         # Remember that we downloaded this path during the current run.
         ctx.downloaded_paths.add(downloadpath)
         return True
+
+
+def download_all_files(ctx, services: DownloadTreeServices, log=logger) -> None:
+    if not ctx.session:
+        raise Exception("You need to login() first.")
+    if not ctx.wstoken:
+        raise Exception("You need to get_moodle_wstoken() first.")
+    if not ctx.user_id:
+        raise Exception("You need to get_userid() first.")
+    if not ctx.root_node:
+        raise Exception("You need to sync() first.")
+
+    download_node_tree(ctx.root_node, services, log)
+
+
+def download_node_tree(cur_node, services: DownloadTreeServices, log=logger) -> None:
+    if len(cur_node.children) == 0:
+        if cur_node.url and not cur_node.is_downloaded:
+            if cur_node.type == "Youtube":
+                try:
+                    services.scan_and_download_youtube(cur_node)
+                    cur_node.is_downloaded = True
+                except Exception:
+                    log.exception(f"Failed to download the module {cur_node}")
+                    log.error(
+                        "This could be caused by an out of date yt-dlp version. Try upgrading yt-dlp through pip or your package manager."
+                    )
+            elif cur_node.type == "Opencast":
+                try:
+                    # download Opencast videos
+                    if ".mp4" not in cur_node.name:
+                        if cur_node.name is not None and cur_node.name != "":
+                            cur_node.name += ".mp4"
+                        else:
+                            cur_node.name = cur_node.url.split("/")[-1]
+                    if services.download_file(cur_node):
+                        cur_node.is_downloaded = True
+                except Exception:
+                    log.exception(f"Failed to download the module {cur_node}")
+            elif cur_node.type == "Quiz":
+                log.warning(
+                    "Skipping quiz PDF generation for %s because it is disabled "
+                    "for security.",
+                    cur_node.name,
+                )
+            else:
+                try:
+                    if services.download_file(cur_node):
+                        cur_node.is_downloaded = True
+                except Exception:
+                    log.exception(f"Failed to download the module {cur_node}")
+        return
+
+    for child in cur_node.children:
+        download_node_tree(child, services, log)
+
+
+def scan_and_download_youtube(
+    node,
+    get_sanitized_node_path,
+    should_skip_url,
+):
+    """Download Youtube-Videos using yt_dlp."""
+    path = get_sanitized_node_path(node.parent)
+    link = node.url
+    if should_skip_url(link, "YouTube link"):
+        return True
+    if path.exists():
+        if any(link[-YOUTUBE_ID_LENGTH:] in f.name for f in path.iterdir()):
+            return False
+    ydl_opts = {
+        "outtmpl": "{}/%(title)s-%(id)s.%(ext)s".format(path),
+        "ignoreerrors": True,
+        "nooverwrites": True,
+        "retries": 15,
+        "match_filter": yt_dlp.match_filter_func("!is_live"),
+    }
+    path.mkdir(parents=True, exist_ok=True)
+    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+        ydl.download([link])
+    return True
+
+
+def download_quiz(node, log=logger):
+    log.warning(
+        "Quiz PDF generation is disabled until the pdfkit/wkhtmltopdf "
+        "renderer is replaced with a safer implementation."
+    )
+    return False
