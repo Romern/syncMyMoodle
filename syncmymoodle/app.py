@@ -14,6 +14,7 @@ from bs4 import BeautifulSoup as bs
 from tqdm import tqdm
 
 from syncmymoodle import moodle as moodle_api
+from syncmymoodle import opencast as opencast_api
 from syncmymoodle.constants import (
     OPENCAST_LINK_RE,
     SCIEBO_LINK_RE,
@@ -375,24 +376,7 @@ class SyncMyMoodle:
             return digest.hexdigest() == hex_str
 
     def _log_opencast_backend_issue(self, response_body: str | None = None) -> None:
-        """Log additional context for repeated Opencast backend issues.
-
-        We keep the response body at INFO level (only shown with --verbose) and
-        emit a hint to the RWTH ITC status page once the error
-        counter exceeds a small threshold.
-        """
-        self._opencast_error_count += 1
-
-        if response_body:
-            logger.info(f"Opencast response body (truncated): {response_body[:1000]}")
-
-        if self._opencast_error_count >= 5 and not self._opencast_status_hint_logged:
-            logger.warning(
-                "Multiple Opencast backend errors occurred. Please check the RWTH "
-                "ITC status page before reporting an issue on GitHub: "
-                "https://maintenance.itc.rwth-aachen.de/ticket/status/messages/499"
-            )
-            self._opencast_status_hint_logged = True
+        return opencast_api.log_backend_issue(self.ctx, response_body, logger)
 
     def _check_general_connectivity(self):
         return check_general_connectivity(logger)
@@ -1341,236 +1325,36 @@ class SyncMyMoodle:
             return True
 
     def _extract_opencast_episode_id(self, url):
-        if not url:
-            return None
-
-        url = str(url).replace("&amp;", "&")
-        parsed = urllib.parse.urlparse(url)
-        episode_ids = urllib.parse.parse_qs(parsed.query).get("episodeid", [])
-        if episode_ids and episode_ids[0]:
-            return episode_ids[0]
-
-        match = re.match(
-            r"^https://engage\.streaming\.rwth-aachen\.de/play/([a-zA-Z0-9-]{36})(?:[/?#].*)?$",
-            url,
-        )
-        if match:
-            return match.group(1)
-
-        return None
+        return opencast_api.extract_episode_id(url)
 
     def _extract_lti_form_data(self, soup):
-        return {
-            input_tag["name"]: input_tag.get("value", "")
-            for input_tag in soup.find_all("input")
-            if input_tag.get("name")
-        }
+        return opencast_api.extract_lti_form_data(soup)
 
     def _get_input_value(self, soup, name):
-        input_tag = soup.find("input", {"name": name})
-        if input_tag and input_tag.get("value"):
-            return input_tag["value"]
-        return None
+        return opencast_api.get_input_value(soup, name)
 
     def _submit_opencast_lti_form(self, engage_data, context):
-        if not engage_data:
-            logger.warning("Opencast: missing LTI form fields for %s", context)
-            return False
-
-        try:
-            response = self.session.post(
-                "https://engage.streaming.rwth-aachen.de/lti", data=engage_data
-            )
-        except Exception:
-            logger.exception("Opencast: failed to submit LTI form for %s", context)
-            self._log_opencast_backend_issue(None)
-            return False
-
-        if not (200 <= response.status_code < 300):
-            logger.warning(
-                "Opencast: LTI form returned status %s for %s",
-                response.status_code,
-                context,
-            )
-            self._log_opencast_backend_issue(response.text)
-            return False
-
-        return True
+        return opencast_api.submit_lti_form(self.ctx, engage_data, context, logger)
 
     def _fetch_lti_form_data(self, url, context):
-        try:
-            response = self.session.get(url)
-        except Exception:
-            logger.exception("Opencast: failed to fetch LTI form for %s", context)
-            self._log_opencast_backend_issue(None)
-            return None
-
-        if not (200 <= response.status_code < 300):
-            logger.warning(
-                "Opencast: LTI form returned status %s for %s",
-                response.status_code,
-                context,
-            )
-            self._log_opencast_backend_issue(response.text)
-            return None
-
-        soup = bs(response.text, features="lxml")
-        engage_data = self._extract_lti_form_data(soup)
-        if not engage_data:
-            logger.info("Opencast: no LTI form fields found for %s", context)
-            logger.info("------LTI-ERROR-HTML------")
-            logger.info(f"url: {url}")
-            logger.info(soup)
-            return None
-
-        return engage_data
+        return opencast_api.fetch_lti_form_data(self.ctx, url, context, logger)
 
     def _authenticate_opencast_episode(self, course_id, episode_id):
-        if not self.session_key:
-            logger.warning("Opencast: cannot launch episode without Moodle sesskey")
-            return False
-
-        cache_key = (course_id, episode_id)
-        if cache_key in self._opencast_episode_auth_cache:
-            return True
-
-        params = urllib.parse.urlencode(
-            {
-                "courseid": course_id,
-                "episodeid": episode_id,
-                "sesskey": self.session_key,
-                "ocinstanceid": 1,
-            }
+        return opencast_api.authenticate_episode(
+            self.ctx, course_id, episode_id, logger
         )
-        info_url = (
-            f"https://moodle.rwth-aachen.de/filter/opencast/ltilaunch.php?{params}"
-        )
-        context = f"episode {episode_id} in course {course_id}"
-        engage_data = self._fetch_lti_form_data(info_url, context)
-        if engage_data is None:
-            return False
-        if not self._submit_opencast_lti_form(engage_data, context):
-            return False
-        self._opencast_episode_auth_cache.add(cache_key)
-        return True
 
     def _fetch_opencast_json(self, url, context):
-        try:
-            response = self.session.get(url)
-        except Exception:
-            logger.exception("Opencast: failed to fetch %s from %s", context, url)
-            self._log_opencast_backend_issue(None)
-            return None
-
-        if not (200 <= response.status_code < 300):
-            logger.error(
-                "Opencast: %s returned status %s for %s",
-                context,
-                response.status_code,
-                url,
-            )
-            self._log_opencast_backend_issue(response.text)
-            return None
-
-        try:
-            payload = response.json()
-        except ValueError:
-            logger.error("Opencast: failed to decode JSON for %s from %s", context, url)
-            self._log_opencast_backend_issue(response.text)
-            return None
-
-        if not isinstance(payload, dict):
-            logger.warning(
-                "Opencast: expected JSON object for %s, got %s",
-                context,
-                type(payload).__name__,
-            )
-            self._log_opencast_backend_issue(response.text)
-            return None
-
-        if payload.get("error") or payload.get("errorcode"):
-            logger.error(
-                "Opencast: %s returned error%s: %s",
-                context,
-                f" {payload.get('errorcode')}" if payload.get("errorcode") else "",
-                payload.get("error") or payload,
-            )
-            self._log_opencast_backend_issue(response.text)
-            return None
-
-        return payload
+        return opencast_api.fetch_json(self.ctx, url, context, logger)
 
     def _get_opencast_result_list(self, payload, context):
-        result = payload.get("result") if isinstance(payload, dict) else None
-        if not isinstance(result, list):
-            logger.warning("Opencast: missing result list for %s", context)
-            self._log_opencast_backend_issue(
-                json.dumps(payload, ensure_ascii=False) if payload is not None else None
-            )
-            return []
-        if not result:
-            logger.warning("Opencast: empty result list for %s", context)
-            return []
-        return result
+        return opencast_api.get_result_list(self.ctx, payload, context, logger)
 
     def _resolution_width(self, resolution):
-        match = re.match(r"(\d+)\s*x\s*\d+", str(resolution or ""))
-        if not match:
-            return 0
-        return int(match.group(1))
+        return opencast_api.resolution_width(resolution)
 
     def extractTrackFromEpisode(self, episode_id):
-        if episode_id in self._opencast_track_cache:
-            return self._opencast_track_cache[episode_id]
-
-        episode_url = (
-            "https://engage.streaming.rwth-aachen.de/search/episode.json"
-            f"?id={episode_id}"
-        )
-        episodejson = self._fetch_opencast_json(episode_url, f"episode {episode_id}")
-        if episodejson is None:
-            return False
-
-        tracks = []
-        for entry in self._get_opencast_result_list(
-            episodejson, f"episode {episode_id}"
-        ):
-            if not isinstance(entry, dict):
-                continue
-            mediapackage = entry.get("mediapackage")
-            media = (
-                mediapackage.get("media") if isinstance(mediapackage, dict) else None
-            )
-            track_data = media.get("track") if isinstance(media, dict) else None
-            if isinstance(track_data, dict):
-                track_data = [track_data]
-            if not isinstance(track_data, list):
-                continue
-            for track in track_data:
-                if not isinstance(track, dict):
-                    continue
-                video = track.get("video")
-                url = track.get("url")
-                if (
-                    url
-                    and track.get("mimetype") == "video/mp4"
-                    and "transport" not in track
-                    and isinstance(video, dict)
-                ):
-                    tracks.append(
-                        (self._resolution_width(video.get("resolution")), url)
-                    )
-
-        if not tracks:
-            logger.warning(
-                "Opencast: no downloadable mp4 track found for %s", episode_id
-            )
-            return False
-
-        # Prefer the highest resolution plain HTTPS mp4 track.
-        track_url = sorted(tracks, key=lambda track: track[0])[-1][1]
-        self._opencast_track_cache[episode_id] = track_url
-        return track_url
+        return opencast_api.extract_track_from_episode(self.ctx, episode_id, logger)
 
     def scanAndDownloadYouTube(self, node):
         """Download Youtube-Videos using yt_dlp"""
