@@ -13,6 +13,7 @@ from tqdm import tqdm
 
 from syncmymoodle import links as links_api
 from syncmymoodle import moodle as moodle_api
+from syncmymoodle import moodle_files
 from syncmymoodle import opencast as opencast_api
 from syncmymoodle import sync_handlers
 from syncmymoodle.constants import YOUTUBE_ID_LENGTH
@@ -202,10 +203,7 @@ class SyncMyMoodle:
         return get_old_node_for(self.ctx, self.invalid_chars, node, logger)
 
     def _get_or_add_child(self, parent_node, name, id, type):
-        for child in parent_node.children:
-            if child.name == name and child.type == type:
-                return child
-        return parent_node.add_child(name, id, type)
+        return moodle_files.get_or_add_child(parent_node, name, id, type)
 
     def _add_moodle_file_node(
         self,
@@ -218,73 +216,25 @@ class SyncMyMoodle:
         timemodified=None,
         name_clash_id=NAME_CLASH_ID_UNSET,
     ):
-        target_node = parent_node
-        path_segments = [
-            self.sanitize(segment)
-            for segment in str(moodle_filepath or "").strip("/").split("/")
-            if segment
-        ]
-
-        for segment in path_segments:
-            target_node = self._get_or_add_child(target_node, segment, None, "Folder")
-            if target_node is None:
-                return None
-
-        return target_node.add_child(
+        return moodle_files.add_moodle_file_node(
+            parent_node,
+            self.invalid_chars,
+            moodle_filepath,
             filename,
             id,
             type,
-            url=url,
+            url,
             timemodified=timemodified,
             name_clash_id=name_clash_id,
         )
 
     def _add_moodle_content_file_node(self, parent_node, content, file_type=None):
-        file_url = content.get("fileurl")
-        if not file_url:
-            return None
-
-        mimetype = content.get("mimetype") or "unknown"
-        filename = urllib.parse.urlsplit(file_url).path.split("/")[-1]
-        if not filename:
-            filename = content.get("filename")
-        return self._add_moodle_file_node(
-            parent_node,
-            "/",
-            filename,
-            file_url,
-            file_type or f"Linked file [{mimetype}]",
-            file_url,
-            timemodified=content.get("timemodified"),
-            name_clash_id=None,
+        return moodle_files.add_moodle_content_file_node(
+            parent_node, self.invalid_chars, content, file_type
         )
 
     def _is_direct_moodle_file_content(self, module, content):
-        file_url = content.get("fileurl")
-        if not file_url or content.get("type") != "file":
-            return False
-
-        mimetype = str(content.get("mimetype") or "").split(";", 1)[0].lower()
-        if not mimetype or mimetype in {
-            "document/unknown",
-            "unknown",
-            "text/html",
-            "application/xhtml+xml",
-        }:
-            return False
-        if mimetype.startswith("text/"):
-            return False
-
-        modname = module.get("modname")
-        if modname in {"resource", "pdfannotator"}:
-            return True
-
-        # Page modules often expose their rendered body as index.html. Keep
-        # that path in the HTML scanner, but direct-add binary attachments.
-        if modname == "page" and content.get("filename") != "index.html":
-            return True
-
-        return False
+        return moodle_files.is_direct_moodle_file_content(module, content)
 
     def _scan_html_text_for_links(
         self, html_text, base_url, parent_node, course_id, module_title=None
