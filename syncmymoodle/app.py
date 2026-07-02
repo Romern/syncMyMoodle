@@ -33,6 +33,11 @@ from syncmymoodle.constants import (
 )
 from syncmymoodle.context import SyncContext
 from syncmymoodle.node import NAME_CLASH_ID_UNSET, Node
+from syncmymoodle.pathing import (
+    get_sanitized_node_path,
+    make_conflict_path,
+    sanitize_path_part,
+)
 from syncmymoodle.storage import (
     load_cookies_from_data,
     read_private_gzip_json,
@@ -609,28 +614,7 @@ class SyncMyMoodle:
         return False
 
     def _make_conflict_path(self, path: Path) -> Path:
-        """Return a unique path for storing a locally modified file."""
-        suffix = path.suffix
-        stem = path.stem
-
-        # Derive a short hash from the current contents to make the filename
-        # stable and recognizable while remaining reasonably unique.
-        hash_str = "unknown"
-        try:
-            with path.open("rb") as f:
-                digest = hashlib.file_digest(f, "sha1")
-                hash_str = digest.hexdigest()[:8]
-        except FileNotFoundError:
-            hash_str = "missing"
-
-        conflict_path = path.with_name(f"{stem}.syncconflict.{hash_str}{suffix}")
-        index = 1
-        while conflict_path.exists():
-            conflict_path = path.with_name(
-                f"{stem}.syncconflict.{hash_str}.{index}{suffix}"
-            )
-            index += 1
-        return conflict_path
+        return make_conflict_path(path)
 
     def _local_file_matches_etag(self, path: Path, etag: str) -> bool:
         """Return True if the local file content matches the given ETag hash.
@@ -1763,37 +1747,12 @@ class SyncMyMoodle:
             self._download_all_files(child)
 
     def get_sanitized_node_path(self, node: Node) -> Path:
-        basedir = Path(self.config.get("basedir", "./")).expanduser()
-        path_segments = []
-        for part in node.get_path():
-            if part == "":
-                continue
-            sanitized = self.sanitize(part)
-            if sanitized in {"", ".", ".."}:
-                sanitized = "_"
-            path_segments.append(sanitized)
-
-        target_path = basedir.joinpath(*path_segments)
-        resolved_basedir = basedir.resolve(strict=False)
-        resolved_target = target_path.resolve(strict=False)
-        if not resolved_target.is_relative_to(resolved_basedir):
-            raise ValueError(f"Refusing to write outside basedir: {target_path}")
-        return target_path
+        return get_sanitized_node_path(
+            node, Path(self.config.get("basedir", "./")), self.invalid_chars
+        )
 
     def sanitize(self, path):
-        path = urllib.parse.unquote(path)
-        path = "".join([s for s in path if s not in self.invalid_chars])
-        while path and path[-1] == " ":
-            path = path[:-1]
-        while path and path[0] == " ":
-            path = path[1:]
-
-        # Folders downloaded from Moodle display amp; in places where an
-        # ampersand should be displayed instead. In the web UI, however, the
-        # ampersand is shown correctly, and we're trying to emulate that here.
-        path = path.replace("amp;", "&")
-
-        return path
+        return sanitize_path_part(path, self.invalid_chars)
 
     def _content_type_without_parameters(self, response):
         content_type = response.headers.get("Content-Type", "")
