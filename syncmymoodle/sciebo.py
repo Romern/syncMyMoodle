@@ -13,6 +13,18 @@ logger = logging.getLogger(__name__)
 
 SCIEBO_URL = "https://rwth-aachen.sciebo.de"
 WEBDAV_LOCATION = "/public.php/webdav/"
+
+
+def sharing_token_from_link(link: str) -> str:
+    """Return the public-share token from a ``.../s/<token>`` Sciebo URL.
+
+    Nextcloud public shares use this final path segment as the WebDAV
+    username, so it is a reliable fallback when the share page no longer
+    exposes the token as a hidden ``<input name="sharingToken">``.
+    """
+    return link.split("?", 1)[0].rstrip("/").rsplit("/s/", 1)[-1]
+
+
 PROPFIND_BODY = """<?xml version="1.0" encoding="UTF-8"?>
 <d:propfind xmlns:d="DAV:" xmlns:oc="http://owncloud.org/ns">
   <d:prop>
@@ -66,10 +78,17 @@ def scan_public_shares(
 
         # get the property value of the input tag with the name sharingToken
         sharing_input = soup.find("input", {"name": "sharingToken"})
-        if not sharing_input or not sharing_input.get("value"):
+        if sharing_input and sharing_input.get("value"):
+            sharingToken = cast(str, sharing_input["value"])
+        else:
+            # Newer Sciebo/Nextcloud share pages no longer render the token as a
+            # hidden input. It matches the /s/<token> segment of the share URL,
+            # which is what the public WebDAV endpoint expects, so fall back to
+            # deriving it from the link instead of skipping the share.
+            sharingToken = sharing_token_from_link(link)
+        if not sharingToken:
             log.warning("Sciebo: missing sharingToken for link %s, skipping", link)
             continue
-        sharingToken = cast(str, sharing_input["value"])
         log.info(f"Sciebo sharingToken: {sharingToken}")
 
         # get baseauthentication secret

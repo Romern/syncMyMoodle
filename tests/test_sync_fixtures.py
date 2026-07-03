@@ -1,4 +1,4 @@
-from syncmymoodle import links, opencast, sync
+from syncmymoodle import links, opencast, sciebo, sync
 from syncmymoodle.node import Node
 
 from .helpers import (
@@ -150,6 +150,70 @@ def test_sciebo_public_share_is_cached_per_sync_run():
         "Sciebo Folder | First occurrence/sciebo-share-token-123/slides |  |  | "
         '"folder-slides"',
         "Sciebo File | First occurrence/sciebo-share-token-123/slides/deck.pdf | "
+        "https://rwth-aachen.sciebo.de/public.php/webdav/slides/deck.pdf |  | "
+        "2222222222222222222222222222222222222222",
+    ]
+
+
+def test_sharing_token_from_link_extracts_url_segment():
+    assert (
+        sciebo.sharing_token_from_link("https://rwth-aachen.sciebo.de/s/AbC123")
+        == "AbC123"
+    )
+    # Trailing slashes and query strings must not leak into the token.
+    assert (
+        sciebo.sharing_token_from_link("https://rwth-aachen.sciebo.de/s/AbC123/?x=1")
+        == "AbC123"
+    )
+
+
+def test_sciebo_share_without_token_input_uses_url_token():
+    # Newer share pages drop the <input name="sharingToken">; the token is then
+    # derived from the /s/<token> URL segment so the share still resolves.
+    link = "https://rwth-aachen.sciebo.de/s/share-token-123"
+    public_root = "https://rwth-aachen.sciebo.de/public.php/webdav/"
+    public_slides = "https://rwth-aachen.sciebo.de/public.php/webdav/slides/"
+    syncer = make_context(
+        {
+            "used_modules": {
+                "assign": False,
+                "resource": False,
+                "url": {"youtube": False, "opencast": False, "sciebo": True},
+                "folder": False,
+            }
+        }
+    )
+    session = FakeSession()
+    session.add(
+        "GET",
+        link,
+        FakeResponse(text=load_fixture("sciebo", "public_share_no_token.html")),
+    )
+    session.add(
+        "PROPFIND",
+        public_root,
+        FakeResponse(text=load_fixture("sciebo", "propfind_root.xml")),
+    )
+    session.add(
+        "PROPFIND",
+        public_slides,
+        FakeResponse(text=load_fixture("sciebo", "propfind_slides.xml")),
+    )
+    syncer.session = session
+
+    root = Node("", -1, "Root", None)
+    parent = root.add_child("Section", 1, "Section")
+    links.scan_for_links(syncer, link, parent, 101)
+
+    assert session.count("PROPFIND", public_root) == 1
+    assert node_rows(parent) == [
+        "Sciebo Folder | Section/sciebo-share-token-123 |  |  | ",
+        "Sciebo File | Section/sciebo-share-token-123/readme.pdf | "
+        "https://rwth-aachen.sciebo.de/public.php/webdav/readme.pdf |  | "
+        "1111111111111111111111111111111111111111",
+        "Sciebo Folder | Section/sciebo-share-token-123/slides |  |  | "
+        '"folder-slides"',
+        "Sciebo File | Section/sciebo-share-token-123/slides/deck.pdf | "
         "https://rwth-aachen.sciebo.de/public.php/webdav/slides/deck.pdf |  | "
         "2222222222222222222222222222222222222222",
     ]
