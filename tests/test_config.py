@@ -1,0 +1,66 @@
+from syncmymoodle.config import Config
+
+
+def test_defaults_applied_for_empty_config():
+    cfg = Config.from_dict({})
+    assert cfg.basedir == "./"
+    assert cfg.cookie_file == "./session"
+    assert cfg.course_prefix_handling == "keep"
+    assert cfg.update_files_conflict == "rename"
+    assert cfg.nolinks is False
+    assert cfg.updatefiles is False
+    assert cfg.selected_courses == []
+    assert cfg.exclude_links == []
+    # A default module tree is provided when none is configured.
+    assert cfg.module_enabled("assign")
+    assert cfg.module_enabled("folder")
+    assert cfg.url_module_enabled("opencast")
+
+
+def test_legacy_key_aliases_are_resolved():
+    cfg = Config.from_dict(
+        {
+            "no_links": True,
+            "update_files": True,
+            "skip_sections": ["Hidden*"],
+            "skip_modules": ["Skip Module"],
+        }
+    )
+    assert cfg.nolinks is True
+    assert cfg.updatefiles is True
+    assert cfg.exclude_sections == ["Hidden*"]
+    assert cfg.exclude_modules == ["Skip Module"]
+
+
+def test_canonical_keys_win_over_aliases():
+    cfg = Config.from_dict({"nolinks": False, "no_links": True})
+    assert cfg.nolinks is False
+
+
+def test_quiz_is_forced_off_even_when_enabled():
+    cfg = Config.from_dict({"used_modules": {"url": {"quiz": True, "opencast": True}}})
+    assert cfg.url_module_enabled("quiz") is False
+    assert cfg.url_module_enabled("opencast") is True
+
+
+def test_module_helpers_reflect_toggles():
+    cfg = Config.from_dict(
+        {
+            "used_modules": {
+                "assign": False,
+                "folder": True,
+                "url": {"youtube": False, "sciebo": True},
+            }
+        }
+    )
+    assert cfg.module_enabled("assign") is False
+    assert cfg.module_enabled("folder") is True
+    assert cfg.module_enabled("url") is True  # non-empty url dict is truthy
+    assert cfg.url_module_enabled("youtube") is False
+    assert cfg.url_module_enabled("sciebo") is True
+    assert cfg.url_module_enabled("missing") is False
+
+
+def test_from_dict_accepts_none():
+    cfg = Config.from_dict(None)
+    assert cfg.basedir == "./"

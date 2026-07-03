@@ -11,9 +11,7 @@ logger = logging.getLogger(__name__)
 
 
 def _node_path(ctx: SyncContext, invalid_chars: str, node: Node) -> Path:
-    return get_sanitized_node_path(
-        node, Path(ctx.config.get("basedir", "./")), invalid_chars
-    )
+    return get_sanitized_node_path(node, Path(ctx.config.basedir), invalid_chars)
 
 
 def match_old_cache_child(old_node: Node | None, child: Node) -> Node | None:

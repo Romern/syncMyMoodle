@@ -218,7 +218,7 @@ def check_moodle_availability(
 def login(ctx: SyncContext, log: logging.Logger = logger) -> None:
     session = requests.Session()
     ctx.session = session
-    cookie_file = Path(ctx.config.get("cookie_file", "./session")).expanduser()
+    cookie_file = Path(ctx.config.cookie_file).expanduser()
     cookie_payload = read_private_gzip_json(cookie_file, "session cookie")
     if cookie_payload is not None:
         load_cookies_from_data(session.cookies, cookie_payload)
@@ -268,8 +268,8 @@ def login(ctx: SyncContext, log: logging.Logger = logger) -> None:
             soup, "csrf_token", "username/password form", log
         )
         login_data = {
-            "j_username": ctx.config["user"],
-            "j_password": ctx.config["password"],
+            "j_username": ctx.config.user,
+            "j_password": ctx.config.password,
             "_eventId_proceed": "",
             "csrf_token": csrf_token,
         }
@@ -295,7 +295,7 @@ def login(ctx: SyncContext, log: logging.Logger = logger) -> None:
 
         print("Setting TOTP generator")
         totp_selection_data = {
-            "fudis_selected_token_ids_input": ctx.config["totp"],
+            "fudis_selected_token_ids_input": ctx.config.totp,
             "_eventId_proceed": "",
             "csrf_token": csrf_token,
         }
@@ -317,11 +317,11 @@ def login(ctx: SyncContext, log: logging.Logger = logger) -> None:
             sys.exit(1)
 
         csrf_token = _require_input_value(soup, "csrf_token", "TOTP entry form", log)
-        totp_secret = ctx.config.get("totpsecret")
+        totp_secret = ctx.config.totpsecret
         if not totp_secret:
-            totp_input = input(f"Enter TOTP for generator {ctx.config['totp']}:\n")
+            totp_input = input(f"Enter TOTP for generator {ctx.config.totp}:\n")
         else:
-            totp_input = generate_totp(cast(str, totp_secret))
+            totp_input = generate_totp(totp_secret)
             print(f"Generated TOTP from provided secret: {totp_input}")
 
         totp_login_data = {

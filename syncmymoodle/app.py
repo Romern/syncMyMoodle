@@ -7,6 +7,7 @@ from syncmymoodle import downloader
 from syncmymoodle import links as links_api
 from syncmymoodle import moodle as moodle_api
 from syncmymoodle import sync_handlers
+from syncmymoodle.config import Config
 from syncmymoodle.constants import INVALID_CHARS
 from syncmymoodle.context import SyncContext
 from syncmymoodle.course_cache import (
@@ -44,15 +45,17 @@ class SyncMyMoodle:
     block_size = 1024
     invalid_chars = INVALID_CHARS
 
-    def __init__(self, config: dict[str, Any]) -> None:
+    def __init__(self, config: Config | dict[str, Any]) -> None:
+        if not isinstance(config, Config):
+            config = Config.from_dict(config)
         self.ctx = SyncContext(config=config)
 
     @property
-    def config(self) -> dict[str, Any]:
+    def config(self) -> Config:
         return self.ctx.config
 
     @config.setter
-    def config(self, value: dict[str, Any]) -> None:
+    def config(self, value: Config) -> None:
         self.ctx.config = value
 
     @property
@@ -291,23 +294,21 @@ class SyncMyMoodle:
             )
             course_id = course["id"]
 
-            selected_courses = self.config.get("selected_courses", [])
+            selected_courses = self.config.selected_courses
             if selected_courses:
                 # selected_courses is an explicit allowlist that overrides
                 # skip_courses (and, below, only_sync_semester).
                 if not self._course_id_in_filter(course_id, selected_courses):
                     continue
-            elif self._course_id_in_filter(
-                course_id, self.config.get("skip_courses", [])
-            ):
+            elif self._course_id_in_filter(course_id, self.config.skip_courses):
                 continue
 
             semestername = (course.get("idnumber") or "")[:4] or "unknown-semester"
             # Skip not selected semesters (selected_courses overrides this)
             if (
                 not selected_courses
-                and self.config.get("only_sync_semester", [])
-                and semestername not in self.config.get("only_sync_semester", [])
+                and self.config.only_sync_semester
+                and semestername not in self.config.only_sync_semester
             ):
                 continue
 
@@ -333,9 +334,7 @@ class SyncMyMoodle:
             }
 
             assignments = None
-            if self.config.get("used_modules", {}).get("assign", {}) and (
-                "assign" in module_names
-            ):
+            if self.config.module_enabled("assign") and ("assign" in module_names):
                 assignments = self.get_assignment(course_id)
             assignments_by_cmid = {
                 assignment["cmid"]: assignment
@@ -344,9 +343,7 @@ class SyncMyMoodle:
             }
 
             folders = []
-            if self.config.get("used_modules", {}).get("folder", {}) and (
-                "folder" in module_names
-            ):
+            if self.config.module_enabled("folder") and ("folder" in module_names):
                 folders = self.get_folders_by_courses(course_id)
             folders_by_coursemodule = {
                 folder.get("coursemodule"): folder for folder in folders
@@ -416,7 +413,7 @@ class SyncMyMoodle:
 
     def get_sanitized_node_path(self, node: Node) -> Path:
         return get_sanitized_node_path(
-            node, Path(self.config.get("basedir", "./")), self.invalid_chars
+            node, Path(self.config.basedir), self.invalid_chars
         )
 
     def _node_allows_html_download(self, node: Node) -> bool:

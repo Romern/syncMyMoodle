@@ -6,12 +6,13 @@ from typing import Any
 
 import requests
 
+from syncmymoodle.config import Config
 from syncmymoodle.node import Node
 
 
 @dataclass
 class SyncContext:
-    config: dict[str, Any]
+    config: Config
     session: requests.Session | None = None
     session_key: str | None = None
     wstoken: str | None = None

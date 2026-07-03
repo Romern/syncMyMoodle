@@ -137,12 +137,9 @@ def download_file(
 
     # Respect filetype/name exclusions up front so that excluded files never
     # trigger conflict handling, displace local files, or create temp files.
-    if node.name.split(".")[-1] in ctx.config.get("exclude_filetypes", []):
+    if node.name.split(".")[-1] in ctx.config.exclude_filetypes:
         return True
-    if any(
-        fnmatchcase(node.name, pattern)
-        for pattern in ctx.config.get("exclude_files", [])
-    ):
+    if any(fnmatchcase(node.name, pattern) for pattern in ctx.config.exclude_files):
         return True
 
     # If we already downloaded this path during the current run, skip any
@@ -160,7 +157,7 @@ def download_file(
     old_node = None
     conflict_rename_pending = False
     if downloadpath.exists():
-        if not ctx.config.get("updatefiles"):
+        if not ctx.config.updatefiles:
             return True
 
         # Try to find a cached node for this file from the per-course cache.
@@ -203,7 +200,7 @@ def download_file(
 
         # Check for potential local modifications since the last sync to avoid
         # silently overwriting user changes.
-        conflict_mode = ctx.config.get("update_files_conflict", "rename")
+        conflict_mode = ctx.config.update_files_conflict
         if conflict_mode not in {"rename", "keep", "none", "overwrite"}:
             conflict_mode = "rename"
 

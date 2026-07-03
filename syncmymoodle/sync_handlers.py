@@ -37,9 +37,7 @@ def handle_assignment_module(
     assignments_by_cmid: dict[Any, Any],
 ) -> None:
     # Get Assignments
-    if module["modname"] == "assign" and ctx.config.get("used_modules", {}).get(
-        "assign", {}
-    ):
+    if module["modname"] == "assign" and ctx.config.module_enabled("assign"):
         ass = assignments_by_cmid.get(module["id"])
         if not ass:
             return
@@ -97,9 +95,7 @@ def handle_resource_like_module(
         "pdfannotator",
     ]:
         return
-    if module["modname"] == "resource" and not ctx.config.get("used_modules", {}).get(
-        "resource", {}
-    ):
+    if module["modname"] == "resource" and not ctx.config.module_enabled("resource"):
         return
     for c in module.get("contents", []):
         file_url = c.get("fileurl")
@@ -128,9 +124,7 @@ def handle_folder_module(
     folders_by_coursemodule: dict[Any, Any],
 ) -> None:
     # Get Folders
-    if module["modname"] == "folder" and ctx.config.get("used_modules", {}).get(
-        "folder", {}
-    ):
+    if module["modname"] == "folder" and ctx.config.module_enabled("folder"):
         folder_node = section_node.add_child(module["name"], module["id"], "Folder")
         if folder_node is None:
             return
@@ -167,20 +161,16 @@ def handle_embedded_link_module(
         "page",
         "label",
         "h5pactivity",
-    ] or not ctx.config.get(
-        "used_modules", {}
-    ).get("url", {}):
+    ] or not ctx.config.module_enabled("url"):
         return
 
     if module["modname"] == "page":
-        opencast_enabled = (
-            ctx.config.get("used_modules", {}).get("url", {}).get("opencast", {})
-        )
+        opencast_enabled = ctx.config.url_module_enabled("opencast")
         html_url = (
             module.get("url")
             or f'https://moodle.rwth-aachen.de/mod/page/view.php?id={module["id"]}'
         )
-        scan_page_links = not ctx.config.get("nolinks") and not filters.should_skip_url(
+        scan_page_links = not ctx.config.nolinks and not filters.should_skip_url(
             ctx.config, html_url, "page link"
         )
         if opencast_enabled or scan_page_links:
@@ -298,9 +288,7 @@ def handle_opencast_lti_module(
     log: logging.Logger = logger,
 ) -> None:
     # New OpenCast integration
-    if module["modname"] != "lti" or not ctx.config.get("used_modules", {}).get(
-        "url", {}
-    ).get("opencast", {}):
+    if module["modname"] != "lti" or not ctx.config.url_module_enabled("opencast"):
         return
 
     info_url = (
@@ -412,9 +400,7 @@ def handle_quiz_module(
     section_node: Node,
 ) -> None:
     # Integration for Quizzes
-    if module["modname"] != "quiz" or not ctx.config.get("used_modules", {}).get(
-        "url", {}
-    ).get("quiz", {}):
+    if module["modname"] != "quiz" or not ctx.config.url_module_enabled("quiz"):
         return
 
     info_url = f'https://moodle.rwth-aachen.de/mod/quiz/view.php?id={module["id"]}'
