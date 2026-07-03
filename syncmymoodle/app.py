@@ -21,72 +21,6 @@ class SyncMyMoodle:
             config = Config.from_dict(config)
         self.ctx = SyncContext(config=config)
 
-    @property
-    def config(self) -> Config:
-        return self.ctx.config
-
-    @config.setter
-    def config(self, value: Config | dict[str, Any]) -> None:
-        if not isinstance(value, Config):
-            value = Config.from_dict(value)
-        self.ctx.config = value
-
-    @property
-    def session(self) -> Any:
-        return self.ctx.session
-
-    @session.setter
-    def session(self, value: Any) -> None:
-        self.ctx.session = value
-
-    @property
-    def session_key(self) -> str | None:
-        return self.ctx.session_key
-
-    @session_key.setter
-    def session_key(self, value: str | None) -> None:
-        self.ctx.session_key = value
-
-    @property
-    def wstoken(self) -> str | None:
-        return self.ctx.wstoken
-
-    @wstoken.setter
-    def wstoken(self, value: str | None) -> None:
-        self.ctx.wstoken = value
-
-    @property
-    def user_id(self) -> Any:
-        return self.ctx.user_id
-
-    @user_id.setter
-    def user_id(self, value: Any) -> None:
-        self.ctx.user_id = value
-
-    @property
-    def user_private_access_key(self) -> str | None:
-        return self.ctx.user_private_access_key
-
-    @user_private_access_key.setter
-    def user_private_access_key(self, value: str | None) -> None:
-        self.ctx.user_private_access_key = value
-
-    @property
-    def root_node(self) -> Node | None:
-        return self.ctx.root_node
-
-    @root_node.setter
-    def root_node(self, value: Node | None) -> None:
-        self.ctx.root_node = value
-
-    @property
-    def _opencast_error_count(self) -> int:
-        return self.ctx.opencast_error_count
-
-    @_opencast_error_count.setter
-    def _opencast_error_count(self, value: int) -> None:
-        self.ctx.opencast_error_count = value
-
     def cache_root_node(self) -> None:
         return cache_root_node(self.ctx, INVALID_CHARS, logger)
 
@@ -98,55 +32,57 @@ class SyncMyMoodle:
     # Moodle Web Services API
 
     def get_moodle_wstoken(self) -> str:
-        token = moodle_api.get_moodle_wstoken(self.session, logger)
-        self.wstoken = token
+        token = moodle_api.get_moodle_wstoken(self.ctx.session, logger)
+        self.ctx.wstoken = token
         return token
 
     def get_userid(self) -> tuple[Any, str]:
         user_id, access_key = moodle_api.get_userid(
-            self.ctx.require_session(), cast(str, self.wstoken), logger
+            self.ctx.require_session(), cast(str, self.ctx.wstoken), logger
         )
-        self.user_id = user_id
-        self.user_private_access_key = access_key
+        self.ctx.user_id = user_id
+        self.ctx.user_private_access_key = access_key
         return user_id, access_key
 
     def sync(self) -> None:
         """Retrieves the file tree for all courses"""
-        if not self.session:
+        config = self.ctx.config
+        if not self.ctx.session:
             raise Exception("You need to login() first.")
-        if not self.wstoken:
+        if not self.ctx.wstoken:
             raise Exception("You need to get_moodle_wstoken() first.")
-        if not self.user_id:
+        if not self.ctx.user_id:
             raise Exception("You need to get_userid() first.")
         session = self.ctx.require_session()
-        wstoken = self.wstoken
+        wstoken = self.ctx.wstoken
+        user_id = self.ctx.user_id
         root_node = Node("", -1, "Root", None)
-        self.root_node = root_node
+        self.ctx.root_node = root_node
 
         # Syncing all courses
-        for course in moodle_api.get_all_courses(session, wstoken, self.user_id):
+        for course in moodle_api.get_all_courses(session, wstoken, user_id):
             course_name = filters.format_course_name(
                 course.get("shortname") or f"course-{course.get('id')}",
-                self.config,
+                config,
                 logger,
             )
             course_id = course["id"]
 
-            selected_courses = self.config.selected_courses
+            selected_courses = config.selected_courses
             if selected_courses:
                 # selected_courses is an explicit allowlist that overrides
                 # skip_courses (and, below, only_sync_semester).
                 if not filters.course_id_in_filter(course_id, selected_courses):
                     continue
-            elif filters.course_id_in_filter(course_id, self.config.skip_courses):
+            elif filters.course_id_in_filter(course_id, config.skip_courses):
                 continue
 
             semestername = (course.get("idnumber") or "")[:4] or "unknown-semester"
             # Skip not selected semesters (selected_courses overrides this)
             if (
                 not selected_courses
-                and self.config.only_sync_semester
-                and semestername not in self.config.only_sync_semester
+                and config.only_sync_semester
+                and semestername not in config.only_sync_semester
             ):
                 continue
 
@@ -172,7 +108,7 @@ class SyncMyMoodle:
             }
 
             assignments = None
-            if self.config.module_enabled("assign") and ("assign" in module_names):
+            if config.module_enabled("assign") and ("assign" in module_names):
                 assignments = moodle_api.get_assignment(session, wstoken, course_id)
             assignments_by_cmid = {
                 assignment["cmid"]: assignment
@@ -181,7 +117,7 @@ class SyncMyMoodle:
             }
 
             folders = []
-            if self.config.module_enabled("folder") and ("folder" in module_names):
+            if config.module_enabled("folder") and ("folder" in module_names):
                 folders = moodle_api.get_folders_by_courses(session, wstoken, course_id)
             folders_by_coursemodule = {
                 folder.get("coursemodule"): folder for folder in folders
@@ -200,7 +136,7 @@ class SyncMyMoodle:
                 if isinstance(section, str):
                     logger.error(f"Error syncing section in {course_name}: {section}")
                     continue
-                if filters.should_skip_section(self.config, section, course_id, logger):
+                if filters.should_skip_section(config, section, course_id, logger):
                     continue
                 logger.info("------SECTION-DATA------")
                 logger.info(json.dumps(section))
@@ -220,7 +156,7 @@ class SyncMyMoodle:
                 for module in section["modules"]:
                     try:
                         if filters.should_skip_module(
-                            self.config, module, course_id, logger
+                            config, module, course_id, logger
                         ):
                             continue
 

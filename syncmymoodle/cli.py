@@ -267,7 +267,7 @@ def main() -> None:
     # If we saw multiple Opencast backend errors send a reminder
     # to check the RWTH ITC status page before filing a bug.
     try:
-        if smm._opencast_error_count >= 5:
+        if smm.ctx.opencast_error_count >= 5:
             logger.warning(
                 "Multiple Opencast backend errors occurred. Please check the RWTH "
                 "ITC status page before reporting an issue on GitHub: "

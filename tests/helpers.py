@@ -146,14 +146,14 @@ def make_syncer(config: dict[str, Any] | None = None) -> SyncMyMoodle:
     if config:
         merged_config.update(config)
     syncer = SyncMyMoodle(merged_config)
-    syncer.wstoken = "fake-webservice-token"
-    syncer.user_id = 10001
-    syncer.session_key = "fake-sesskey"
+    syncer.ctx.wstoken = "fake-webservice-token"
+    syncer.ctx.user_id = 10001
+    syncer.ctx.session_key = "fake-sesskey"
     return syncer
 
 
 def node_path(syncer: SyncMyMoodle, node: Node) -> Path:
-    return get_sanitized_node_path(node, Path(syncer.config.basedir), INVALID_CHARS)
+    return get_sanitized_node_path(node, Path(syncer.ctx.config.basedir), INVALID_CHARS)
 
 
 def download_file(syncer: SyncMyMoodle, node: Node) -> bool:

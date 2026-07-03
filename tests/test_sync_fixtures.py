@@ -22,11 +22,11 @@ def test_nested_moodle_folder_paths_are_preserved(monkeypatch):
         courses,
         {101: load_json_fixture("moodle", "nested_folder_course.json")},
     )
-    syncer.session = FakeSession()
+    syncer.ctx.session = FakeSession()
 
     syncer.sync()
 
-    assert_snapshot("nested_folder_tree.txt", node_rows(syncer.root_node))
+    assert_snapshot("nested_folder_tree.txt", node_rows(syncer.ctx.root_node))
 
 
 def test_assignment_intro_opencast_embed_is_added_to_assignment_node(monkeypatch):
@@ -48,7 +48,7 @@ def test_assignment_intro_opencast_embed_is_added_to_assignment_node(monkeypatch
         {102: load_json_fixture("moodle", "assignment_opencast_course.json")},
         {102: load_json_fixture("moodle", "assignment_opencast_assignments.json")},
     )
-    syncer.session = FakeSession()
+    syncer.ctx.session = FakeSession()
 
     authenticated = []
     monkeypatch.setattr(
@@ -70,7 +70,7 @@ def test_assignment_intro_opencast_embed_is_added_to_assignment_node(monkeypatch
     syncer.sync()
 
     assert authenticated == [(102, "11111111-2222-4333-8444-555555555555")]
-    assert_snapshot("assignment_opencast_tree.txt", node_rows(syncer.root_node))
+    assert_snapshot("assignment_opencast_tree.txt", node_rows(syncer.ctx.root_node))
 
 
 def test_skip_rules_apply_to_sections_modules_links_and_domains(monkeypatch):
@@ -95,11 +95,11 @@ def test_skip_rules_apply_to_sections_modules_links_and_domains(monkeypatch):
         courses,
         {103: load_json_fixture("moodle", "skip_rules_course.json")},
     )
-    syncer.session = FakeSession()
+    syncer.ctx.session = FakeSession()
 
     syncer.sync()
 
-    assert_snapshot("skip_rules_tree.txt", node_rows(syncer.root_node))
+    assert_snapshot("skip_rules_tree.txt", node_rows(syncer.ctx.root_node))
 
 
 def test_sciebo_public_share_is_cached_per_sync_run():
@@ -130,7 +130,7 @@ def test_sciebo_public_share_is_cached_per_sync_run():
         public_slides,
         FakeResponse(text=load_fixture("sciebo", "propfind_slides.xml")),
     )
-    syncer.session = session
+    syncer.ctx.session = session
 
     root = Node("", -1, "Root", None)
     first_parent = root.add_child("First occurrence", 1, "Section")
@@ -213,7 +213,7 @@ def test_mixed_course_sync_tree_covers_common_module_surfaces(monkeypatch):
         h5p_iframe_url,
         FakeResponse(text=load_fixture("html", "h5p_iframe.html")),
     )
-    syncer.session = session
+    syncer.ctx.session = session
     monkeypatch.setattr(
         opencast,
         "authenticate_episode",
@@ -236,7 +236,7 @@ def test_mixed_course_sync_tree_covers_common_module_surfaces(monkeypatch):
     assert session.count("GET", page_url) == 1
     assert session.count("GET", h5p_url) == 1
     assert session.count("GET", h5p_iframe_url) == 1
-    assert_snapshot("mixed_course_tree.txt", node_rows(syncer.root_node))
+    assert_snapshot("mixed_course_tree.txt", node_rows(syncer.ctx.root_node))
 
 
 def test_opencast_lti_single_and_series_use_lti_and_api_routes(monkeypatch):
@@ -311,11 +311,11 @@ def test_opencast_lti_single_and_series_use_lti_and_api_routes(monkeypatch):
             json_payload=load_json_fixture("opencast", "episode_series_b.json")
         ),
     )
-    syncer.session = session
+    syncer.ctx.session = session
 
     syncer.sync()
 
     assert session.count("GET", single_lti_url) == 1
     assert session.count("GET", series_lti_url) == 1
     assert session.count("POST", lti_submit_url) == 2
-    assert_snapshot("opencast_lti_tree.txt", node_rows(syncer.root_node))
+    assert_snapshot("opencast_lti_tree.txt", node_rows(syncer.ctx.root_node))

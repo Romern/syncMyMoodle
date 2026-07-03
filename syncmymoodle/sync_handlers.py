@@ -30,12 +30,14 @@ class ModuleContext:
 
 
 def handle_assignment_module(
-    ctx: SyncContext,
+    module_context: ModuleContext,
     module: dict[str, Any],
-    section_node: Node,
-    course_id: Any,
-    assignments_by_cmid: dict[Any, Any],
 ) -> None:
+    ctx = module_context.ctx
+    section_node = module_context.section_node
+    course_id = module_context.course_id
+    assignments_by_cmid = module_context.assignments_by_cmid
+
     # Get Assignments
     if module["modname"] == "assign" and ctx.config.module_enabled("assign"):
         ass = assignments_by_cmid.get(module["id"])
@@ -81,11 +83,13 @@ def handle_assignment_module(
 
 
 def handle_resource_like_module(
-    ctx: SyncContext,
+    module_context: ModuleContext,
     module: dict[str, Any],
-    section_node: Node,
-    course_id: Any,
 ) -> None:
+    ctx = module_context.ctx
+    section_node = module_context.section_node
+    course_id = module_context.course_id
+
     # Get Resources or URLs
     if module["modname"] not in [
         "resource",
@@ -117,12 +121,14 @@ def handle_resource_like_module(
 
 
 def handle_folder_module(
-    ctx: SyncContext,
+    module_context: ModuleContext,
     module: dict[str, Any],
-    section_node: Node,
-    course_id: Any,
-    folders_by_coursemodule: dict[Any, Any],
 ) -> None:
+    ctx = module_context.ctx
+    section_node = module_context.section_node
+    course_id = module_context.course_id
+    folders_by_coursemodule = module_context.folders_by_coursemodule
+
     # Get Folders
     if module["modname"] == "folder" and ctx.config.module_enabled("folder"):
         folder_node = section_node.add_child(module["name"], module["id"], "Folder")
@@ -150,12 +156,14 @@ def handle_folder_module(
 
 
 def handle_embedded_link_module(
-    ctx: SyncContext,
+    module_context: ModuleContext,
     module: dict[str, Any],
-    section_node: Node,
-    course_id: Any,
-    log: logging.Logger = logger,
 ) -> None:
+    ctx = module_context.ctx
+    section_node = module_context.section_node
+    course_id = module_context.course_id
+    log = module_context.log
+
     # Get embedded videos in pages or labels
     if module["modname"] not in [
         "page",
@@ -281,12 +289,14 @@ def handle_embedded_link_module(
 
 
 def handle_opencast_lti_module(
-    ctx: SyncContext,
+    module_context: ModuleContext,
     module: dict[str, Any],
-    section_node: Node,
-    course_node: Node,
-    log: logging.Logger = logger,
 ) -> None:
+    ctx = module_context.ctx
+    section_node = module_context.section_node
+    course_node = module_context.course_node
+    log = module_context.log
+
     # New OpenCast integration
     if module["modname"] != "lti" or not ctx.config.url_module_enabled("opencast"):
         return
@@ -395,10 +405,12 @@ def handle_opencast_lti_module(
 
 
 def handle_quiz_module(
-    ctx: SyncContext,
+    module_context: ModuleContext,
     module: dict[str, Any],
-    section_node: Node,
 ) -> None:
+    ctx = module_context.ctx
+    section_node = module_context.section_node
+
     # Integration for Quizzes
     if module["modname"] != "quiz" or not ctx.config.url_module_enabled("quiz"):
         return
@@ -431,76 +443,13 @@ def handle_quiz_module(
         )
 
 
-def _assignment_handler(module_context: ModuleContext, module: dict[str, Any]) -> None:
-    handle_assignment_module(
-        module_context.ctx,
-        module,
-        module_context.section_node,
-        module_context.course_id,
-        module_context.assignments_by_cmid,
-    )
-
-
-def _resource_like_handler(
-    module_context: ModuleContext, module: dict[str, Any]
-) -> None:
-    handle_resource_like_module(
-        module_context.ctx,
-        module,
-        module_context.section_node,
-        module_context.course_id,
-    )
-
-
-def _folder_handler(module_context: ModuleContext, module: dict[str, Any]) -> None:
-    handle_folder_module(
-        module_context.ctx,
-        module,
-        module_context.section_node,
-        module_context.course_id,
-        module_context.folders_by_coursemodule,
-    )
-
-
-def _embedded_link_handler(
-    module_context: ModuleContext, module: dict[str, Any]
-) -> None:
-    handle_embedded_link_module(
-        module_context.ctx,
-        module,
-        module_context.section_node,
-        module_context.course_id,
-        module_context.log,
-    )
-
-
-def _opencast_lti_handler(
-    module_context: ModuleContext, module: dict[str, Any]
-) -> None:
-    handle_opencast_lti_module(
-        module_context.ctx,
-        module,
-        module_context.section_node,
-        module_context.course_node,
-        module_context.log,
-    )
-
-
-def _quiz_handler(module_context: ModuleContext, module: dict[str, Any]) -> None:
-    handle_quiz_module(
-        module_context.ctx,
-        module,
-        module_context.section_node,
-    )
-
-
 MODULE_HANDLERS = (
-    _assignment_handler,
-    _resource_like_handler,
-    _folder_handler,
-    _embedded_link_handler,
-    _opencast_lti_handler,
-    _quiz_handler,
+    handle_assignment_module,
+    handle_resource_like_module,
+    handle_folder_module,
+    handle_embedded_link_module,
+    handle_opencast_lti_module,
+    handle_quiz_module,
 )
 
 

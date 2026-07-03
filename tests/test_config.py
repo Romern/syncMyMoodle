@@ -1,5 +1,6 @@
 import json
 import sys
+from types import SimpleNamespace
 
 import syncmymoodle.cli as cli
 from syncmymoodle.app import SyncMyMoodle
@@ -86,10 +87,9 @@ def test_from_dict_accepts_none():
     assert cfg.basedir == "./"
 
 
-def test_syncmymoodle_config_setter_accepts_dict():
-    smm = SyncMyMoodle({})
-    smm.config = {"basedir": "/tmp/syncmymoodle-test"}
-    assert smm.config.basedir == "/tmp/syncmymoodle-test"
+def test_syncmymoodle_initializes_context_config_from_dict():
+    smm = SyncMyMoodle({"basedir": "/tmp/syncmymoodle-test"})
+    assert smm.ctx.config.basedir == "/tmp/syncmymoodle-test"
 
 
 def test_cli_preserves_canonical_config_keys(tmp_path, monkeypatch):
@@ -111,7 +111,7 @@ def test_cli_preserves_canonical_config_keys(tmp_path, monkeypatch):
     class FakeSyncMyMoodle:
         def __init__(self, config):
             captured_config.update(config)
-            self._opencast_error_count = 0
+            self.ctx = SimpleNamespace(opencast_error_count=0)
 
         def login(self):
             pass

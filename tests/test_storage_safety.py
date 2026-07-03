@@ -52,7 +52,7 @@ def test_download_uses_course_cache_to_skip_unchanged_file(tmp_path):
     )
     # A real cache is written after a successful download.
     cached_file.is_downloaded = True
-    cached_syncer.root_node = cached_root
+    cached_syncer.ctx.root_node = cached_root
     cached_syncer.cache_root_node()
 
     download_path = node_path(cached_syncer, cached_file)
@@ -60,7 +60,7 @@ def test_download_uses_course_cache_to_skip_unchanged_file(tmp_path):
     download_path.write_bytes(b"already downloaded")
 
     syncer = make_syncer(config)
-    syncer.session = FakeSession()
+    syncer.ctx.session = FakeSession()
     current_root = Node("", -1, "Root", None)
     current_semester = current_root.add_child("26ss", None, "Semester")
     current_course = current_semester.add_child("Cache Behavior", 301, "Course")
@@ -74,4 +74,4 @@ def test_download_uses_course_cache_to_skip_unchanged_file(tmp_path):
     )
 
     assert download_file(syncer, current_file) is True
-    assert syncer.session.calls == []
+    assert syncer.ctx.session.calls == []

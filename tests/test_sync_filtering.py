@@ -29,12 +29,12 @@ def test_selected_courses_override_semester_filter(monkeypatch):
         }
     )
     install_filter_fixtures(monkeypatch, synced_course_ids, FILTER_COURSES)
-    syncer.session = FakeSession()
+    syncer.ctx.session = FakeSession()
 
     syncer.sync()
 
     assert synced_course_ids == [202]
-    assert node_rows(syncer.root_node) == [
+    assert node_rows(syncer.ctx.root_node) == [
         "Semester | 25ws |  |  | ",
         "Course | 25ws/Selected Old Semester |  |  | ",
     ]
@@ -49,12 +49,12 @@ def test_skip_courses_and_semester_filter_limit_synced_courses(monkeypatch):
         }
     )
     install_filter_fixtures(monkeypatch, synced_course_ids, FILTER_COURSES)
-    syncer.session = FakeSession()
+    syncer.ctx.session = FakeSession()
 
     syncer.sync()
 
     assert synced_course_ids == [201]
-    assert node_rows(syncer.root_node) == [
+    assert node_rows(syncer.ctx.root_node) == [
         "Semester | 26ss |  |  | ",
         "Course | 26ss/Current Semester |  |  | ",
     ]
@@ -73,7 +73,7 @@ def _run_filter(config, monkeypatch):
     synced = []
     syncer = make_syncer(config)
     install_filter_fixtures(monkeypatch, synced, SUBSTRING_COURSES)
-    syncer.session = FakeSession()
+    syncer.ctx.session = FakeSession()
     syncer.sync()
     return synced
 
