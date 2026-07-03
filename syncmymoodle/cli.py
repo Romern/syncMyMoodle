@@ -13,7 +13,10 @@ from syncmymoodle import course_cache, downloader
 from syncmymoodle import moodle as moodle_api
 from syncmymoodle import rwth, sync
 from syncmymoodle.config import Config
-from syncmymoodle.constants import COURSE_PREFIX_HANDLING_OPTIONS
+from syncmymoodle.constants import (
+    COURSE_PREFIX_HANDLING_OPTIONS,
+    RWTH_MOODLE_STATUS_URL,
+)
 from syncmymoodle.context import SyncContext
 
 try:
@@ -281,7 +284,7 @@ def run(ctx: SyncContext) -> None:
             logger.warning(
                 "Multiple Opencast backend errors occurred. Please check the RWTH "
                 "ITC status page before reporting an issue on GitHub: "
-                "https://maintenance.itc.rwth-aachen.de/ticket/status/messages/499"
+                f"{RWTH_MOODLE_STATUS_URL}"
             )
     except Exception:
         # Never let summary logging break the main flow.

@@ -6,11 +6,13 @@ from typing import Any, cast
 
 from bs4 import BeautifulSoup as bs
 
+from syncmymoodle.constants import RWTH_MOODLE_STATUS_URL
 from syncmymoodle.context import SyncContext
 
 logger = logging.getLogger(__name__)
 
 OPENCAST_LTI_URL = "https://engage.streaming.rwth-aachen.de/lti"
+OPENCAST_SEARCH_URL = "https://engage.streaming.rwth-aachen.de/search/episode.json"
 
 
 def log_backend_issue(
@@ -33,7 +35,7 @@ def log_backend_issue(
         log.warning(
             "Multiple Opencast backend errors occurred. Please check the RWTH "
             "ITC status page before reporting an issue on GitHub: "
-            "https://maintenance.itc.rwth-aachen.de/ticket/status/messages/499"
+            f"{RWTH_MOODLE_STATUS_URL}"
         )
         ctx.opencast_status_hint_logged = True
 
@@ -257,10 +259,7 @@ def extract_track_from_episode(
     if episode_id in ctx.opencast_track_cache:
         return ctx.opencast_track_cache[episode_id]
 
-    episode_url = (
-        "https://engage.streaming.rwth-aachen.de/search/episode.json"
-        f"?id={episode_id}"
-    )
+    episode_url = f"{OPENCAST_SEARCH_URL}?id={episode_id}"
     episodejson = fetch_json(ctx, episode_url, f"episode {episode_id}", log)
     if episodejson is None:
         return False

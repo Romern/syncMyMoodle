@@ -358,8 +358,7 @@ def handle_opencast_lti_module(
             return
 
         series_url = (
-            "https://engage.streaming.rwth-aachen.de/search/episode.json"
-            f"?limit=100&offset=0&sid={series_id}"
+            f"{opencast_api.OPENCAST_SEARCH_URL}" f"?limit=100&offset=0&sid={series_id}"
         )
         series_response = opencast_api.fetch_json(
             ctx, series_url, f"series {series_id}", log
