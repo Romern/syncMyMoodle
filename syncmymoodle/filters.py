@@ -3,7 +3,12 @@ import urllib.parse
 from fnmatch import fnmatchcase
 from typing import Any
 
-from syncmymoodle.constants import COURSE_PREFIX_HANDLING_OPTIONS, COURSE_PREFIX_RE
+from syncmymoodle.config import Config
+from syncmymoodle.constants import (
+    COURSE_PREFIX_HANDLING_OPTIONS,
+    COURSE_PREFIX_RE,
+    MOODLE_URL,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -34,25 +39,26 @@ def course_id_in_filter(course_id: Any, entries: Any) -> bool:
     return False
 
 
-def configured_patterns(
-    config: dict[str, Any], *keys: str, course_id=None
-) -> list[str]:
+def pattern_list(value: Any, course_id: Any = None) -> list[str]:
+    """Flatten a config exclusion value into a list of glob patterns.
+
+    ``value`` may be a flat list, or a per-course dict of the form
+    ``{"*": [...], "<course_id>": [...]}``.
+    """
     patterns = []
-    for key in keys:
-        value = config.get(key)
-        if isinstance(value, dict):
-            patterns.extend(as_list(value.get("*")))
-            if course_id is not None:
-                patterns.extend(as_list(value.get(str(course_id))))
-        else:
-            patterns.extend(as_list(value))
+    if isinstance(value, dict):
+        patterns.extend(as_list(value.get("*")))
+        if course_id is not None:
+            patterns.extend(as_list(value.get(str(course_id))))
+    else:
+        patterns.extend(as_list(value))
     return [str(pattern) for pattern in patterns if pattern is not None]
 
 
 def format_course_name(
-    course_name: str, config: dict[str, Any], log: logging.Logger = logger
+    course_name: str, config: Config, log: logging.Logger = logger
 ) -> str:
-    prefix_handling = config.get("course_prefix_handling", "keep")
+    prefix_handling = config.course_prefix_handling
     if prefix_handling == "keep":
         return course_name
     if prefix_handling not in COURSE_PREFIX_HANDLING_OPTIONS:
@@ -99,7 +105,7 @@ def domain_matches(netloc: str, allowed_domain: str) -> bool:
 
 
 def should_skip_url(
-    config: dict[str, Any],
+    config: Config,
     url: str | None,
     context: str = "link",
     log: logging.Logger = logger,
@@ -108,11 +114,11 @@ def should_skip_url(
         return False
 
     url = str(url).replace("&amp;", "&")
-    if matches_any_pattern([url], configured_patterns(config, "exclude_links")):
+    if matches_any_pattern([url], pattern_list(config.exclude_links)):
         log.info("Skipping %s %s because it matches exclude_links", context, url)
         return True
 
-    allowed_domains = configured_patterns(config, "allowed_domains")
+    allowed_domains = pattern_list(config.allowed_domains)
     if allowed_domains:
         parsed_url = urllib.parse.urlparse(url)
         if parsed_url.scheme in {"http", "https"} and parsed_url.netloc:
@@ -130,14 +136,12 @@ def should_skip_url(
 
 
 def should_skip_section(
-    config: dict[str, Any],
+    config: Config,
     section: dict[str, Any],
     course_id: Any,
     log: logging.Logger = logger,
 ) -> bool:
-    patterns = configured_patterns(
-        config, "exclude_sections", "skip_sections", course_id=course_id
-    )
+    patterns = pattern_list(config.exclude_sections, course_id=course_id)
     if not patterns:
         return False
 
@@ -155,14 +159,12 @@ def should_skip_section(
 
 
 def should_skip_module(
-    config: dict[str, Any],
+    config: Config,
     module: dict[str, Any],
     course_id: Any,
     log: logging.Logger = logger,
 ) -> bool:
-    patterns = configured_patterns(
-        config, "exclude_modules", "skip_modules", course_id=course_id
-    )
+    patterns = pattern_list(config.exclude_modules, course_id=course_id)
     if not patterns:
         return False
 
@@ -175,8 +177,8 @@ def should_skip_module(
     if module_id and modname:
         module_urls.extend(
             [
-                f"https://moodle.rwth-aachen.de/mod/{modname}/view.php?id={module_id}",
-                f"https://moodle.rwth-aachen.de/mod/{modname}/launch.php?id={module_id}",
+                f"{MOODLE_URL}mod/{modname}/view.php?id={module_id}",
+                f"{MOODLE_URL}mod/{modname}/launch.php?id={module_id}",
             ]
         )
 

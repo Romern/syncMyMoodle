@@ -2,18 +2,19 @@ import gzip
 import json
 import stat
 
+from syncmymoodle import course_cache
 from syncmymoodle.node import Node
 from syncmymoodle.storage import read_private_gzip_json, write_private_gzip_json
 
-from .helpers import FakeSession, make_syncer
+from .helpers import FakeSession, download_file, make_context, node_path
 
 
 def test_sanitized_node_path_stays_inside_basedir(tmp_path):
-    syncer = make_syncer({"basedir": str(tmp_path)})
+    syncer = make_context({"basedir": str(tmp_path)})
     root = Node("", -1, "Root", None)
     bad_node = root.add_child("%2e%2e", 1, "Section")
 
-    target_path = syncer.get_sanitized_node_path(bad_node)
+    target_path = node_path(syncer, bad_node)
 
     assert target_path == tmp_path / "_"
     assert target_path.resolve(strict=False).is_relative_to(tmp_path)
@@ -38,7 +39,7 @@ def test_private_gzip_json_roundtrip_uses_private_permissions(tmp_path):
 
 def test_download_uses_course_cache_to_skip_unchanged_file(tmp_path):
     config = {"basedir": str(tmp_path), "updatefiles": True}
-    cached_syncer = make_syncer(config)
+    cached_syncer = make_context(config)
     cached_root = Node("", -1, "Root", None)
     semester = cached_root.add_child("26ss", None, "Semester")
     course = semester.add_child("Cache Behavior", 301, "Course")
@@ -53,13 +54,13 @@ def test_download_uses_course_cache_to_skip_unchanged_file(tmp_path):
     # A real cache is written after a successful download.
     cached_file.is_downloaded = True
     cached_syncer.root_node = cached_root
-    cached_syncer.cache_root_node()
+    course_cache.cache_root_node(cached_syncer)
 
-    download_path = cached_syncer.get_sanitized_node_path(cached_file)
+    download_path = node_path(cached_syncer, cached_file)
     download_path.parent.mkdir(parents=True, exist_ok=True)
     download_path.write_bytes(b"already downloaded")
 
-    syncer = make_syncer(config)
+    syncer = make_context(config)
     syncer.session = FakeSession()
     current_root = Node("", -1, "Root", None)
     current_semester = current_root.add_child("26ss", None, "Semester")
@@ -73,5 +74,5 @@ def test_download_uses_course_cache_to_skip_unchanged_file(tmp_path):
         timemodified=1710000300,
     )
 
-    assert syncer.download_file(current_file) is True
+    assert download_file(syncer, current_file) is True
     assert syncer.session.calls == []

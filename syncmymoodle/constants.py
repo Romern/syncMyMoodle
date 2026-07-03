@@ -1,5 +1,8 @@
 import re
 
+# Characters removed from any path segment derived from Moodle names/URLs.
+INVALID_CHARS = '~"#%&*:<>?/\\{|}'
+
 YOUTUBE_ID_LENGTH = 11
 YOUTUBE_LINK_RE = re.compile(
     r"(https?://(www\.)?(youtube\.com/(watch\?[a-zA-Z0-9_=&-]*v=|embed/)|youtu.be/).{11})"

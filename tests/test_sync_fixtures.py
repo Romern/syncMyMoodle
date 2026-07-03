@@ -1,3 +1,4 @@
+from syncmymoodle import links, opencast, sync
 from syncmymoodle.node import Node
 
 from .helpers import (
@@ -7,29 +8,29 @@ from .helpers import (
     install_moodle_fixtures,
     load_fixture,
     load_json_fixture,
-    make_syncer,
+    make_context,
     node_rows,
 )
 
 
-def test_nested_moodle_folder_paths_are_preserved():
+def test_nested_moodle_folder_paths_are_preserved(monkeypatch):
     courses = [load_json_fixture("moodle", "courses.json")[0]]
-    syncer = make_syncer()
+    syncer = make_context()
     install_moodle_fixtures(
-        syncer,
+        monkeypatch,
         courses,
         {101: load_json_fixture("moodle", "nested_folder_course.json")},
     )
     syncer.session = FakeSession()
 
-    syncer.sync()
+    sync.sync(syncer)
 
     assert_snapshot("nested_folder_tree.txt", node_rows(syncer.root_node))
 
 
-def test_assignment_intro_opencast_embed_is_added_to_assignment_node():
+def test_assignment_intro_opencast_embed_is_added_to_assignment_node(monkeypatch):
     courses = [load_json_fixture("moodle", "courses.json")[1]]
-    syncer = make_syncer(
+    syncer = make_context(
         {
             "used_modules": {
                 "assign": True,
@@ -40,7 +41,7 @@ def test_assignment_intro_opencast_embed_is_added_to_assignment_node():
         }
     )
     install_moodle_fixtures(
-        syncer,
+        monkeypatch,
         courses,
         {102: load_json_fixture("moodle", "assignment_opencast_course.json")},
         {102: load_json_fixture("moodle", "assignment_opencast_assignments.json")},
@@ -48,23 +49,31 @@ def test_assignment_intro_opencast_embed_is_added_to_assignment_node():
     syncer.session = FakeSession()
 
     authenticated = []
-    syncer._authenticate_opencast_episode = (  # type: ignore[method-assign]
-        lambda course_id, episode_id: authenticated.append((course_id, episode_id))
-        or True
+    monkeypatch.setattr(
+        opencast,
+        "authenticate_episode",
+        lambda ctx, course_id, episode_id, *a, **k: authenticated.append(
+            (course_id, episode_id)
+        )
+        or True,
     )
-    syncer.extractTrackFromEpisode = (  # type: ignore[method-assign]
-        lambda episode_id: f"https://video.example.test/{episode_id}/presentation.mp4"
+    monkeypatch.setattr(
+        opencast,
+        "extract_track_from_episode",
+        lambda ctx, episode_id, *a, **k: (
+            f"https://video.example.test/{episode_id}/presentation.mp4"
+        ),
     )
 
-    syncer.sync()
+    sync.sync(syncer)
 
     assert authenticated == [(102, "11111111-2222-4333-8444-555555555555")]
     assert_snapshot("assignment_opencast_tree.txt", node_rows(syncer.root_node))
 
 
-def test_skip_rules_apply_to_sections_modules_links_and_domains():
+def test_skip_rules_apply_to_sections_modules_links_and_domains(monkeypatch):
     courses = [load_json_fixture("moodle", "courses.json")[2]]
-    syncer = make_syncer(
+    syncer = make_context(
         {
             "exclude_sections": {"*": ["Hidden*"]},
             "exclude_modules": {"103": ["Skip Module"]},
@@ -79,13 +88,13 @@ def test_skip_rules_apply_to_sections_modules_links_and_domains():
         }
     )
     install_moodle_fixtures(
-        syncer,
+        monkeypatch,
         courses,
         {103: load_json_fixture("moodle", "skip_rules_course.json")},
     )
     syncer.session = FakeSession()
 
-    syncer.sync()
+    sync.sync(syncer)
 
     assert_snapshot("skip_rules_tree.txt", node_rows(syncer.root_node))
 
@@ -94,7 +103,7 @@ def test_sciebo_public_share_is_cached_per_sync_run():
     link = "https://rwth-aachen.sciebo.de/s/share-token-123"
     public_root = "https://rwth-aachen.sciebo.de/public.php/webdav/"
     public_slides = "https://rwth-aachen.sciebo.de/public.php/webdav/slides/"
-    syncer = make_syncer(
+    syncer = make_context(
         {
             "used_modules": {
                 "assign": False,
@@ -124,8 +133,8 @@ def test_sciebo_public_share_is_cached_per_sync_run():
     first_parent = root.add_child("First occurrence", 1, "Section")
     second_parent = root.add_child("Second occurrence", 2, "Section")
 
-    syncer.scanForLinks(link, first_parent, 101)
-    syncer.scanForLinks(link, second_parent, 101)
+    links.scan_for_links(syncer, link, first_parent, 101)
+    links.scan_for_links(syncer, link, second_parent, 101)
 
     assert session.count("GET", link) == 1
     assert session.count("PROPFIND", public_root) == 1
@@ -146,14 +155,14 @@ def test_sciebo_public_share_is_cached_per_sync_run():
     ]
 
 
-def test_mixed_course_sync_tree_covers_common_module_surfaces():
+def test_mixed_course_sync_tree_covers_common_module_surfaces(monkeypatch):
     courses = load_json_fixture("moodle", "mixed_courses.json")
     direct_pdf = "https://files.example.test/direct.pdf"
     html_overview = "https://files.example.test/overview.html"
     page_url = "https://moodle.rwth-aachen.de/mod/page/view.php?id=315"
     h5p_url = "https://moodle.rwth-aachen.de/mod/h5pactivity/view.php?id=317"
     h5p_iframe_url = "https://moodle.rwth-aachen.de/h5p/embed/317"
-    syncer = make_syncer(
+    syncer = make_context(
         {
             "used_modules": {
                 "assign": True,
@@ -164,7 +173,7 @@ def test_mixed_course_sync_tree_covers_common_module_surfaces():
         }
     )
     install_moodle_fixtures(
-        syncer,
+        monkeypatch,
         courses,
         {104: load_json_fixture("moodle", "mixed_course.json")},
         {104: load_json_fixture("moodle", "mixed_assignments.json")},
@@ -201,12 +210,20 @@ def test_mixed_course_sync_tree_covers_common_module_surfaces():
         FakeResponse(text=load_fixture("html", "h5p_iframe.html")),
     )
     syncer.session = session
-    syncer._authenticate_opencast_episode = lambda course_id, episode_id: True  # type: ignore[method-assign]
-    syncer.extractTrackFromEpisode = lambda episode_id: (  # type: ignore[method-assign]
-        f"https://video.example.test/{episode_id}/presentation.mp4"
+    monkeypatch.setattr(
+        opencast,
+        "authenticate_episode",
+        lambda ctx, course_id, episode_id, *a, **k: True,
+    )
+    monkeypatch.setattr(
+        opencast,
+        "extract_track_from_episode",
+        lambda ctx, episode_id, *a, **k: (
+            f"https://video.example.test/{episode_id}/presentation.mp4"
+        ),
     )
 
-    syncer.sync()
+    sync.sync(syncer)
 
     assert session.count("HEAD", direct_pdf) == 1
     assert session.count("GET", direct_pdf) == 0
@@ -218,7 +235,7 @@ def test_mixed_course_sync_tree_covers_common_module_surfaces():
     assert_snapshot("mixed_course_tree.txt", node_rows(syncer.root_node))
 
 
-def test_opencast_lti_single_and_series_use_lti_and_api_routes():
+def test_opencast_lti_single_and_series_use_lti_and_api_routes(monkeypatch):
     courses = [load_json_fixture("moodle", "courses.json")[0]]
     single_lti_url = (
         "https://moodle.rwth-aachen.de/mod/lti/launch.php?id=501&triggerview=0"
@@ -235,7 +252,7 @@ def test_opencast_lti_single_and_series_use_lti_and_api_routes():
         "https://engage.streaming.rwth-aachen.de/search/episode.json"
         f"?limit=100&offset=0&sid={series_id}"
     )
-    syncer = make_syncer(
+    syncer = make_context(
         {
             "used_modules": {
                 "assign": False,
@@ -246,7 +263,7 @@ def test_opencast_lti_single_and_series_use_lti_and_api_routes():
         }
     )
     install_moodle_fixtures(
-        syncer,
+        monkeypatch,
         courses,
         {101: load_json_fixture("moodle", "opencast_lti_course.json")},
     )
@@ -291,7 +308,7 @@ def test_opencast_lti_single_and_series_use_lti_and_api_routes():
     )
     syncer.session = session
 
-    syncer.sync()
+    sync.sync(syncer)
 
     assert session.count("GET", single_lti_url) == 1
     assert session.count("GET", series_lti_url) == 1

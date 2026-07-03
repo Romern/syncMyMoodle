@@ -64,7 +64,7 @@ def read_private_gzip_json(path: Path, description: str) -> Any:
         return None
 
 
-def cookies_to_data(cookie_jar) -> dict[str, Any]:
+def cookies_to_data(cookie_jar: Any) -> dict[str, Any]:
     cookies = []
     for cookie in cookie_jar:
         cookies.append(
@@ -81,7 +81,7 @@ def cookies_to_data(cookie_jar) -> dict[str, Any]:
     return {"format": "syncmymoodle.cookies.v1", "cookies": cookies}
 
 
-def load_cookies_from_data(cookie_jar, payload: Any) -> None:
+def load_cookies_from_data(cookie_jar: Any, payload: Any) -> None:
     if not isinstance(payload, dict):
         return
     if payload.get("format") != "syncmymoodle.cookies.v1":
@@ -105,5 +105,5 @@ def load_cookies_from_data(cookie_jar, payload: Any) -> None:
         cookie_jar.set_cookie(cookie)
 
 
-def save_session_cookies(cookie_file: Path, cookie_jar) -> None:
+def save_session_cookies(cookie_file: Path, cookie_jar: Any) -> None:
     write_private_gzip_json(cookie_file, cookies_to_data(cookie_jar))

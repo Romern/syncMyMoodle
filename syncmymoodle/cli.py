@@ -9,8 +9,15 @@ from argparse import ArgumentParser
 from pathlib import Path
 from types import ModuleType
 
-from syncmymoodle.app import SyncMyMoodle
-from syncmymoodle.constants import COURSE_PREFIX_HANDLING_OPTIONS
+from syncmymoodle import course_cache, downloader
+from syncmymoodle import moodle as moodle_api
+from syncmymoodle import rwth, sync
+from syncmymoodle.config import Config
+from syncmymoodle.constants import (
+    COURSE_PREFIX_HANDLING_OPTIONS,
+    RWTH_MOODLE_STATUS_URL,
+)
+from syncmymoodle.context import SyncContext
 
 try:
     import keyring as imported_keyring
@@ -22,7 +29,7 @@ except ImportError:
 logger = logging.getLogger(__name__)
 
 
-def main():
+def main() -> None:
     parser = ArgumentParser(
         prog="python3 -m syncmymoodle",
         description="Synchronization client for RWTH Moodle. All optional arguments override those in config.json.",
@@ -147,64 +154,47 @@ def main():
             with local_config.open() as f:
                 config.update(json.load(f))
 
-    config["user"] = args.user or config.get("user")
-    config["password"] = args.password or config.get("password")
-    config["totp"] = args.totp or config.get("totp")
-    config["totpsecret"] = args.totpsecret or config.get("totpsecret")
-    config["cookie_file"] = args.cookiefile or config.get("cookie_file", "./session")
-    config["selected_courses"] = (
-        args.courses.split(",") if args.courses else config.get("selected_courses", [])
-    )
-    config["only_sync_semester"] = (
-        args.semester.split(",")
-        if args.semester
-        else config.get("only_sync_semester", [])
-    )
-    config["basedir"] = args.basedir or config.get("basedir", "./")
-    config["course_prefix_handling"] = args.courseprefix or config.get(
-        "course_prefix_handling", "keep"
-    )
-    config["use_secret_service"] = (
-        args.secretservice if keyring else None
-    ) or config.get("use_secret_service")
-    config["secret_service_store_totp_secret"] = (
-        args.secretservicetotpsecret if keyring else None
-    ) or config.get("secret_service_store_totp_secret")
-    config["skip_courses"] = (
-        args.skipcourses.split(",")
-        if args.skipcourses
-        else config.get("skip_courses", [])
-    )
-    config["nolinks"] = args.nolinks or config.get("no_links")
-    config["used_modules"] = config.get("used_modules") or {
-        "assign": True,
-        "resource": True,
-        "url": {"youtube": True, "opencast": True, "sciebo": True, "quiz": False},
-        "folder": True,
-    }
-    config["exclude_filetypes"] = (
-        args.excludefiletypes.split(",")
-        if args.excludefiletypes
-        else config.get("exclude_filetypes", [])
-    )
-    config["exclude_files"] = config.get("exclude_files", [])
-    config["exclude_links"] = config.get("exclude_links", [])
-    config["allowed_domains"] = config.get("allowed_domains", [])
-    config["exclude_sections"] = config.get(
-        "exclude_sections", config.get("skip_sections", [])
-    )
-    config["exclude_modules"] = config.get(
-        "exclude_modules", config.get("skip_modules", [])
-    )
-    config["updatefiles"] = args.updatefiles or config.get("update_files", False)
-    config["update_files_conflict"] = args.updatefilesconflict or config.get(
-        "update_files_conflict", "rename"
-    )
+    if args.user is not None:
+        config["user"] = args.user
+    if args.password is not None:
+        config["password"] = args.password
+    if args.totp is not None:
+        config["totp"] = args.totp
+    if args.totpsecret is not None:
+        config["totpsecret"] = args.totpsecret
+    if args.cookiefile is not None:
+        config["cookie_file"] = args.cookiefile
+    if args.courses is not None:
+        config["selected_courses"] = args.courses.split(",")
+    if args.semester is not None:
+        config["only_sync_semester"] = args.semester.split(",")
+    if args.basedir is not None:
+        config["basedir"] = args.basedir
+    if args.courseprefix is not None:
+        config["course_prefix_handling"] = args.courseprefix
+    if keyring and args.secretservice:
+        config["use_secret_service"] = True
+    if keyring and args.secretservicetotpsecret:
+        config["secret_service_store_totp_secret"] = True
+    if args.skipcourses is not None:
+        config["skip_courses"] = args.skipcourses.split(",")
+    if args.nolinks:
+        config["nolinks"] = True
+    if args.excludefiletypes is not None:
+        config["exclude_filetypes"] = args.excludefiletypes.split(",")
+    if args.updatefiles:
+        config["updatefiles"] = True
+    if args.updatefilesconflict is not None:
+        config["update_files_conflict"] = args.updatefilesconflict
 
     logging.basicConfig(level=args.loglevel)
 
-    if config["used_modules"]["url"].get("quiz"):
-        config["used_modules"]["url"]["quiz"] = False
+    url_modules = (
+        config.get("used_modules", {}).get("url")
+        if isinstance(config.get("used_modules"), dict)
+        else None
+    )
+    if isinstance(url_modules, dict) and url_modules.get("quiz"):
         logger.warning(
             "Quiz PDF generation is disabled until the pdfkit/wkhtmltopdf "
             "renderer is replaced with a safer implementation."
@@ -268,27 +258,33 @@ def main():
         )
         sys.exit(1)
 
-    smm = SyncMyMoodle(config)
+    run(SyncContext(config=Config.from_dict(config)))
 
+
+def run(ctx: SyncContext) -> None:
+    """Execute a full sync run against an already-configured context."""
     print("Logging in...")
-    smm.login()
-    smm.get_moodle_wstoken()
-    smm.get_userid()
+    rwth.login(ctx, logger)
+    wstoken = moodle_api.get_moodle_wstoken(ctx.session, logger)
+    ctx.wstoken = wstoken
+    ctx.user_id, ctx.user_private_access_key = moodle_api.get_userid(
+        ctx.require_session(), wstoken, logger
+    )
     print("Syncing file tree...")
-    smm.sync()
+    sync.sync(ctx)
     print("Downloading files...")
-    smm.download_all_files()
+    downloader.download_all_files(ctx, logger)
     print("Saving root node as cache...")
-    smm.cache_root_node()
+    course_cache.cache_root_node(ctx, logger)
 
     # If we saw multiple Opencast backend errors send a reminder
     # to check the RWTH ITC status page before filing a bug.
     try:
-        if smm._opencast_error_count >= 5:
+        if ctx.opencast_error_count >= 5:
             logger.warning(
                 "Multiple Opencast backend errors occurred. Please check the RWTH "
                 "ITC status page before reporting an issue on GitHub: "
-                "https://maintenance.itc.rwth-aachen.de/ticket/status/messages/499"
+                f"{RWTH_MOODLE_STATUS_URL}"
             )
     except Exception:
         # Never let summary logging break the main flow.

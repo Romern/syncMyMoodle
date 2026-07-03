@@ -4,13 +4,16 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+import requests
+
+from syncmymoodle.config import Config
 from syncmymoodle.node import Node
 
 
 @dataclass
 class SyncContext:
-    config: dict[str, Any]
-    session: Any = None
+    config: Config
+    session: requests.Session | None = None
     session_key: str | None = None
     wstoken: str | None = None
     user_id: Any = None
@@ -23,3 +26,9 @@ class SyncContext:
     opencast_episode_auth_cache: set[tuple[Any, str]] = field(default_factory=set)
     opencast_track_cache: dict[str, str] = field(default_factory=dict)
     downloaded_paths: set[Path] | None = None
+
+    def require_session(self) -> requests.Session:
+        """Return the active session, or raise if login() has not run yet."""
+        if self.session is None:
+            raise Exception("You need to login() first.")
+        return self.session

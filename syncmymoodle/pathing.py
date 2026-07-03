@@ -2,12 +2,13 @@ import hashlib
 import urllib.parse
 from pathlib import Path
 
+from syncmymoodle.constants import INVALID_CHARS
 from syncmymoodle.node import Node
 
 
-def sanitize_path_part(path: str, invalid_chars: str) -> str:
+def sanitize_path_part(path: str) -> str:
     path = urllib.parse.unquote(path)
-    path = "".join([s for s in path if s not in invalid_chars])
+    path = "".join([s for s in path if s not in INVALID_CHARS])
     while path and path[-1] == " ":
         path = path[:-1]
     while path and path[0] == " ":
@@ -21,13 +22,13 @@ def sanitize_path_part(path: str, invalid_chars: str) -> str:
     return path
 
 
-def get_sanitized_node_path(node: Node, basedir: Path, invalid_chars: str) -> Path:
+def get_sanitized_node_path(node: Node, basedir: Path) -> Path:
     basedir = basedir.expanduser()
     path_segments = []
     for part in node.get_path():
         if part == "":
             continue
-        sanitized = sanitize_path_part(part, invalid_chars)
+        sanitized = sanitize_path_part(part)
         if sanitized in {"", ".", ".."}:
             sanitized = "_"
         path_segments.append(sanitized)
