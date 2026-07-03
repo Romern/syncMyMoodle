@@ -1,7 +1,7 @@
 import logging
 import urllib.parse
 from dataclasses import dataclass
-from typing import Any, cast
+from typing import Any, Callable, cast
 
 from bs4 import BeautifulSoup as bs
 
@@ -28,6 +28,20 @@ class ModuleContext:
     log: logging.Logger = logger
 
 
+Handler = Callable[[ModuleContext, dict[str, Any]], None]
+
+# Handlers register themselves here via @register_handler and run, per module,
+# in registration (definition) order.
+MODULE_HANDLERS: list[Handler] = []
+
+
+def register_handler(handler: Handler) -> Handler:
+    """Register a sync module handler so ``handle_module`` dispatches to it."""
+    MODULE_HANDLERS.append(handler)
+    return handler
+
+
+@register_handler
 def handle_assignment_module(
     module_context: ModuleContext,
     module: dict[str, Any],
@@ -80,6 +94,7 @@ def handle_assignment_module(
             )
 
 
+@register_handler
 def handle_resource_like_module(
     module_context: ModuleContext,
     module: dict[str, Any],
@@ -118,6 +133,7 @@ def handle_resource_like_module(
             )
 
 
+@register_handler
 def handle_folder_module(
     module_context: ModuleContext,
     module: dict[str, Any],
@@ -152,6 +168,7 @@ def handle_folder_module(
             )
 
 
+@register_handler
 def handle_embedded_link_module(
     module_context: ModuleContext,
     module: dict[str, Any],
@@ -285,6 +302,7 @@ def handle_embedded_link_module(
         )
 
 
+@register_handler
 def handle_opencast_lti_module(
     module_context: ModuleContext,
     module: dict[str, Any],
@@ -401,6 +419,7 @@ def handle_opencast_lti_module(
             )
 
 
+@register_handler
 def handle_quiz_module(
     module_context: ModuleContext,
     module: dict[str, Any],
@@ -438,16 +457,6 @@ def handle_quiz_module(
             "Quiz",
             url=review_url,
         )
-
-
-MODULE_HANDLERS = (
-    handle_assignment_module,
-    handle_resource_like_module,
-    handle_folder_module,
-    handle_embedded_link_module,
-    handle_opencast_lti_module,
-    handle_quiz_module,
-)
 
 
 def handle_module(module_context: ModuleContext, module: dict[str, Any]) -> None:
