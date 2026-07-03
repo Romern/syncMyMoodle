@@ -9,7 +9,7 @@ from .helpers import (
     FakeSession,
     build_single_file_tree,
     download_file,
-    make_syncer,
+    make_context,
     node_path,
 )
 
@@ -29,19 +29,19 @@ def seed_course_cache(config, *, timemodified, etag, is_downloaded=True):
     successfully fetched is marked is_downloaded=True; pass False to simulate a
     previous run whose download failed.
     """
-    cache_syncer = make_syncer(config)
+    cache_syncer = make_context(config)
     cached_root, cached_file = build_single_file_tree(
         "slides.pdf", URL, timemodified=timemodified, etag=etag
     )
     cached_file.is_downloaded = is_downloaded
-    cache_syncer.ctx.root_node = cached_root
-    cache_syncer.cache_root_node()
+    cache_syncer.root_node = cached_root
+    course_cache.cache_root_node(cache_syncer)
 
 
 def make_run_syncer(config, *, timemodified):
     """Return a syncer plus the leaf node for the current (changed) sync run."""
-    syncer = make_syncer(config)
-    syncer.ctx.session = FakeSession()
+    syncer = make_context(config)
+    syncer.session = FakeSession()
     _, file_node = build_single_file_tree("slides.pdf", URL, timemodified=timemodified)
     return syncer, file_node
 
@@ -57,7 +57,7 @@ def test_download_streams_chunks_to_disk_and_records_metadata(tmp_path):
     download_path = node_path(syncer, file_node)
     chunks = [b"%PDF-1.4 first-chunk ", b"second-chunk ", b"third-chunk"]
     etag = '"deadbeefdeadbeefdeadbeefdeadbeefdeadbeef"'
-    syncer.ctx.session.add(
+    syncer.session.add(
         "GET",
         URL,
         FakeResponse(
@@ -75,7 +75,7 @@ def test_download_streams_chunks_to_disk_and_records_metadata(tmp_path):
     assert int(download_path.stat().st_mtime) == 1710000500
     # The ETag is persisted on the node for the next run's change detection.
     assert file_node.etag == etag
-    assert syncer.ctx.session.count("GET", URL) == 1
+    assert syncer.session.count("GET", URL) == 1
 
 
 def test_download_is_skipped_for_excluded_filetypes(tmp_path):
@@ -86,16 +86,16 @@ def test_download_is_skipped_for_excluded_filetypes(tmp_path):
     # No GET route registered: a request would raise in the fake session.
     assert download_file(syncer, file_node) is True
     assert not download_path.exists()
-    assert syncer.ctx.session.calls == []
+    assert syncer.session.calls == []
 
 
 def test_download_path_is_deduplicated_within_a_run(tmp_path):
     # Two distinct nodes that resolve to the same on-disk path must download
     # only once, exercising the lazy-initialised ``_downloaded_paths`` guard.
     config = {"basedir": str(tmp_path)}
-    syncer = make_syncer(config)
-    syncer.ctx.session = FakeSession()
-    syncer.ctx.session.add(
+    syncer = make_context(config)
+    syncer.session = FakeSession()
+    syncer.session.add(
         "GET",
         URL,
         FakeResponse(headers={"Content-Type": "application/pdf"}, chunks=[b"data"]),
@@ -110,7 +110,7 @@ def test_download_path_is_deduplicated_within_a_run(tmp_path):
 
     assert download_file(syncer, first_node) is True
     assert download_file(syncer, second_node) is True
-    assert syncer.ctx.session.count("GET", URL) == 1
+    assert syncer.session.count("GET", URL) == 1
 
 
 # --------------------------------------------------------------------------
@@ -137,7 +137,7 @@ def _setup_conflict(tmp_path, conflict_mode):
 
 
 def _add_new_remote(syncer, body=b"updated remote content"):
-    syncer.ctx.session.add(
+    syncer.session.add(
         "GET",
         URL,
         FakeResponse(headers={"Content-Type": "application/pdf"}, chunks=[body]),
@@ -151,7 +151,7 @@ def test_conflict_keep_preserves_local_file_and_skips_download(tmp_path):
     # No GET registered: keep mode must not contact the server at all.
     assert download_file(syncer, file_node) is True
     assert download_path.read_bytes() == local_modified
-    assert syncer.ctx.session.calls == []
+    assert syncer.session.calls == []
 
 
 def test_conflict_none_behaves_like_keep(tmp_path):
@@ -159,7 +159,7 @@ def test_conflict_none_behaves_like_keep(tmp_path):
 
     assert download_file(syncer, file_node) is True
     assert download_path.read_bytes() == local_modified
-    assert syncer.ctx.session.calls == []
+    assert syncer.session.calls == []
 
 
 def test_conflict_overwrite_replaces_local_file(tmp_path):
@@ -170,7 +170,7 @@ def test_conflict_overwrite_replaces_local_file(tmp_path):
     assert download_path.read_bytes() == new_body
     # Overwrite mode leaves no side-car conflict copy behind.
     assert list(download_path.parent.glob("*.syncconflict.*")) == []
-    assert syncer.ctx.session.count("GET", URL) == 1
+    assert syncer.session.count("GET", URL) == 1
 
 
 def test_conflict_rename_moves_local_file_aside_before_download(tmp_path):
@@ -187,7 +187,7 @@ def test_conflict_rename_moves_local_file_aside_before_download(tmp_path):
     conflicts = list(download_path.parent.glob("*.syncconflict.*"))
     assert len(conflicts) == 1
     assert conflicts[0].read_bytes() == local_modified
-    assert syncer.ctx.session.count("GET", URL) == 1
+    assert syncer.session.count("GET", URL) == 1
 
 
 def test_unknown_conflict_mode_defaults_to_rename(tmp_path):
@@ -219,7 +219,7 @@ def test_unchanged_timemodified_skips_download_despite_local_edit(tmp_path):
     download_path.write_bytes(b"locally edited content")
 
     assert download_file(syncer, file_node) is True
-    assert syncer.ctx.session.calls == []
+    assert syncer.session.calls == []
     assert list(download_path.parent.glob("*.syncconflict.*")) == []
 
 
@@ -233,7 +233,7 @@ def test_failed_previous_download_is_retried_not_skipped(tmp_path):
     download_path = node_path(syncer, file_node)
     download_path.parent.mkdir(parents=True, exist_ok=True)
     download_path.write_bytes(b"OLD STALE VERSION")
-    syncer.ctx.session.add(
+    syncer.session.add(
         "GET",
         URL,
         FakeResponse(
@@ -242,7 +242,7 @@ def test_failed_previous_download_is_retried_not_skipped(tmp_path):
     )
 
     assert download_file(syncer, file_node) is True
-    assert syncer.ctx.session.count("GET", URL) == 1
+    assert syncer.session.count("GET", URL) == 1
     assert download_path.read_bytes() == b"NEW CORRECT VERSION"
 
 
@@ -257,7 +257,7 @@ def test_successful_previous_download_with_same_timemodified_is_skipped(tmp_path
     download_path.write_bytes(b"already downloaded")
 
     assert download_file(syncer, file_node) is True
-    assert syncer.ctx.session.calls == []
+    assert syncer.session.calls == []
 
 
 def test_etag_failure_falls_back_to_timestamp_heuristic_conflict(tmp_path, monkeypatch):
@@ -315,7 +315,7 @@ def test_rename_conflict_failed_html_update_preserves_canonical_file(tmp_path):
     syncer, file_node, download_path, local_modified = _setup_conflict(
         tmp_path, "rename"
     )
-    syncer.ctx.session.add(
+    syncer.session.add(
         "GET",
         URL,
         FakeResponse(
@@ -334,7 +334,7 @@ def test_rename_conflict_non_2xx_update_preserves_canonical_file(tmp_path):
     syncer, file_node, download_path, local_modified = _setup_conflict(
         tmp_path, "rename"
     )
-    syncer.ctx.session.add("GET", URL, FakeResponse(status_code=403, text="forbidden"))
+    syncer.session.add("GET", URL, FakeResponse(status_code=403, text="forbidden"))
 
     assert download_file(syncer, file_node) is False
     assert download_path.read_bytes() == local_modified
@@ -359,7 +359,7 @@ def test_excluded_filetype_existing_file_is_not_touched(tmp_path):
     # No GET route registered: a request would raise in the fake session.
     assert download_file(syncer, file_node) is True
     assert download_path.read_bytes() == b"locally edited content"
-    assert syncer.ctx.session.calls == []
+    assert syncer.session.calls == []
     assert list(download_path.parent.glob("*.syncconflict.*")) == []
 
 
@@ -382,7 +382,7 @@ def test_resume_appends_when_remote_unchanged(tmp_path):
     config = {"basedir": str(tmp_path)}
     syncer, file_node = make_run_syncer(config, timemodified=1710000500)
     download_path = _seed_partial(syncer, file_node, b"HEAD-", '"v1"')
-    syncer.ctx.session.add(
+    syncer.session.add(
         "GET",
         URL,
         FakeResponse(
@@ -404,7 +404,7 @@ def test_resume_discards_partial_when_remote_served_full_content(tmp_path):
     config = {"basedir": str(tmp_path)}
     syncer, file_node = make_run_syncer(config, timemodified=1710000500)
     download_path = _seed_partial(syncer, file_node, b"OLD-PARTIAL", '"v1"')
-    syncer.ctx.session.add(
+    syncer.session.add(
         "GET",
         URL,
         FakeResponse(
@@ -426,7 +426,7 @@ def test_resume_aborts_when_server_ignores_if_range(tmp_path):
     config = {"basedir": str(tmp_path)}
     syncer, file_node = make_run_syncer(config, timemodified=1710000500)
     download_path = _seed_partial(syncer, file_node, b"OLD-PARTIAL", '"v1"')
-    syncer.ctx.session.add(
+    syncer.session.add(
         "GET",
         URL,
         FakeResponse(
@@ -448,7 +448,7 @@ def test_resume_aborts_when_partial_response_has_no_etag(tmp_path):
     config = {"basedir": str(tmp_path)}
     syncer, file_node = make_run_syncer(config, timemodified=1710000500)
     download_path = _seed_partial(syncer, file_node, b"OLD-PARTIAL", '"v1"')
-    syncer.ctx.session.add(
+    syncer.session.add(
         "GET",
         URL,
         FakeResponse(
@@ -471,7 +471,7 @@ def test_unrecognized_partial_without_sidecar_is_not_resumed(tmp_path):
     download_path = node_path(syncer, file_node)
     download_path.parent.mkdir(parents=True, exist_ok=True)
     (download_path.parent / f".{download_path.name}.smmpart").write_bytes(b"STALE")
-    syncer.ctx.session.add(
+    syncer.session.add(
         "GET",
         URL,
         FakeResponse(headers={"Content-Type": "application/pdf"}, chunks=[b"FRESH"]),
@@ -507,11 +507,11 @@ def _sciebo_tree(etag, is_downloaded=False):
 
 
 def _seed_sciebo_cache(config, etag, content):
-    cache_syncer = make_syncer(config)
+    cache_syncer = make_context(config)
     root, file_node = _sciebo_tree(etag, is_downloaded=True)
-    cache_syncer.ctx.root_node = root
-    cache_syncer.cache_root_node()
-    download_path = node_path(make_syncer(config), file_node)
+    cache_syncer.root_node = root
+    course_cache.cache_root_node(cache_syncer)
+    download_path = node_path(make_context(config), file_node)
     download_path.parent.mkdir(parents=True, exist_ok=True)
     download_path.write_bytes(content)
     return download_path
@@ -522,10 +522,10 @@ def test_sciebo_changed_etag_triggers_redownload(tmp_path):
     config = {"basedir": str(tmp_path), "updatefiles": True}
     old = b"old sciebo content"
     download_path = _seed_sciebo_cache(config, sha1(old), old)
-    syncer = make_syncer(config)
-    syncer.ctx.session = FakeSession()
+    syncer = make_context(config)
+    syncer.session = FakeSession()
     new = b"new sciebo content"
-    syncer.ctx.session.add(
+    syncer.session.add(
         "GET",
         SCIEBO_URL,
         FakeResponse(headers={"Content-Type": "application/pdf"}, chunks=[new]),
@@ -533,7 +533,7 @@ def test_sciebo_changed_etag_triggers_redownload(tmp_path):
     _, current = _sciebo_tree(sha1(new))
 
     assert download_file(syncer, current) is True
-    assert syncer.ctx.session.count("GET", SCIEBO_URL) == 1
+    assert syncer.session.count("GET", SCIEBO_URL) == 1
     assert download_path.read_bytes() == new
     assert list(download_path.parent.glob("*.syncconflict.*")) == []
 
@@ -542,12 +542,12 @@ def test_sciebo_unchanged_etag_skips_download(tmp_path):
     config = {"basedir": str(tmp_path), "updatefiles": True}
     content = b"sciebo content"
     download_path = _seed_sciebo_cache(config, sha1(content), content)
-    syncer = make_syncer(config)
-    syncer.ctx.session = FakeSession()
+    syncer = make_context(config)
+    syncer.session = FakeSession()
     _, current = _sciebo_tree(sha1(content))  # unchanged etag
 
     assert download_file(syncer, current) is True
-    assert syncer.ctx.session.calls == []
+    assert syncer.session.calls == []
     assert download_path.read_bytes() == content
 
 
@@ -558,7 +558,7 @@ def test_sciebo_unchanged_etag_skips_download(tmp_path):
 
 def _cached_file_node(config, course_node):
     cached_course = course_cache.get_course_cache_root(
-        make_syncer(config).ctx, course_node
+        make_context(config), course_node
     )
     assert cached_course is not None
     return cached_course.children[0].children[0]  # General -> slides.pdf
@@ -569,20 +569,20 @@ def test_cache_preserves_markers_for_failed_download_over_existing_file(tmp_path
     v1 = b"version one"
     seed_course_cache(config, timemodified=100, etag=sha1(v1), is_downloaded=True)
     download_path = node_path(
-        make_syncer(config), build_single_file_tree("slides.pdf", URL)[1]
+        make_context(config), build_single_file_tree("slides.pdf", URL)[1]
     )
     download_path.parent.mkdir(parents=True, exist_ok=True)
     download_path.write_bytes(v1)
 
     # A run where Moodle reports a new version (200) but the download did not
     # happen (is_downloaded=False) and the old file is still on disk.
-    syncer = make_syncer(config)
+    syncer = make_context(config)
     root, file_node = build_single_file_tree(
         "slides.pdf", URL, timemodified=200, etag="poisoned"
     )
     file_node.is_downloaded = False
-    syncer.ctx.root_node = root
-    syncer.cache_root_node()
+    syncer.root_node = root
+    course_cache.cache_root_node(syncer)
 
     cached_file = _cached_file_node(config, root.children[0].children[0])
     # The cache keeps the on-disk version's markers, not Moodle's new ones.
@@ -596,13 +596,13 @@ def test_cache_does_not_preserve_markers_when_file_absent(tmp_path):
     seed_course_cache(config, timemodified=100, etag="old", is_downloaded=True)
 
     # Failed download with no file on disk: nothing to preserve.
-    syncer = make_syncer(config)
+    syncer = make_context(config)
     root, file_node = build_single_file_tree(
         "slides.pdf", URL, timemodified=200, etag="new"
     )
     file_node.is_downloaded = False
-    syncer.ctx.root_node = root
-    syncer.cache_root_node()
+    syncer.root_node = root
+    course_cache.cache_root_node(syncer)
 
     cached_file = _cached_file_node(config, root.children[0].children[0])
     assert cached_file.timemodified == 200

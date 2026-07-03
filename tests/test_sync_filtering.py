@@ -1,4 +1,6 @@
-from .helpers import FakeSession, make_syncer, node_rows
+from syncmymoodle import sync
+
+from .helpers import FakeSession, make_context, node_rows
 
 FILTER_COURSES = [
     {"id": 201, "shortname": "Current Semester", "idnumber": "26ss-current"},
@@ -20,7 +22,7 @@ def install_filter_fixtures(monkeypatch, synced_course_ids, courses):
 
 def test_selected_courses_override_semester_filter(monkeypatch):
     synced_course_ids = []
-    syncer = make_syncer(
+    syncer = make_context(
         {
             "selected_courses": [
                 "https://moodle.rwth-aachen.de/course/view.php?id=202"
@@ -29,12 +31,12 @@ def test_selected_courses_override_semester_filter(monkeypatch):
         }
     )
     install_filter_fixtures(monkeypatch, synced_course_ids, FILTER_COURSES)
-    syncer.ctx.session = FakeSession()
+    syncer.session = FakeSession()
 
-    syncer.sync()
+    sync.sync(syncer)
 
     assert synced_course_ids == [202]
-    assert node_rows(syncer.ctx.root_node) == [
+    assert node_rows(syncer.root_node) == [
         "Semester | 25ws |  |  | ",
         "Course | 25ws/Selected Old Semester |  |  | ",
     ]
@@ -42,19 +44,19 @@ def test_selected_courses_override_semester_filter(monkeypatch):
 
 def test_skip_courses_and_semester_filter_limit_synced_courses(monkeypatch):
     synced_course_ids = []
-    syncer = make_syncer(
+    syncer = make_context(
         {
             "skip_courses": ["https://moodle.rwth-aachen.de/course/view.php?id=203"],
             "only_sync_semester": ["26ss"],
         }
     )
     install_filter_fixtures(monkeypatch, synced_course_ids, FILTER_COURSES)
-    syncer.ctx.session = FakeSession()
+    syncer.session = FakeSession()
 
-    syncer.sync()
+    sync.sync(syncer)
 
     assert synced_course_ids == [201]
-    assert node_rows(syncer.ctx.root_node) == [
+    assert node_rows(syncer.root_node) == [
         "Semester | 26ss |  |  | ",
         "Course | 26ss/Current Semester |  |  | ",
     ]
@@ -71,10 +73,10 @@ SUBSTRING_COURSES = [
 
 def _run_filter(config, monkeypatch):
     synced = []
-    syncer = make_syncer(config)
+    syncer = make_context(config)
     install_filter_fixtures(monkeypatch, synced, SUBSTRING_COURSES)
-    syncer.ctx.session = FakeSession()
-    syncer.sync()
+    syncer.session = FakeSession()
+    sync.sync(syncer)
     return synced
 
 

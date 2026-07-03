@@ -1,9 +1,7 @@
 import json
 import sys
-from types import SimpleNamespace
 
 import syncmymoodle.cli as cli
-from syncmymoodle.app import SyncMyMoodle
 from syncmymoodle.config import Config
 
 
@@ -87,11 +85,6 @@ def test_from_dict_accepts_none():
     assert cfg.basedir == "./"
 
 
-def test_syncmymoodle_initializes_context_config_from_dict():
-    smm = SyncMyMoodle({"basedir": "/tmp/syncmymoodle-test"})
-    assert smm.ctx.config.basedir == "/tmp/syncmymoodle-test"
-
-
 def test_cli_preserves_canonical_config_keys(tmp_path, monkeypatch):
     config_path = tmp_path / "config.json"
     config_path.write_text(
@@ -106,32 +99,12 @@ def test_cli_preserves_canonical_config_keys(tmp_path, monkeypatch):
         ),
         encoding="utf-8",
     )
-    captured_config = {}
+    captured = {}
 
-    class FakeSyncMyMoodle:
-        def __init__(self, config):
-            captured_config.update(config)
-            self.ctx = SimpleNamespace(opencast_error_count=0)
+    def fake_run(ctx):
+        captured["config"] = ctx.config
 
-        def login(self):
-            pass
-
-        def get_moodle_wstoken(self):
-            pass
-
-        def get_userid(self):
-            pass
-
-        def sync(self):
-            pass
-
-        def download_all_files(self):
-            pass
-
-        def cache_root_node(self):
-            pass
-
-    monkeypatch.setattr(cli, "SyncMyMoodle", FakeSyncMyMoodle)
+    monkeypatch.setattr(cli, "run", fake_run)
     monkeypatch.setattr(
         sys,
         "argv",
@@ -140,5 +113,5 @@ def test_cli_preserves_canonical_config_keys(tmp_path, monkeypatch):
 
     cli.main()
 
-    assert captured_config["nolinks"] is True
-    assert captured_config["updatefiles"] is True
+    assert captured["config"].nolinks is True
+    assert captured["config"].updatefiles is True

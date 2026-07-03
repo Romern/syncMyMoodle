@@ -9,7 +9,8 @@ from pathlib import Path
 from typing import Any
 
 from syncmymoodle import downloader
-from syncmymoodle.app import SyncMyMoodle
+from syncmymoodle.config import Config
+from syncmymoodle.context import SyncContext
 from syncmymoodle.node import Node
 from syncmymoodle.pathing import get_sanitized_node_path
 
@@ -140,27 +141,26 @@ def assert_snapshot(name: str, actual: list[str]) -> None:
     assert actual == load_snapshot(name)
 
 
-def make_syncer(config: dict[str, Any] | None = None) -> SyncMyMoodle:
+def make_context(config: dict[str, Any] | None = None) -> SyncContext:
     merged_config = DEFAULT_CONFIG.copy()
     if config:
         merged_config.update(config)
-    syncer = SyncMyMoodle(merged_config)
-    syncer.ctx.wstoken = "fake-webservice-token"
-    syncer.ctx.user_id = 10001
-    syncer.ctx.session_key = "fake-sesskey"
-    return syncer
+    ctx = SyncContext(config=Config.from_dict(merged_config))
+    ctx.wstoken = "fake-webservice-token"
+    ctx.user_id = 10001
+    ctx.session_key = "fake-sesskey"
+    return ctx
 
 
-def node_path(syncer: SyncMyMoodle, node: Node) -> Path:
-    return get_sanitized_node_path(node, Path(syncer.ctx.config.basedir))
+def node_path(ctx: SyncContext, node: Node) -> Path:
+    return get_sanitized_node_path(node, Path(ctx.config.basedir))
 
 
-def download_file(syncer: SyncMyMoodle, node: Node) -> bool:
-    return downloader.download_file(syncer.ctx, node)
+def download_file(ctx: SyncContext, node: Node) -> bool:
+    return downloader.download_file(ctx, node)
 
 
 def install_moodle_fixtures(
-    _syncer: SyncMyMoodle,
     monkeypatch: Any,
     courses: list[dict[str, Any]],
     course_contents: dict[int, list[dict[str, Any]]],

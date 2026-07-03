@@ -9,8 +9,12 @@ from argparse import ArgumentParser
 from pathlib import Path
 from types import ModuleType
 
-from syncmymoodle.app import SyncMyMoodle
+from syncmymoodle import course_cache, downloader
+from syncmymoodle import moodle as moodle_api
+from syncmymoodle import rwth, sync
+from syncmymoodle.config import Config
 from syncmymoodle.constants import COURSE_PREFIX_HANDLING_OPTIONS
+from syncmymoodle.context import SyncContext
 
 try:
     import keyring as imported_keyring
@@ -251,23 +255,29 @@ def main() -> None:
         )
         sys.exit(1)
 
-    smm = SyncMyMoodle(config)
+    run(SyncContext(config=Config.from_dict(config)))
 
+
+def run(ctx: SyncContext) -> None:
+    """Execute a full sync run against an already-configured context."""
     print("Logging in...")
-    smm.login()
-    smm.get_moodle_wstoken()
-    smm.get_userid()
+    rwth.login(ctx, logger)
+    wstoken = moodle_api.get_moodle_wstoken(ctx.session, logger)
+    ctx.wstoken = wstoken
+    ctx.user_id, ctx.user_private_access_key = moodle_api.get_userid(
+        ctx.require_session(), wstoken, logger
+    )
     print("Syncing file tree...")
-    smm.sync()
+    sync.sync(ctx)
     print("Downloading files...")
-    smm.download_all_files()
+    downloader.download_all_files(ctx, logger)
     print("Saving root node as cache...")
-    smm.cache_root_node()
+    course_cache.cache_root_node(ctx, logger)
 
     # If we saw multiple Opencast backend errors send a reminder
     # to check the RWTH ITC status page before filing a bug.
     try:
-        if smm.ctx.opencast_error_count >= 5:
+        if ctx.opencast_error_count >= 5:
             logger.warning(
                 "Multiple Opencast backend errors occurred. Please check the RWTH "
                 "ITC status page before reporting an issue on GitHub: "
