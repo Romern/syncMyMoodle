@@ -6,7 +6,7 @@ from typing import Any, cast
 
 from bs4 import BeautifulSoup as bs
 
-from syncmymoodle.constants import RWTH_MOODLE_STATUS_URL
+from syncmymoodle.constants import MOODLE_URL, RWTH_MOODLE_STATUS_URL
 from syncmymoodle.context import SyncContext
 
 logger = logging.getLogger(__name__)
@@ -160,7 +160,7 @@ def authenticate_episode(
             "ocinstanceid": 1,
         }
     )
-    info_url = f"https://moodle.rwth-aachen.de/filter/opencast/ltilaunch.php?{params}"
+    info_url = f"{MOODLE_URL}filter/opencast/ltilaunch.php?{params}"
     context = f"episode {episode_id} in course {course_id}"
     engage_data = fetch_lti_form_data(ctx, info_url, context, log)
     if engage_data is None:

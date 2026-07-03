@@ -233,7 +233,7 @@ def login(ctx: SyncContext, log: logging.Logger = logger) -> None:
         check_general_connectivity(log)
         check_rwth_status_page(log)
         sys.exit(1)
-    if resp.url.startswith("https://moodle.rwth-aachen.de/my/"):
+    if resp.url.startswith(f"{MOODLE_URL}my/"):
         soup = bs(resp.text, features="lxml")
         ctx.session_key = _get_session_key(soup, log)
         save_session_cookies(cookie_file, session.cookies)
@@ -351,9 +351,7 @@ def login(ctx: SyncContext, log: logging.Logger = logger) -> None:
             soup, "SAMLResponse", "SAML response", log
         ),
     }
-    resp = session.post(
-        "https://moodle.rwth-aachen.de/Shibboleth.sso/SAML2/POST", data=data
-    )
+    resp = session.post(f"{MOODLE_URL}Shibboleth.sso/SAML2/POST", data=data)
     soup = bs(resp.text, features="lxml")
     ctx.session_key = _get_session_key(soup, log)
     save_session_cookies(cookie_file, session.cookies)

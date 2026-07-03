@@ -4,7 +4,11 @@ from fnmatch import fnmatchcase
 from typing import Any
 
 from syncmymoodle.config import Config
-from syncmymoodle.constants import COURSE_PREFIX_HANDLING_OPTIONS, COURSE_PREFIX_RE
+from syncmymoodle.constants import (
+    COURSE_PREFIX_HANDLING_OPTIONS,
+    COURSE_PREFIX_RE,
+    MOODLE_URL,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -173,8 +177,8 @@ def should_skip_module(
     if module_id and modname:
         module_urls.extend(
             [
-                f"https://moodle.rwth-aachen.de/mod/{modname}/view.php?id={module_id}",
-                f"https://moodle.rwth-aachen.de/mod/{modname}/launch.php?id={module_id}",
+                f"{MOODLE_URL}mod/{modname}/view.php?id={module_id}",
+                f"{MOODLE_URL}mod/{modname}/launch.php?id={module_id}",
             ]
         )
 
