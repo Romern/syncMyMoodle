@@ -12,7 +12,7 @@ import yt_dlp
 from tqdm import tqdm
 
 from syncmymoodle import course_cache, filters, pathing
-from syncmymoodle.constants import INVALID_CHARS, YOUTUBE_ID_LENGTH
+from syncmymoodle.constants import YOUTUBE_ID_LENGTH
 from syncmymoodle.context import SyncContext
 
 logger = logging.getLogger(__name__)
@@ -109,13 +109,10 @@ def download_response_is_usable(
 def download_file(
     ctx: SyncContext,
     node: Any,
-    block_size: int = DEFAULT_BLOCK_SIZE,
     log: logging.Logger = logger,
 ) -> bool:
     """Download file with progress bar if it isn't already downloaded."""
-    downloadpath = pathing.get_sanitized_node_path(
-        node, Path(ctx.config.basedir), INVALID_CHARS
-    )
+    downloadpath = pathing.get_sanitized_node_path(node, Path(ctx.config.basedir))
 
     if filters.should_skip_url(ctx.config, node.url, f"{node.type} file", log):
         return True
@@ -146,7 +143,7 @@ def download_file(
             return True
 
         # Try to find a cached node for this file from the per-course cache.
-        old_node = course_cache.get_old_node_for(ctx, INVALID_CHARS, node, log)
+        old_node = course_cache.get_old_node_for(ctx, node, log)
         # Only trust the cached version markers when the previous run actually
         # downloaded the file. Otherwise an update that failed last time (e.g.
         # an expired session) gets cached with Moodle's new timemodified and
@@ -319,7 +316,7 @@ def download_file(
         if not download_response_is_usable(node, response, downloadpath, log):
             return False
 
-        content = response.iter_content(block_size)
+        content = response.iter_content(DEFAULT_BLOCK_SIZE)
         first_chunk = next((chunk for chunk in content if chunk), b"")
         if (
             first_chunk
@@ -411,7 +408,6 @@ def download_file(
 
 def download_all_files(
     ctx: SyncContext,
-    block_size: int = DEFAULT_BLOCK_SIZE,
     log: logging.Logger = logger,
 ) -> None:
     if not ctx.session:
@@ -423,13 +419,12 @@ def download_all_files(
     if not ctx.root_node:
         raise Exception("You need to sync() first.")
 
-    download_node_tree(ctx, ctx.root_node, block_size, log)
+    download_node_tree(ctx, ctx.root_node, log)
 
 
 def download_node_tree(
     ctx: SyncContext,
     cur_node: Any,
-    block_size: int = DEFAULT_BLOCK_SIZE,
     log: logging.Logger = logger,
 ) -> None:
     if len(cur_node.children) == 0:
@@ -451,7 +446,7 @@ def download_node_tree(
                             cur_node.name += ".mp4"
                         else:
                             cur_node.name = cur_node.url.split("/")[-1]
-                    if download_file(ctx, cur_node, block_size, log):
+                    if download_file(ctx, cur_node, log):
                         cur_node.is_downloaded = True
                 except Exception:
                     log.exception(f"Failed to download the module {cur_node}")
@@ -463,14 +458,14 @@ def download_node_tree(
                 )
             else:
                 try:
-                    if download_file(ctx, cur_node, block_size, log):
+                    if download_file(ctx, cur_node, log):
                         cur_node.is_downloaded = True
                 except Exception:
                     log.exception(f"Failed to download the module {cur_node}")
         return
 
     for child in cur_node.children:
-        download_node_tree(ctx, child, block_size, log)
+        download_node_tree(ctx, child, log)
 
 
 def scan_and_download_youtube(
@@ -479,9 +474,7 @@ def scan_and_download_youtube(
     log: logging.Logger = logger,
 ) -> bool:
     """Download Youtube-Videos using yt_dlp."""
-    path = pathing.get_sanitized_node_path(
-        node.parent, Path(ctx.config.basedir), INVALID_CHARS
-    )
+    path = pathing.get_sanitized_node_path(node.parent, Path(ctx.config.basedir))
     link = node.url
     if filters.should_skip_url(ctx.config, link, "YouTube link", log):
         return True

@@ -10,8 +10,8 @@ from syncmymoodle.storage import read_private_gzip_json, write_private_gzip_json
 logger = logging.getLogger(__name__)
 
 
-def _node_path(ctx: SyncContext, invalid_chars: str, node: Node) -> Path:
-    return get_sanitized_node_path(node, Path(ctx.config.basedir), invalid_chars)
+def _node_path(ctx: SyncContext, node: Node) -> Path:
+    return get_sanitized_node_path(node, Path(ctx.config.basedir))
 
 
 def match_old_cache_child(old_node: Node | None, child: Node) -> Node | None:
@@ -31,7 +31,6 @@ def match_old_cache_child(old_node: Node | None, child: Node) -> Node | None:
 
 def node_to_cache_data(
     ctx: SyncContext,
-    invalid_chars: str,
     node: Node,
     old_node: Node | None = None,
 ) -> dict[str, Any]:
@@ -48,7 +47,7 @@ def node_to_cache_data(
         not node.is_downloaded
         and old_node is not None
         and getattr(old_node, "is_downloaded", False)
-        and _node_path(ctx, invalid_chars, node).exists()
+        and _node_path(ctx, node).exists()
     ):
         timemodified = getattr(old_node, "timemodified", None)
         etag = getattr(old_node, "etag", None)
@@ -63,9 +62,7 @@ def node_to_cache_data(
         "name_clash_id": node.name_clash_id,
         "is_downloaded": is_downloaded,
         "children": [
-            node_to_cache_data(
-                ctx, invalid_chars, child, match_old_cache_child(old_node, child)
-            )
+            node_to_cache_data(ctx, child, match_old_cache_child(old_node, child))
             for child in node.children
         ],
     }
@@ -115,12 +112,11 @@ def get_course_node(node: Node) -> Node:
 
 def get_course_cache_root(
     ctx: SyncContext,
-    invalid_chars: str,
     course_node: Node,
     log: logging.Logger = logger,
 ) -> Node | None:
     """Load and return the cached course root for the given course node."""
-    course_path = _node_path(ctx, invalid_chars, course_node)
+    course_path = _node_path(ctx, course_node)
     if course_path in ctx.course_caches:
         return ctx.course_caches[course_path]
 
@@ -147,7 +143,6 @@ def get_course_cache_root(
 
 def get_old_node_for(
     ctx: SyncContext,
-    invalid_chars: str,
     node: Node,
     log: logging.Logger = logger,
 ) -> Node | None:
@@ -157,7 +152,7 @@ def get_old_node_for(
     except Exception:
         return None
 
-    cached_course_root = get_course_cache_root(ctx, invalid_chars, course_node, log)
+    cached_course_root = get_course_cache_root(ctx, course_node, log)
     if cached_course_root is None:
         return None
 
@@ -176,7 +171,6 @@ def get_old_node_for(
 
 def cache_root_node(
     ctx: SyncContext,
-    invalid_chars: str,
     log: logging.Logger = logger,
 ) -> None:
     """Persist per-course caches into .syncmymoodle_cache files.
@@ -194,21 +188,17 @@ def cache_root_node(
         for course_node in semester_node.children:
             if course_node.type != "Course":
                 continue
-            course_path = _node_path(ctx, invalid_chars, course_node)
+            course_path = _node_path(ctx, course_node)
             # Read the previous course cache before overwriting it, so we can
             # preserve version markers for files that were not downloaded
             # this run (see node_to_cache_data).
-            old_course_root = get_course_cache_root(
-                ctx, invalid_chars, course_node, log
-            )
+            old_course_root = get_course_cache_root(ctx, course_node, log)
             course_path.mkdir(parents=True, exist_ok=True)
             cache_path = course_path / ".syncmymoodle_cache"
             write_private_gzip_json(
                 cache_path,
                 {
                     "format": "syncmymoodle.course-cache.v1",
-                    "course": node_to_cache_data(
-                        ctx, invalid_chars, course_node, old_course_root
-                    ),
+                    "course": node_to_cache_data(ctx, course_node, old_course_root),
                 },
             )

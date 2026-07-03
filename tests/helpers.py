@@ -10,7 +10,6 @@ from typing import Any
 
 from syncmymoodle import downloader
 from syncmymoodle.app import SyncMyMoodle
-from syncmymoodle.constants import INVALID_CHARS
 from syncmymoodle.node import Node
 from syncmymoodle.pathing import get_sanitized_node_path
 
@@ -153,7 +152,7 @@ def make_syncer(config: dict[str, Any] | None = None) -> SyncMyMoodle:
 
 
 def node_path(syncer: SyncMyMoodle, node: Node) -> Path:
-    return get_sanitized_node_path(node, Path(syncer.ctx.config.basedir), INVALID_CHARS)
+    return get_sanitized_node_path(node, Path(syncer.ctx.config.basedir))
 
 
 def download_file(syncer: SyncMyMoodle, node: Node) -> bool:

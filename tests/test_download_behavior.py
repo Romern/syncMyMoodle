@@ -2,7 +2,6 @@ import hashlib
 import os
 
 from syncmymoodle import course_cache
-from syncmymoodle.constants import INVALID_CHARS
 from syncmymoodle.node import Node
 
 from .helpers import (
@@ -559,7 +558,7 @@ def test_sciebo_unchanged_etag_skips_download(tmp_path):
 
 def _cached_file_node(config, course_node):
     cached_course = course_cache.get_course_cache_root(
-        make_syncer(config).ctx, INVALID_CHARS, course_node
+        make_syncer(config).ctx, course_node
     )
     assert cached_course is not None
     return cached_course.children[0].children[0]  # General -> slides.pdf

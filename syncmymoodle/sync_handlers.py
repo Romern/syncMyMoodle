@@ -11,7 +11,6 @@ from syncmymoodle import moodle as moodle_api
 from syncmymoodle import moodle_files
 from syncmymoodle import opencast as opencast_api
 from syncmymoodle import pathing
-from syncmymoodle.constants import INVALID_CHARS
 from syncmymoodle.context import SyncContext
 from syncmymoodle.node import Node
 
@@ -72,7 +71,6 @@ def handle_assignment_module(
                 continue
             moodle_files.add_moodle_file_node(
                 assignment_node,
-                INVALID_CHARS,
                 c.get("filepath", "/"),
                 c["filename"],
                 c["fileurl"],
@@ -108,7 +106,7 @@ def handle_resource_like_module(
         if filters.should_skip_url(ctx.config, file_url, "resource link"):
             continue
         if moodle_files.is_direct_moodle_file_content(module, c):
-            moodle_files.add_moodle_content_file_node(section_node, INVALID_CHARS, c)
+            moodle_files.add_moodle_content_file_node(section_node, c)
         elif not (module["modname"] == "page" and c.get("filename") == "index.html"):
             links_api.scan_for_links(
                 ctx,
@@ -145,7 +143,6 @@ def handle_folder_module(
                 continue
             moodle_files.add_moodle_file_node(
                 folder_node,
-                INVALID_CHARS,
                 c.get("filepath", "/"),
                 c["filename"],
                 c["fileurl"],
@@ -436,7 +433,7 @@ def handle_quiz_module(
             + str(attempt_cnt)
         )
         section_node.add_child(
-            pathing.sanitize_path_part(name, INVALID_CHARS),
+            pathing.sanitize_path_part(name),
             urllib.parse.urlparse(review_url)[1],
             "Quiz",
             url=review_url,

@@ -19,7 +19,6 @@ def get_or_add_child(
 
 def add_moodle_file_node(
     parent_node: Node,
-    invalid_chars: str,
     moodle_filepath: Any,
     filename: str,
     id: Any,  # noqa: A002 - keep Moodle payload name
@@ -30,7 +29,7 @@ def add_moodle_file_node(
 ) -> Node | None:
     target_node: Node | None = parent_node
     path_segments = [
-        sanitize_path_part(segment, invalid_chars)
+        sanitize_path_part(segment)
         for segment in str(moodle_filepath or "").strip("/").split("/")
         if segment
     ]
@@ -58,7 +57,6 @@ def add_moodle_file_node(
 
 def add_moodle_content_file_node(
     parent_node: Node,
-    invalid_chars: str,
     content: dict[str, Any],
     file_type: str | None = None,
 ) -> Node | None:
@@ -72,7 +70,6 @@ def add_moodle_content_file_node(
         filename = content.get("filename")
     return add_moodle_file_node(
         parent_node,
-        invalid_chars,
         "/",
         filename,
         file_url,

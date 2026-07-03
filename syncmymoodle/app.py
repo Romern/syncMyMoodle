@@ -6,7 +6,6 @@ from syncmymoodle import downloader, filters
 from syncmymoodle import moodle as moodle_api
 from syncmymoodle import sync_handlers
 from syncmymoodle.config import Config
-from syncmymoodle.constants import INVALID_CHARS
 from syncmymoodle.context import SyncContext
 from syncmymoodle.course_cache import cache_root_node
 from syncmymoodle.node import Node
@@ -22,7 +21,7 @@ class SyncMyMoodle:
         self.ctx = SyncContext(config=config)
 
     def cache_root_node(self) -> None:
-        return cache_root_node(self.ctx, INVALID_CHARS, logger)
+        return cache_root_node(self.ctx, logger)
 
     # RWTH SSO Login
 
