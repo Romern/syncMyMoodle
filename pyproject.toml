@@ -19,7 +19,7 @@ classifiers = [
   "Operating System :: OS Independent",
   "Development Status :: 5 - Production/Stable"
 ]
-scripts = { syncmymoodle = "syncmymoodle.__main__:main" }
+scripts = { syncmymoodle = "syncmymoodle.cli:main" }
 
 urls = { "Homepage" = "https://github.com/Romern/syncMyMoodle", "Bug Tracker" = "https://github.com/Romern/syncMyMoodle/issues" }
 
