@@ -1,4 +1,4 @@
-from syncmymoodle import opencast
+from syncmymoodle import links, opencast
 from syncmymoodle.node import Node
 
 from .helpers import (
@@ -136,8 +136,8 @@ def test_sciebo_public_share_is_cached_per_sync_run():
     first_parent = root.add_child("First occurrence", 1, "Section")
     second_parent = root.add_child("Second occurrence", 2, "Section")
 
-    syncer.scanForLinks(link, first_parent, 101)
-    syncer.scanForLinks(link, second_parent, 101)
+    links.scan_for_links(syncer.ctx, link, first_parent, 101)
+    links.scan_for_links(syncer.ctx, link, second_parent, 101)
 
     assert session.count("GET", link) == 1
     assert session.count("PROPFIND", public_root) == 1

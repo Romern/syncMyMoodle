@@ -4,36 +4,20 @@ import os
 import re
 import urllib.parse
 from contextlib import closing
-from dataclasses import dataclass
 from fnmatch import fnmatchcase
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
 import yt_dlp
 from tqdm import tqdm
 
-from syncmymoodle.constants import YOUTUBE_ID_LENGTH
+from syncmymoodle import course_cache, filters, pathing
+from syncmymoodle.constants import INVALID_CHARS, YOUTUBE_ID_LENGTH
 from syncmymoodle.context import SyncContext
 
 logger = logging.getLogger(__name__)
 
-
-@dataclass
-class DownloadServices:
-    chunk_looks_like_html: Callable[[bytes], bool]
-    download_response_is_usable: Callable[[Any, Any, Path], bool]
-    get_old_node_for: Callable[[Any], Any]
-    get_sanitized_node_path: Callable[[Any], Path]
-    local_file_matches_etag: Callable[[Path, str], bool]
-    make_conflict_path: Callable[[Path], Path]
-    node_allows_html_download: Callable[[Any], bool]
-    should_skip_url: Callable[[str | None, str], bool]
-
-
-@dataclass
-class DownloadTreeServices:
-    download_file: Callable[[Any], bool]
-    scan_and_download_youtube: Callable[[Any], bool]
+DEFAULT_BLOCK_SIZE = 1024
 
 
 def local_file_matches_etag(path: Path, etag: str) -> bool:
@@ -125,14 +109,15 @@ def download_response_is_usable(
 def download_file(
     ctx: SyncContext,
     node: Any,
-    services: DownloadServices,
-    block_size: int,
+    block_size: int = DEFAULT_BLOCK_SIZE,
     log: logging.Logger = logger,
 ) -> bool:
     """Download file with progress bar if it isn't already downloaded."""
-    downloadpath = services.get_sanitized_node_path(node)
+    downloadpath = pathing.get_sanitized_node_path(
+        node, Path(ctx.config.basedir), INVALID_CHARS
+    )
 
-    if services.should_skip_url(node.url, f"{node.type} file"):
+    if filters.should_skip_url(ctx.config, node.url, f"{node.type} file", log):
         return True
 
     # Respect filetype/name exclusions up front so that excluded files never
@@ -161,7 +146,7 @@ def download_file(
             return True
 
         # Try to find a cached node for this file from the per-course cache.
-        old_node = services.get_old_node_for(node)
+        old_node = course_cache.get_old_node_for(ctx, INVALID_CHARS, node, log)
         # Only trust the cached version markers when the previous run actually
         # downloaded the file. Otherwise an update that failed last time (e.g.
         # an expired session) gets cached with Moodle's new timemodified and
@@ -191,7 +176,7 @@ def download_file(
                 # Additionally, on the first run with a cache, the local file
                 # may already match this etag (e.g. previously downloaded
                 # manually). If so, we can safely skip any download.
-                if services.local_file_matches_etag(downloadpath, old_etag):
+                if local_file_matches_etag(downloadpath, old_etag):
                     return True
 
         # At this point, either there is no cache for this course/path, or
@@ -211,7 +196,7 @@ def download_file(
             # Prefer using the old ETag (hash) to detect whether the local file
             # still matches the previously downloaded version.
             try:
-                if not services.local_file_matches_etag(downloadpath, old_etag):
+                if not local_file_matches_etag(downloadpath, old_etag):
                     local_conflict = True
             except Exception:
                 # A faulty/unusable ETag cache is treated as if we had no
@@ -244,9 +229,7 @@ def download_file(
                     except Exception:
                         remote_etag = None
 
-                if remote_etag and services.local_file_matches_etag(
-                    downloadpath, remote_etag
-                ):
+                if remote_etag and local_file_matches_etag(downloadpath, remote_etag):
                     # Local file already equals the current remote content, so
                     # there is no conflict and no need to download again.
                     node.etag = remote_etag
@@ -333,15 +316,15 @@ def download_file(
                     # next run.
                     return False
 
-        if not services.download_response_is_usable(node, response, downloadpath):
+        if not download_response_is_usable(node, response, downloadpath, log):
             return False
 
         content = response.iter_content(block_size)
         first_chunk = next((chunk for chunk in content if chunk), b"")
         if (
             first_chunk
-            and services.chunk_looks_like_html(first_chunk)
-            and not services.node_allows_html_download(node)
+            and chunk_looks_like_html(first_chunk)
+            and not node_allows_html_download(node)
         ):
             log.warning(
                 "Skipping download of %s from %s because the response body "
@@ -382,7 +365,7 @@ def download_file(
         # conflicting local file aside, so a failure above never empties the
         # canonical path.
         if conflict_rename_pending:
-            conflict_path = services.make_conflict_path(downloadpath)
+            conflict_path = pathing.make_conflict_path(downloadpath)
             try:
                 downloadpath.rename(conflict_path)
                 log.warning(
@@ -428,7 +411,7 @@ def download_file(
 
 def download_all_files(
     ctx: SyncContext,
-    services: DownloadTreeServices,
+    block_size: int = DEFAULT_BLOCK_SIZE,
     log: logging.Logger = logger,
 ) -> None:
     if not ctx.session:
@@ -440,19 +423,20 @@ def download_all_files(
     if not ctx.root_node:
         raise Exception("You need to sync() first.")
 
-    download_node_tree(ctx.root_node, services, log)
+    download_node_tree(ctx, ctx.root_node, block_size, log)
 
 
 def download_node_tree(
+    ctx: SyncContext,
     cur_node: Any,
-    services: DownloadTreeServices,
+    block_size: int = DEFAULT_BLOCK_SIZE,
     log: logging.Logger = logger,
 ) -> None:
     if len(cur_node.children) == 0:
         if cur_node.url and not cur_node.is_downloaded:
             if cur_node.type == "Youtube":
                 try:
-                    services.scan_and_download_youtube(cur_node)
+                    scan_and_download_youtube(ctx, cur_node, log)
                     cur_node.is_downloaded = True
                 except Exception:
                     log.exception(f"Failed to download the module {cur_node}")
@@ -467,7 +451,7 @@ def download_node_tree(
                             cur_node.name += ".mp4"
                         else:
                             cur_node.name = cur_node.url.split("/")[-1]
-                    if services.download_file(cur_node):
+                    if download_file(ctx, cur_node, block_size, log):
                         cur_node.is_downloaded = True
                 except Exception:
                     log.exception(f"Failed to download the module {cur_node}")
@@ -479,25 +463,27 @@ def download_node_tree(
                 )
             else:
                 try:
-                    if services.download_file(cur_node):
+                    if download_file(ctx, cur_node, block_size, log):
                         cur_node.is_downloaded = True
                 except Exception:
                     log.exception(f"Failed to download the module {cur_node}")
         return
 
     for child in cur_node.children:
-        download_node_tree(child, services, log)
+        download_node_tree(ctx, child, block_size, log)
 
 
 def scan_and_download_youtube(
+    ctx: SyncContext,
     node: Any,
-    get_sanitized_node_path: Callable[[Any], Path],
-    should_skip_url: Callable[[str | None, str], bool],
+    log: logging.Logger = logger,
 ) -> bool:
     """Download Youtube-Videos using yt_dlp."""
-    path = get_sanitized_node_path(node.parent)
+    path = pathing.get_sanitized_node_path(
+        node.parent, Path(ctx.config.basedir), INVALID_CHARS
+    )
     link = node.url
-    if should_skip_url(link, "YouTube link"):
+    if filters.should_skip_url(ctx.config, link, "YouTube link", log):
         return True
     if path.exists():
         if any(link[-YOUTUBE_ID_LENGTH:] in f.name for f in path.iterdir()):

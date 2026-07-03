@@ -7,7 +7,18 @@ FILTER_COURSES = [
 ]
 
 
-def test_selected_courses_override_semester_filter():
+def install_filter_fixtures(monkeypatch, synced_course_ids, courses):
+    monkeypatch.setattr(
+        "syncmymoodle.moodle.get_all_courses",
+        lambda session, wstoken, user_id: courses,
+    )
+    monkeypatch.setattr(
+        "syncmymoodle.moodle.get_course",
+        lambda session, wstoken, course_id: synced_course_ids.append(course_id) or [],
+    )
+
+
+def test_selected_courses_override_semester_filter(monkeypatch):
     synced_course_ids = []
     syncer = make_syncer(
         {
@@ -17,8 +28,7 @@ def test_selected_courses_override_semester_filter():
             "only_sync_semester": ["26ss"],
         }
     )
-    syncer.get_all_courses = lambda: FILTER_COURSES  # type: ignore[method-assign]
-    syncer.get_course = lambda course_id: synced_course_ids.append(course_id) or []  # type: ignore[method-assign]
+    install_filter_fixtures(monkeypatch, synced_course_ids, FILTER_COURSES)
     syncer.session = FakeSession()
 
     syncer.sync()
@@ -30,7 +40,7 @@ def test_selected_courses_override_semester_filter():
     ]
 
 
-def test_skip_courses_and_semester_filter_limit_synced_courses():
+def test_skip_courses_and_semester_filter_limit_synced_courses(monkeypatch):
     synced_course_ids = []
     syncer = make_syncer(
         {
@@ -38,8 +48,7 @@ def test_skip_courses_and_semester_filter_limit_synced_courses():
             "only_sync_semester": ["26ss"],
         }
     )
-    syncer.get_all_courses = lambda: FILTER_COURSES  # type: ignore[method-assign]
-    syncer.get_course = lambda course_id: synced_course_ids.append(course_id) or []  # type: ignore[method-assign]
+    install_filter_fixtures(monkeypatch, synced_course_ids, FILTER_COURSES)
     syncer.session = FakeSession()
 
     syncer.sync()
@@ -60,39 +69,42 @@ SUBSTRING_COURSES = [
 ]
 
 
-def _run_filter(config):
+def _run_filter(config, monkeypatch):
     synced = []
     syncer = make_syncer(config)
-    syncer.get_all_courses = lambda: SUBSTRING_COURSES  # type: ignore[method-assign]
-    syncer.get_course = lambda course_id: synced.append(course_id) or []  # type: ignore[method-assign]
+    install_filter_fixtures(monkeypatch, synced, SUBSTRING_COURSES)
     syncer.session = FakeSession()
     syncer.sync()
     return synced
 
 
-def test_selected_courses_match_by_exact_id_not_substring():
+def test_selected_courses_match_by_exact_id_not_substring(monkeypatch):
     # Selecting course 12 must not also pull in courses 1 and 2.
     synced = _run_filter(
-        {"selected_courses": ["https://moodle.rwth-aachen.de/course/view.php?id=12"]}
+        {"selected_courses": ["https://moodle.rwth-aachen.de/course/view.php?id=12"]},
+        monkeypatch,
     )
     assert synced == [12]
 
 
-def test_skip_courses_match_by_exact_id_not_substring():
+def test_skip_courses_match_by_exact_id_not_substring(monkeypatch):
     # Skipping course 12 must not silently drop courses 1 and 2.
     synced = _run_filter(
-        {"skip_courses": ["https://moodle.rwth-aachen.de/course/view.php?id=12"]}
+        {"skip_courses": ["https://moodle.rwth-aachen.de/course/view.php?id=12"]},
+        monkeypatch,
     )
     assert synced == [1, 2, 123]
 
 
-def test_bare_numeric_id_entry_is_accepted():
-    synced = _run_filter({"selected_courses": ["12"]})
+def test_bare_numeric_id_entry_is_accepted(monkeypatch):
+    synced = _run_filter({"selected_courses": ["12"]}, monkeypatch)
     assert synced == [12]
 
 
-def test_selected_courses_override_skip_courses():
+def test_selected_courses_override_skip_courses(monkeypatch):
     # A course present in both lists is synced: selected_courses wins.
     url = "https://moodle.rwth-aachen.de/course/view.php?id=12"
-    synced = _run_filter({"selected_courses": [url], "skip_courses": [url]})
+    synced = _run_filter(
+        {"selected_courses": [url], "skip_courses": [url]}, monkeypatch
+    )
     assert synced == [12]

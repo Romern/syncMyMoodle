@@ -1,12 +1,13 @@
 import logging
 
-from syncmymoodle.app import SyncMyMoodle
+from syncmymoodle.config import Config
+from syncmymoodle.filters import format_course_name as format_course_name_impl
 from syncmymoodle.node import Node
 
 
 def format_course_name(handling, name):
-    smm = SyncMyMoodle({"course_prefix_handling": handling})
-    return smm._format_course_name(name)
+    config = Config.from_dict({"course_prefix_handling": handling})
+    return format_course_name_impl(name, config)
 
 
 def test_keep_preserves_course_name():
@@ -38,7 +39,7 @@ def test_non_matching_names_are_preserved():
 
 
 def test_invalid_mode_preserves_course_name(caplog):
-    with caplog.at_level(logging.WARNING, logger="syncmymoodle.app"):
+    with caplog.at_level(logging.WARNING, logger="syncmymoodle.filters"):
         assert format_course_name("invalid", "(VO) Analysis") == "(VO) Analysis"
     assert any(record.levelno == logging.WARNING for record in caplog.records)
 

@@ -5,7 +5,7 @@ import stat
 from syncmymoodle.node import Node
 from syncmymoodle.storage import read_private_gzip_json, write_private_gzip_json
 
-from .helpers import FakeSession, make_syncer
+from .helpers import FakeSession, download_file, make_syncer, node_path
 
 
 def test_sanitized_node_path_stays_inside_basedir(tmp_path):
@@ -13,7 +13,7 @@ def test_sanitized_node_path_stays_inside_basedir(tmp_path):
     root = Node("", -1, "Root", None)
     bad_node = root.add_child("%2e%2e", 1, "Section")
 
-    target_path = syncer.get_sanitized_node_path(bad_node)
+    target_path = node_path(syncer, bad_node)
 
     assert target_path == tmp_path / "_"
     assert target_path.resolve(strict=False).is_relative_to(tmp_path)
@@ -55,7 +55,7 @@ def test_download_uses_course_cache_to_skip_unchanged_file(tmp_path):
     cached_syncer.root_node = cached_root
     cached_syncer.cache_root_node()
 
-    download_path = cached_syncer.get_sanitized_node_path(cached_file)
+    download_path = node_path(cached_syncer, cached_file)
     download_path.parent.mkdir(parents=True, exist_ok=True)
     download_path.write_bytes(b"already downloaded")
 
@@ -73,5 +73,5 @@ def test_download_uses_course_cache_to_skip_unchanged_file(tmp_path):
         timemodified=1710000300,
     )
 
-    assert syncer.download_file(current_file) is True
+    assert download_file(syncer, current_file) is True
     assert syncer.session.calls == []

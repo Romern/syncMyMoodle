@@ -8,8 +8,11 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from syncmymoodle import downloader
 from syncmymoodle.app import SyncMyMoodle
+from syncmymoodle.constants import INVALID_CHARS
 from syncmymoodle.node import Node
+from syncmymoodle.pathing import get_sanitized_node_path
 
 FIXTURES = Path(__file__).parent / "fixtures"
 SNAPSHOTS = Path(__file__).parent / "snapshots"
@@ -149,8 +152,16 @@ def make_syncer(config: dict[str, Any] | None = None) -> SyncMyMoodle:
     return syncer
 
 
+def node_path(syncer: SyncMyMoodle, node: Node) -> Path:
+    return get_sanitized_node_path(node, Path(syncer.config.basedir), INVALID_CHARS)
+
+
+def download_file(syncer: SyncMyMoodle, node: Node) -> bool:
+    return downloader.download_file(syncer.ctx, node)
+
+
 def install_moodle_fixtures(
-    syncer: SyncMyMoodle,
+    _syncer: SyncMyMoodle,
     monkeypatch: Any,
     courses: list[dict[str, Any]],
     course_contents: dict[int, list[dict[str, Any]]],
@@ -158,13 +169,21 @@ def install_moodle_fixtures(
     submission_files: dict[int, list[dict[str, Any]]] | None = None,
     folders: dict[int, list[dict[str, Any]]] | None = None,
 ) -> None:
-    syncer.get_all_courses = lambda: courses  # type: ignore[method-assign]
-    syncer.get_course = lambda course_id: course_contents[int(course_id)]  # type: ignore[method-assign]
-    syncer.get_assignment = lambda course_id: (assignments or {}).get(  # type: ignore[method-assign]
-        int(course_id)
+    monkeypatch.setattr(
+        "syncmymoodle.moodle.get_all_courses",
+        lambda session, wstoken, user_id: courses,
     )
-    syncer.get_folders_by_courses = lambda course_id: (folders or {}).get(  # type: ignore[method-assign]
-        int(course_id), []
+    monkeypatch.setattr(
+        "syncmymoodle.moodle.get_course",
+        lambda session, wstoken, course_id: course_contents[int(course_id)],
+    )
+    monkeypatch.setattr(
+        "syncmymoodle.moodle.get_assignment",
+        lambda session, wstoken, course_id: (assignments or {}).get(int(course_id)),
+    )
+    monkeypatch.setattr(
+        "syncmymoodle.moodle.get_folders_by_courses",
+        lambda session, wstoken, course_id: (folders or {}).get(int(course_id), []),
     )
     # The assignment handler fetches submission files via the moodle module
     # directly, so stub it there (leak-safe via monkeypatch).
