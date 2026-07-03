@@ -55,7 +55,9 @@ class SyncMyMoodle:
         return self.ctx.config
 
     @config.setter
-    def config(self, value: Config) -> None:
+    def config(self, value: Config | dict[str, Any]) -> None:
+        if not isinstance(value, Config):
+            value = Config.from_dict(value)
         self.ctx.config = value
 
     @property

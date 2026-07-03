@@ -1,3 +1,8 @@
+import json
+import sys
+
+import syncmymoodle.cli as cli
+from syncmymoodle.app import SyncMyMoodle
 from syncmymoodle.config import Config
 
 
@@ -33,14 +38,29 @@ def test_legacy_key_aliases_are_resolved():
 
 
 def test_canonical_keys_win_over_aliases():
-    cfg = Config.from_dict({"nolinks": False, "no_links": True})
+    cfg = Config.from_dict(
+        {
+            "nolinks": False,
+            "no_links": True,
+            "updatefiles": False,
+            "update_files": True,
+        }
+    )
     assert cfg.nolinks is False
+    assert cfg.updatefiles is False
 
 
 def test_quiz_is_forced_off_even_when_enabled():
     cfg = Config.from_dict({"used_modules": {"url": {"quiz": True, "opencast": True}}})
     assert cfg.url_module_enabled("quiz") is False
     assert cfg.url_module_enabled("opencast") is True
+
+
+def test_from_dict_does_not_mutate_input():
+    raw = {"used_modules": {"url": {"quiz": True, "opencast": True}}}
+    cfg = Config.from_dict(raw)
+    assert cfg.url_module_enabled("quiz") is False
+    assert raw["used_modules"]["url"]["quiz"] is True
 
 
 def test_module_helpers_reflect_toggles():
@@ -64,3 +84,61 @@ def test_module_helpers_reflect_toggles():
 def test_from_dict_accepts_none():
     cfg = Config.from_dict(None)
     assert cfg.basedir == "./"
+
+
+def test_syncmymoodle_config_setter_accepts_dict():
+    smm = SyncMyMoodle({})
+    smm.config = {"basedir": "/tmp/syncmymoodle-test"}
+    assert smm.config.basedir == "/tmp/syncmymoodle-test"
+
+
+def test_cli_preserves_canonical_config_keys(tmp_path, monkeypatch):
+    config_path = tmp_path / "config.json"
+    config_path.write_text(
+        json.dumps(
+            {
+                "user": "user",
+                "password": "password",
+                "totp": "totp",
+                "nolinks": True,
+                "updatefiles": True,
+            }
+        ),
+        encoding="utf-8",
+    )
+    captured_config = {}
+
+    class FakeSyncMyMoodle:
+        def __init__(self, config):
+            captured_config.update(config)
+            self._opencast_error_count = 0
+
+        def login(self):
+            pass
+
+        def get_moodle_wstoken(self):
+            pass
+
+        def get_userid(self):
+            pass
+
+        def sync(self):
+            pass
+
+        def download_all_files(self):
+            pass
+
+        def cache_root_node(self):
+            pass
+
+    monkeypatch.setattr(cli, "SyncMyMoodle", FakeSyncMyMoodle)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["syncmymoodle", "--config", str(config_path)],
+    )
+
+    cli.main()
+
+    assert captured_config["nolinks"] is True
+    assert captured_config["updatefiles"] is True

@@ -59,7 +59,7 @@ class Config:
     def from_dict(cls, raw: Mapping[str, Any] | None) -> "Config":
         raw = dict(raw or {})
 
-        used_modules = raw.get("used_modules") or copy.deepcopy(DEFAULT_USED_MODULES)
+        used_modules = copy.deepcopy(raw.get("used_modules") or DEFAULT_USED_MODULES)
         # Quiz PDF generation is disabled until the pdfkit/wkhtmltopdf renderer
         # is replaced with a safer implementation. Enforce it regardless of the
         # configured value so no entry point can accidentally re-enable it.
