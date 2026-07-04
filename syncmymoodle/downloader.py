@@ -4,6 +4,8 @@ import os
 import re
 import urllib.parse
 from contextlib import closing
+from dataclasses import dataclass
+from enum import Enum
 from fnmatch import fnmatchcase
 from pathlib import Path
 from typing import Any
@@ -19,34 +21,46 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_BLOCK_SIZE = 1024
 
+_HASH_ALGOS_BY_LENGTH = {32: "md5", 40: "sha1", 64: "sha256"}
 
-def local_file_matches_etag(path: Path, etag: str) -> bool:
-    """Return True if the local file content matches the given ETag hash.
 
-    We currently support strong ETags that contain a plain hex digest for MD5
-    (32 chars), SHA1 (40 chars) or SHA256 (64 chars). Other formats are
-    ignored and treated as non-matching.
+class FileMatch(Enum):
+    """Comparison result for a local file and a remote version marker."""
+
+    MATCH = "match"
+    DIFFER = "differ"
+    UNKNOWN = "unknown"
+
+
+class LocalCopyState(Enum):
+    """State of the existing local file when the remote may have changed."""
+
+    UP_TO_DATE = "up_to_date"
+    CLEAN = "clean"
+    MODIFIED = "modified"
+
+
+def classify_local_file(path: Path, marker: str | None) -> FileMatch:
+    """Compare a local file against a remote ``marker``.
+
+    Only strong markers carrying a plain MD5/SHA1/SHA256 hex digest can verify
+    content. Opaque, missing, or unreadable markers are UNKNOWN.
     """
-    # Extract a plausible hex digest from the ETag value, ignoring weak
-    # prefixes (W/) and surrounding quotes or algorithm markers.
-    match = re.search(r"([0-9a-fA-F]{32,64})", etag)
+    if not marker:
+        return FileMatch.UNKNOWN
+    match = re.search(r"([0-9a-fA-F]{32,64})", str(marker))
     if not match:
-        return False
+        return FileMatch.UNKNOWN
     hex_str = match.group(1).lower()
-
-    algo = None
-    if len(hex_str) == 32:
-        algo = "md5"
-    elif len(hex_str) == 40:
-        algo = "sha1"
-    elif len(hex_str) == 64:
-        algo = "sha256"
-    else:
-        return False
-
-    with path.open("rb") as f:
-        digest = hashlib.file_digest(f, algo)
-        return digest.hexdigest() == hex_str
+    algo = _HASH_ALGOS_BY_LENGTH.get(len(hex_str))
+    if algo is None:
+        return FileMatch.UNKNOWN
+    try:
+        with path.open("rb") as f:
+            digest = hashlib.file_digest(f, algo).hexdigest()
+    except OSError:
+        return FileMatch.UNKNOWN
+    return FileMatch.MATCH if digest == hex_str else FileMatch.DIFFER
 
 
 def content_type_without_parameters(response: Any) -> str:
@@ -138,10 +152,122 @@ def conditional_get_confirms_unchanged(
                 node.etag = response_etag
                 return True
     except Exception as exc:
-        # A routine transient (timeout, reset) shouldn't spam a stack trace; we
-        # simply fall back to a normal download below.
         log.warning("Failed to validate cached ETag for %s: %s", node.url, exc)
     return False
+
+
+@dataclass
+class DownloadDecision:
+    """Outcome of the change-detection step for a single file."""
+
+    skip: bool
+    conflict: bool = False
+
+
+def remote_unchanged(
+    ctx: SyncContext,
+    node: Any,
+    old_node: Any,
+    cached_timemodified: Any,
+    log: logging.Logger = logger,
+) -> bool:
+    """Whether the remote file is provably unchanged since our last download."""
+    old_etag = getattr(old_node, "etag", None)
+    node_etag = getattr(node, "etag", None)
+
+    if cached_timemodified is not None:
+        return bool(node.timemodified == cached_timemodified)
+
+    if old_etag and node_etag == old_etag:
+        return True
+    if (
+        old_etag
+        and node_etag is None
+        and conditional_get_confirms_unchanged(ctx, node, old_etag, log)
+    ):
+        return True
+    return False
+
+
+def assess_local_copy(
+    ctx: SyncContext,
+    node: Any,
+    downloadpath: Path,
+    old_node: Any,
+    cached_timemodified: Any,
+    log: logging.Logger = logger,
+) -> LocalCopyState:
+    """Classify the on-disk file when the remote may have changed."""
+    old_etag = getattr(old_node, "etag", None) if old_node is not None else None
+    old_content_hash = (
+        getattr(old_node, "content_hash", None) if old_node is not None else None
+    )
+    verdict = classify_local_file(downloadpath, old_content_hash or old_etag)
+    if verdict is FileMatch.MATCH:
+        return LocalCopyState.CLEAN
+    if verdict is FileMatch.DIFFER:
+        return LocalCopyState.MODIFIED
+
+    if cached_timemodified is not None:
+        try:
+            if int(downloadpath.stat().st_mtime) != int(cached_timemodified):
+                return LocalCopyState.MODIFIED
+            return LocalCopyState.CLEAN
+        except (OSError, ValueError):
+            return LocalCopyState.MODIFIED
+
+    remote_etag = getattr(node, "etag", None)
+    if remote_etag is None and node.url:
+        try:
+            head_resp = ctx.require_session().head(node.url, allow_redirects=True)
+            remote_etag = head_resp.headers.get("ETag")
+        except Exception:
+            remote_etag = None
+
+    if classify_local_file(downloadpath, remote_etag) is FileMatch.MATCH:
+        node.etag = remote_etag
+        if getattr(node, "timemodified", None) is not None:
+            try:
+                ts = int(node.timemodified)
+                os.utime(downloadpath, (ts, ts))
+            except (OSError, OverflowError, ValueError):
+                pass
+        return LocalCopyState.UP_TO_DATE
+    return LocalCopyState.MODIFIED
+
+
+def decide_download(
+    ctx: SyncContext,
+    node: Any,
+    downloadpath: Path,
+    log: logging.Logger = logger,
+) -> DownloadDecision:
+    """Decide whether ``node`` must be (re)downloaded and whether the local copy
+    is user-modified.
+    """
+    if not downloadpath.exists():
+        return DownloadDecision(skip=False)
+    if not ctx.config.updatefiles:
+        return DownloadDecision(skip=True)
+
+    old_node = course_cache.get_old_node_for(ctx, node, log)
+    if old_node is not None and not getattr(old_node, "is_downloaded", False):
+        old_node = None
+    cached_timemodified = (
+        getattr(old_node, "timemodified", None) if old_node is not None else None
+    )
+
+    if old_node is not None and remote_unchanged(
+        ctx, node, old_node, cached_timemodified, log
+    ):
+        return DownloadDecision(skip=True)
+
+    verdict = assess_local_copy(
+        ctx, node, downloadpath, old_node, cached_timemodified, log
+    )
+    if verdict is LocalCopyState.UP_TO_DATE:
+        return DownloadDecision(skip=True)
+    return DownloadDecision(skip=False, conflict=verdict is LocalCopyState.MODIFIED)
 
 
 def download_file(
@@ -155,167 +281,36 @@ def download_file(
     if filters.should_skip_url(ctx.config, node.url, f"{node.type} file", log):
         return True
 
-    # Respect filetype/name exclusions up front so that excluded files never
-    # trigger conflict handling, displace local files, or create temp files.
+    # Exclusions must not trigger conflict handling or temp-file writes.
     if node.name.split(".")[-1] in ctx.config.exclude_filetypes:
         return True
     if any(fnmatchcase(node.name, pattern) for pattern in ctx.config.exclude_files):
         return True
 
-    # If we already downloaded this path during the current run, skip any
-    # further processing. This avoids duplicate downloads and spurious
-    # conflicts when the same remote file appears multiple times in the node
-    # tree (e.g. Sciebo links reused in a course).
     if ctx.downloaded_paths is None:
-        # Initialise on first use to keep __init__ simple.
         ctx.downloaded_paths = set()
     elif downloadpath in ctx.downloaded_paths:
         return True
 
-    # Decide whether we need to (re-)download the file at all
-    cached_timemodified = None
-    old_node = None
+    decision = decide_download(ctx, node, downloadpath, log)
+    if decision.skip:
+        return True
+
     conflict_rename_pending = False
-    if downloadpath.exists():
-        if not ctx.config.updatefiles:
-            return True
-
-        # Try to find a cached node for this file from the per-course cache.
-        old_node = course_cache.get_old_node_for(ctx, node, log)
-        # Only trust the cached version markers when the previous run actually
-        # downloaded the file. Otherwise an update that failed last time (e.g.
-        # an expired session) gets cached with Moodle's new timemodified and
-        # would be skipped forever, leaving a stale file. Treat a
-        # non-downloaded cache entry as if there were no cache at all.
-        if old_node is not None and not getattr(old_node, "is_downloaded", False):
-            old_node = None
-        if old_node is not None:
-            cached_timemodified = getattr(old_node, "timemodified", None)
-            old_etag = getattr(old_node, "etag", None)
-            # If Moodle did not change the file, skip re-download. Only when
-            # timemodified is meaningful: Sciebo files have no timemodified
-            # (always None), so this must fall through to the etag check below
-            # instead of treating None == None as "unchanged".
-            if cached_timemodified is not None and (
-                node.timemodified == cached_timemodified
-            ):
-                return True
-            # For Sciebo, we use the etag from the previous run as the remote
-            # version marker. If it matches the current etag from the PROPFIND
-            # response, the remote file has not changed.
-            if (
-                cached_timemodified is None
-                and old_etag
-                and getattr(node, "etag", None) == old_etag
-            ):
-                # The remote revision marker is unchanged since our last run, so
-                # there is nothing new to install: skip. We deliberately do NOT
-                # gate this on re-hashing the local file, because Sciebo/WebDAV
-                # ETags are opaque revision tokens (not content hashes). Gating
-                # here made every checksum-less Sciebo file re-download and its
-                # identical local copy get moved aside as a spurious conflict on
-                # every run.
-                return True
-            if (
-                cached_timemodified is None
-                and old_etag
-                and getattr(node, "etag", None) is None
-                and conditional_get_confirms_unchanged(ctx, node, old_etag, log)
-            ):
-                return True
-
-        # At this point, either there is no cache for this course/path, or
-        # Moodle reports a different modification time. This means the remote
-        # file might have changed.
-
-        # Check for potential local modifications since the last sync to avoid
-        # silently overwriting user changes.
+    if decision.conflict:
         conflict_mode = ctx.config.update_files_conflict
         if conflict_mode not in {"rename", "keep", "none", "overwrite"}:
             conflict_mode = "rename"
-
-        local_conflict = False
-        old_etag = getattr(old_node, "etag", None) if old_node is not None else None
-        old_content_hash = (
-            getattr(old_node, "content_hash", None) if old_node is not None else None
-        )
-        # Prefer a content hash we computed ourselves at download time: a Sciebo
-        # ETag is an opaque revision token, so hashing the local file against it
-        # can never match and would flag every file as a conflict. Fall back to
-        # the ETag only when we have no stored content hash (e.g. a Moodle file
-        # whose ETag is a real content hash, or a pre-upgrade cache entry).
-        verify_hash = old_content_hash or old_etag
-        etag_check_failed = False
-        if verify_hash:
-            try:
-                if not local_file_matches_etag(downloadpath, verify_hash):
-                    local_conflict = True
-            except Exception:
-                # A faulty/unusable hash cache is treated as if we had none:
-                # fall back to the timestamp/HEAD heuristic below to decide
-                # whether this is a conflict.
-                etag_check_failed = True
-
-        if not verify_hash or etag_check_failed:
-            if cached_timemodified is not None:
-                # Fallback: compare local mtime with the previous Moodle timestamp.
-                try:
-                    local_mtime = int(downloadpath.stat().st_mtime)
-                    if local_mtime != int(cached_timemodified):
-                        local_conflict = True
-                except (OSError, ValueError):
-                    local_conflict = True
-            else:
-                # No previous etag and no previous timemodified: this usually
-                # means the file existed before we ever cached it. Before we
-                # treat this as a conflict, try to see if the local file already
-                # matches the *current* remote content using the ETag from
-                # either the Sciebo PROPFIND or a Moodle HEAD request.
-                remote_etag = getattr(node, "etag", None)
-                if remote_etag is None and node.url:
-                    try:
-                        head_resp = ctx.require_session().head(
-                            node.url, allow_redirects=True
-                        )
-                        remote_etag = head_resp.headers.get("ETag")
-                    except Exception:
-                        remote_etag = None
-
-                if remote_etag and local_file_matches_etag(downloadpath, remote_etag):
-                    # Local file already equals the current remote content, so
-                    # there is no conflict and no need to download again.
-                    node.etag = remote_etag
-                    if getattr(node, "timemodified", None) is not None:
-                        try:
-                            ts = int(node.timemodified)
-                            os.utime(downloadpath, (ts, ts))
-                        except (OSError, OverflowError, ValueError):
-                            pass
-                    return True
-
-                # At this point we know the local file differs from the current
-                # remote version (or we couldn't verify), and we have no prior
-                # cached state. Treat this as a potential conflict to avoid
-                # silently overwriting user changes.
-                local_conflict = True
-
-        if local_conflict:
-            if conflict_mode in {"keep", "none"}:
-                # Keep the locally modified file and skip updating from Moodle
-                log.info(
-                    "Detected local changes for %s, skipping Moodle update "
-                    "due to update_files_conflict=%s",
-                    downloadpath,
-                    conflict_mode,
-                )
-                return True
-            if conflict_mode == "rename":
-                # Defer moving the locally modified file aside until the
-                # replacement has been fully downloaded, so an aborted or failed
-                # download (e.g. an expired session returning an HTML error
-                # page) never leaves the canonical path empty.
-                conflict_rename_pending = True
-            # conflict_mode == "overwrite": fall through and overwrite
+        if conflict_mode in {"keep", "none"}:
+            log.info(
+                "Detected local changes for %s, skipping Moodle update "
+                "due to update_files_conflict=%s",
+                downloadpath,
+                conflict_mode,
+            )
+            return True
+        if conflict_mode == "rename":
+            conflict_rename_pending = True
 
     # Hidden, namespaced temp/sidecar names so we never resume from or
     # overwrite a file the user happens to own. The sidecar records the ETag a

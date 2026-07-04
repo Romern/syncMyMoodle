@@ -1,7 +1,7 @@
 import hashlib
 import os
 
-from syncmymoodle import course_cache
+from syncmymoodle import course_cache, downloader
 from syncmymoodle.node import Node
 
 from .helpers import (
@@ -32,6 +32,23 @@ def sha1(data: bytes) -> str:
 
 def sha256(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
+
+
+def test_classify_local_file_is_tristate(tmp_path):
+    from syncmymoodle.downloader import FileMatch, classify_local_file
+
+    f = tmp_path / "f.bin"
+    f.write_bytes(b"hello world\n")
+
+    assert classify_local_file(f, sha1(b"hello world\n")) is FileMatch.MATCH
+    assert classify_local_file(f, sha256(b"hello world\n")) is FileMatch.MATCH
+    assert classify_local_file(f, f'"{sha1(b"hello world\n")}"') is FileMatch.MATCH
+    assert classify_local_file(f, sha1(b"other")) is FileMatch.DIFFER
+
+    assert classify_local_file(f, '"66a1b2c3d4e5"') is FileMatch.UNKNOWN
+    assert classify_local_file(f, None) is FileMatch.UNKNOWN
+    assert classify_local_file(f, "") is FileMatch.UNKNOWN
+    assert classify_local_file(tmp_path / "nope", sha1(b"x")) is FileMatch.UNKNOWN
 
 
 def seed_course_cache(config, *, timemodified, etag, is_downloaded=True):
@@ -445,10 +462,10 @@ def test_etag_failure_falls_back_to_timestamp_heuristic_conflict(tmp_path, monke
     )
     new_body = _add_new_remote(syncer)
 
-    def boom(path, etag):
-        raise OSError("cannot read file for hashing")
+    def unverifiable(path, marker):
+        return downloader.FileMatch.UNKNOWN
 
-    monkeypatch.setattr("syncmymoodle.downloader.local_file_matches_etag", boom)
+    monkeypatch.setattr("syncmymoodle.downloader.classify_local_file", unverifiable)
 
     assert download_file(syncer, file_node) is True
     assert download_path.read_bytes() == new_body
@@ -469,10 +486,10 @@ def test_etag_failure_falls_back_to_timestamp_heuristic_no_conflict(
     os.utime(download_path, (1710000300, 1710000300))
     new_body = _add_new_remote(syncer)
 
-    def boom(path, etag):
-        raise OSError("cannot read file for hashing")
+    def unverifiable(path, marker):
+        return downloader.FileMatch.UNKNOWN
 
-    monkeypatch.setattr("syncmymoodle.downloader.local_file_matches_etag", boom)
+    monkeypatch.setattr("syncmymoodle.downloader.classify_local_file", unverifiable)
 
     assert download_file(syncer, file_node) is True
     assert download_path.read_bytes() == new_body
