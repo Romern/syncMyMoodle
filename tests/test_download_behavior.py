@@ -3,6 +3,7 @@ import os
 
 from syncmymoodle import course_cache, downloader
 from syncmymoodle.node import Node, RemoteMarkerKind
+from syncmymoodle.storage import write_private_gzip_json
 
 from .helpers import (
     FakeResponse,
@@ -941,6 +942,56 @@ def test_cache_preserves_markers_for_failed_download_over_existing_file(tmp_path
     assert cached_file.timemodified == 100
     assert cached_file.etag == sha1(v1)
     assert cached_file.is_downloaded is True
+
+
+def test_legacy_is_downloaded_cache_key_is_read_as_handled(tmp_path):
+    config = {"basedir": str(tmp_path), "updatefiles": True}
+    content = b"legacy cached file"
+    root, cached_file = build_single_file_tree(
+        "slides.pdf", URL, timemodified=100, etag=sha1(content)
+    )
+    course_node = root.children[0].children[0]
+    course_path = node_path(make_context(config), course_node)
+    course_path.mkdir(parents=True, exist_ok=True)
+    write_private_gzip_json(
+        course_path / ".syncmymoodle_cache",
+        {
+            "format": "syncmymoodle.course-cache.v1",
+            "course": {
+                "name": course_node.name,
+                "id": course_node.id,
+                "type": course_node.type,
+                "children": [
+                    {
+                        "name": cached_file.parent.name,
+                        "id": cached_file.parent.id,
+                        "type": cached_file.parent.type,
+                        "children": [
+                            {
+                                "name": cached_file.name,
+                                "id": cached_file.id,
+                                "type": cached_file.type,
+                                "url": cached_file.url,
+                                "timemodified": cached_file.timemodified,
+                                "etag": cached_file.etag,
+                                "is_downloaded": True,
+                            }
+                        ],
+                    }
+                ],
+            },
+        },
+    )
+
+    syncer, current_file = make_run_syncer(config, timemodified=100)
+    download_path = node_path(syncer, current_file)
+    download_path.parent.mkdir(parents=True, exist_ok=True)
+    download_path.write_bytes(content)
+
+    assert download_file(syncer, current_file) is True
+    assert syncer.session.calls == []
+    assert download_path.read_bytes() == content
+    assert course_cache.get_old_node_for(syncer, current_file).is_handled is True
 
 
 def test_cache_preserves_content_hash_for_skipped_existing_file(tmp_path):

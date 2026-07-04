@@ -88,6 +88,10 @@ def node_to_cache_data(
 
 
 def node_from_cache_data(data: dict[str, Any], parent: Node | None = None) -> Node:
+    download_status = data.get("download_status")
+    legacy_is_downloaded = download_status is None and bool(
+        data.get("is_downloaded", False)
+    )
     node = Node(
         data.get("name", ""),
         data.get("id"),
@@ -99,7 +103,8 @@ def node_from_cache_data(data: dict[str, Any], parent: Node | None = None) -> No
         etag_kind=data.get("etag_kind"),
         content_hash=data.get("content_hash"),
         name_clash_id=data.get("name_clash_id", NAME_CLASH_ID_UNSET),
-        download_status=data.get("download_status"),
+        download_status=download_status,
+        is_downloaded=legacy_is_downloaded,
     )
     node.children = [
         node_from_cache_data(child, node)
