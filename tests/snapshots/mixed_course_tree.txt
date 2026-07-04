@@ -11,7 +11,7 @@ Assignment | 26ss/Comprehensive Sync/Materials/Essay upload |  |  |
 Assignment File | 26ss/Comprehensive Sync/Materials/Essay upload/essay-template.docx | https://moodle.rwth-aachen.de/pluginfile.php/104/mod_assign/introattachment/essay-template.docx | 1710000105 | 
 Folder | 26ss/Comprehensive Sync/Materials/Essay upload/Feedback |  |  | 
 Assignment File | 26ss/Comprehensive Sync/Materials/Essay upload/Feedback/feedback.txt | https://moodle.rwth-aachen.de/pluginfile.php/104/mod_assign/feedback/feedback.txt | 1710000106 | 
-Linked file [application/pdf] | 26ss/Comprehensive Sync/Materials/direct.pdf | https://files.example.test/direct.pdf |  | 
+Linked file [application/pdf] | 26ss/Comprehensive Sync/Materials/direct.pdf | https://files.example.test/direct.pdf |  | "direct-file-v1"
 Youtube | 26ss/Comprehensive Sync/Materials/Youtube: External HTML page | https://www.youtube.com/watch?v=directvid01 |  | 
 Opencast | 26ss/Comprehensive Sync/Materials/Page module | https://video.example.test/33333333-4444-4555-8666-777777777777/presentation.mp4 |  | 
 Embedded videojs | 26ss/Comprehensive Sync/Materials/page-video.mp4 | https://moodle.rwth-aachen.de/pluginfile.php/104/mod_page/content/315/page-video.mp4 |  | 

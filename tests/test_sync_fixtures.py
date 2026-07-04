@@ -248,7 +248,9 @@ def test_mixed_course_sync_tree_covers_common_module_surfaces(monkeypatch):
     session.add(
         "HEAD",
         direct_pdf,
-        FakeResponse(headers={"Content-Type": "application/pdf"}),
+        FakeResponse(
+            headers={"Content-Type": "application/pdf", "ETag": '"direct-file-v1"'}
+        ),
     )
     session.add(
         "HEAD",

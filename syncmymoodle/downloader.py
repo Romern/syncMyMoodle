@@ -170,11 +170,14 @@ def download_file(
                 and old_etag
                 and getattr(node, "etag", None) == old_etag
             ):
-                # Additionally, on the first run with a cache, the local file
-                # may already match this etag (e.g. previously downloaded
-                # manually). If so, we can safely skip any download.
-                if local_file_matches_etag(downloadpath, old_etag):
-                    return True
+                # The remote revision marker is unchanged since our last run, so
+                # there is nothing new to install: skip. We deliberately do NOT
+                # gate this on re-hashing the local file, because Sciebo/WebDAV
+                # ETags are opaque revision tokens (not content hashes). Gating
+                # here made every checksum-less Sciebo file re-download and its
+                # identical local copy get moved aside as a spurious conflict on
+                # every run.
+                return True
 
         # At this point, either there is no cache for this course/path, or
         # Moodle reports a different modification time. This means the remote
@@ -188,20 +191,27 @@ def download_file(
 
         local_conflict = False
         old_etag = getattr(old_node, "etag", None) if old_node is not None else None
+        old_content_hash = (
+            getattr(old_node, "content_hash", None) if old_node is not None else None
+        )
+        # Prefer a content hash we computed ourselves at download time: a Sciebo
+        # ETag is an opaque revision token, so hashing the local file against it
+        # can never match and would flag every file as a conflict. Fall back to
+        # the ETag only when we have no stored content hash (e.g. a Moodle file
+        # whose ETag is a real content hash, or a pre-upgrade cache entry).
+        verify_hash = old_content_hash or old_etag
         etag_check_failed = False
-        if old_etag:
-            # Prefer using the old ETag (hash) to detect whether the local file
-            # still matches the previously downloaded version.
+        if verify_hash:
             try:
-                if not local_file_matches_etag(downloadpath, old_etag):
+                if not local_file_matches_etag(downloadpath, verify_hash):
                     local_conflict = True
             except Exception:
-                # A faulty/unusable ETag cache is treated as if we had no
-                # cached ETag at all: fall back to the timestamp/HEAD heuristic
-                # below to decide whether this is a conflict.
+                # A faulty/unusable hash cache is treated as if we had none:
+                # fall back to the timestamp/HEAD heuristic below to decide
+                # whether this is a conflict.
                 etag_check_failed = True
 
-        if not old_etag or etag_check_failed:
+        if not verify_hash or etag_check_failed:
             if cached_timemodified is not None:
                 # Fallback: compare local mtime with the previous Moodle timestamp.
                 try:
@@ -384,6 +394,16 @@ def download_file(
 
         os.replace(tmp_downloadpath, downloadpath)
         etag_sidecar.unlink(missing_ok=True)
+        # Record a content hash of exactly the bytes we just downloaded, so the
+        # next run can detect genuine local modifications even when the remote
+        # only offers an opaque ETag (e.g. Sciebo/WebDAV). We hash the file we
+        # just wrote (untouched by the user at this point), never a pre-existing
+        # file, so a later user edit is never mistaken for our own download.
+        try:
+            with downloadpath.open("rb") as fh:
+                node.content_hash = hashlib.file_digest(fh, "sha256").hexdigest()
+        except OSError:
+            pass
         # Align the local mtime with Moodle's timemodified to detect local
         # changes on subsequent runs.
         if getattr(node, "timemodified", None) is not None:
@@ -393,9 +413,12 @@ def download_file(
             except (OSError, OverflowError, ValueError):
                 # If updating timestamps fails, fall back to the current time.
                 pass
-        # Persist the ETag of the downloaded file on the node so it can be used
-        # on the next run to detect local modifications.
-        if etag_header is not None:
+        # Persist a response ETag only when discovery did not already provide a
+        # remote version marker. Sciebo/WebDAV can expose one marker through
+        # PROPFIND and a different ETag on GET; the next scan compares against
+        # the PROPFIND marker, so replacing it here would force re-downloads on
+        # every run.
+        if etag_header is not None and getattr(node, "etag", None) is None:
             try:
                 node.etag = etag_header
             except Exception:

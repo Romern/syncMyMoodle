@@ -23,9 +23,15 @@ def match_old_cache_child(old_node: Node | None, child: Node) -> Node | None:
     ]
     if not candidates:
         return None
-    for candidate in candidates:
-        if candidate.url == child.url:
-            return candidate
+
+    for attr in ("url", "name_clash_id", "id"):
+        child_value = getattr(child, attr, None)
+        if child_value is None or child_value is NAME_CLASH_ID_UNSET:
+            continue
+        for candidate in candidates:
+            if getattr(candidate, attr, None) == child_value:
+                return candidate
+
     return candidates[0]
 
 
@@ -36,21 +42,26 @@ def node_to_cache_data(
 ) -> dict[str, Any]:
     timemodified = node.timemodified
     etag = node.etag
+    content_hash = getattr(node, "content_hash", None)
     is_downloaded = node.is_downloaded
-    # If this file was not (re)downloaded this run but a previously
+    node_path = _node_path(ctx, node)
+    downloaded_this_run = (
+        ctx.downloaded_paths is not None and node_path in ctx.downloaded_paths
+    )
+    # If this file was not actually downloaded this run but a previously
     # downloaded version is still on disk, keep the previously cached version
-    # markers. Otherwise the cache would record Moodle's new timemodified/etag
-    # for a file we never actually fetched, which either skips the file
-    # forever or moves the on-disk copy aside as a spurious conflict on the
-    # next run's retry.
+    # markers. The node may still be marked is_downloaded=True when download
+    # traversal skipped an unchanged existing file; downloaded_paths tells us
+    # whether bytes were really replaced in this run.
     if (
-        not node.is_downloaded
+        not downloaded_this_run
         and old_node is not None
         and getattr(old_node, "is_downloaded", False)
-        and _node_path(ctx, node).exists()
+        and node_path.exists()
     ):
         timemodified = getattr(old_node, "timemodified", None)
         etag = getattr(old_node, "etag", None)
+        content_hash = getattr(old_node, "content_hash", None)
         is_downloaded = True
     return {
         "name": node.name,
@@ -59,6 +70,7 @@ def node_to_cache_data(
         "url": node.url,
         "timemodified": timemodified,
         "etag": etag,
+        "content_hash": content_hash,
         "name_clash_id": node.name_clash_id,
         "is_downloaded": is_downloaded,
         "children": [
@@ -77,6 +89,7 @@ def node_from_cache_data(data: dict[str, Any], parent: Node | None = None) -> No
         url=data.get("url"),
         timemodified=data.get("timemodified"),
         etag=data.get("etag"),
+        content_hash=data.get("content_hash"),
         name_clash_id=data.get("name_clash_id", NAME_CLASH_ID_UNSET),
         is_downloaded=data.get("is_downloaded", False),
     )
@@ -94,6 +107,8 @@ def ensure_timemodified_attribute(node: Node) -> None:
         node.timemodified = None
     if not hasattr(node, "etag"):
         node.etag = None
+    if not hasattr(node, "content_hash"):
+        node.content_hash = None
     if not hasattr(node, "name_clash_id"):
         node.name_clash_id = getattr(node, "id", None)
     for child in getattr(node, "children", []):
@@ -156,17 +171,22 @@ def get_old_node_for(
     if cached_course_root is None:
         return None
 
-    full_path = node.get_path()
-    course_path = course_node.get_path()
-    # Compute the path segments beneath the course root
-    rel_segments = full_path[len(course_path) :]
-    if not rel_segments:
+    rel_nodes: list[Node] = []
+    cur = node
+    while cur is not course_node:
+        rel_nodes.insert(0, cur)
+        if cur.parent is None:
+            return None
+        cur = cur.parent
+    if not rel_nodes:
         return cached_course_root
 
-    try:
-        return cached_course_root.go_to_path(rel_segments)
-    except Exception:
-        return None
+    old_node: Node | None = cached_course_root
+    for rel_node in rel_nodes:
+        old_node = match_old_cache_child(old_node, rel_node)
+        if old_node is None:
+            return None
+    return old_node
 
 
 def cache_root_node(

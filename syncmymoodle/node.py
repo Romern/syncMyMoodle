@@ -19,6 +19,7 @@ class Node:
         additional_info: Any = None,
         timemodified: Any = None,
         etag: str | None = None,
+        content_hash: str | None = None,
         name_clash_id: Any = NAME_CLASH_ID_UNSET,
         is_downloaded: bool = False,
     ) -> None:
@@ -33,6 +34,10 @@ class Node:
         self.additional_info = additional_info
         self.timemodified = timemodified
         self.etag = etag
+        # A content hash (sha256 hex) we compute from the bytes we downloaded.
+        # Unlike etag, which for Sciebo/WebDAV is an opaque revision token, this
+        # is a real hash of our copy, used to detect local user modifications.
+        self.content_hash = content_hash
         self.name_clash_id = (
             id if name_clash_id is NAME_CLASH_ID_UNSET else name_clash_id
         )
@@ -88,6 +93,7 @@ class Node:
             additional_info=self.additional_info,
             timemodified=self.timemodified,
             etag=self.etag,
+            content_hash=self.content_hash,
             name_clash_id=self.name_clash_id,
             is_downloaded=self.is_downloaded,
         )

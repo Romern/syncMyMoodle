@@ -16,10 +16,22 @@ from .helpers import (
 URL = (
     "https://moodle.rwth-aachen.de/pluginfile.php/301/mod_resource/content/1/slides.pdf"
 )
+DUPLICATE_SECTION_URL_A = (
+    "https://moodle.rwth-aachen.de/pluginfile.php/501/mod_resource/content/1/"
+    "Case%20Study%20Sezen.pdf"
+)
+DUPLICATE_SECTION_URL_B = (
+    "https://moodle.rwth-aachen.de/pluginfile.php/502/mod_resource/content/1/"
+    "Case%20Study%20Sezen.pdf"
+)
 
 
 def sha1(data: bytes) -> str:
     return hashlib.sha1(data).hexdigest()
+
+
+def sha256(data: bytes) -> str:
+    return hashlib.sha256(data).hexdigest()
 
 
 def seed_course_cache(config, *, timemodified, etag, is_downloaded=True):
@@ -38,12 +50,39 @@ def seed_course_cache(config, *, timemodified, etag, is_downloaded=True):
     course_cache.cache_root_node(cache_syncer)
 
 
-def make_run_syncer(config, *, timemodified):
+def make_run_syncer(config, *, timemodified, etag=None):
     """Return a syncer plus the leaf node for the current (changed) sync run."""
     syncer = make_context(config)
     syncer.session = FakeSession()
-    _, file_node = build_single_file_tree("slides.pdf", URL, timemodified=timemodified)
+    _, file_node = build_single_file_tree(
+        "slides.pdf", URL, timemodified=timemodified, etag=etag
+    )
     return syncer, file_node
+
+
+def build_duplicate_section_file_tree():
+    root = Node("", -1, "Root", None)
+    semester = root.add_child("26ss", None, "Semester")
+    course = semester.add_child("Duplicate Section Course", 301, "Course")
+    first_section = course.add_child("Case Study", 501, "Section")
+    first_file = first_section.add_child(
+        "Case Study Sezen.pdf",
+        DUPLICATE_SECTION_URL_A,
+        "Linked file [application/pdf]",
+        url=DUPLICATE_SECTION_URL_A,
+        timemodified=100,
+        name_clash_id=None,
+    )
+    second_section = course.add_child("Case Study", 502, "Section")
+    second_file = second_section.add_child(
+        "Case Study Sezen.pdf",
+        DUPLICATE_SECTION_URL_B,
+        "Linked file [application/pdf]",
+        url=DUPLICATE_SECTION_URL_B,
+        timemodified=200,
+        name_clash_id=None,
+    )
+    return root, first_file, second_file
 
 
 # --------------------------------------------------------------------------
@@ -258,6 +297,58 @@ def test_successful_previous_download_with_same_timemodified_is_skipped(tmp_path
 
     assert download_file(syncer, file_node) is True
     assert syncer.session.calls == []
+
+
+def test_unchanged_linked_file_etag_skips_download(tmp_path):
+    # Direct linked files do not have Moodle timemodified metadata. The HEAD
+    # ETag discovered while scanning is their remote version marker, so an
+    # unchanged ETag must suppress the GET on later runs.
+    config = {"basedir": str(tmp_path), "updatefiles": True}
+    etag = '"linked-file-v1"'
+    content = b"already downloaded linked file"
+    seed_course_cache(config, timemodified=None, etag=etag, is_downloaded=True)
+    syncer, file_node = make_run_syncer(config, timemodified=None, etag=etag)
+    download_path = node_path(syncer, file_node)
+    download_path.parent.mkdir(parents=True, exist_ok=True)
+    download_path.write_bytes(content)
+
+    assert download_file(syncer, file_node) is True
+    assert syncer.session.calls == []
+    assert download_path.read_bytes() == content
+
+
+def test_unchanged_duplicate_section_file_uses_matching_cache_node(tmp_path):
+    # Some Moodle courses contain duplicate same-named sections that collapse
+    # onto the same local directory. Cache lookup must still match the section
+    # by its stable id, otherwise the second section can inherit timestamps from
+    # the first and re-download unchanged files as false conflicts.
+    config = {"basedir": str(tmp_path), "updatefiles": True}
+    content = b"same case study pdf bytes"
+
+    cached_root, cached_first, cached_second = build_duplicate_section_file_tree()
+    cached_first.is_downloaded = True
+    cached_second.is_downloaded = True
+    cached_second.content_hash = sha256(content)
+    cache_syncer = make_context(config)
+    cache_syncer.root_node = cached_root
+    course_cache.cache_root_node(cache_syncer)
+
+    syncer = make_context(config)
+    syncer.session = FakeSession()
+    _, _, current_second = build_duplicate_section_file_tree()
+    download_path = node_path(syncer, current_second)
+    download_path.parent.mkdir(parents=True, exist_ok=True)
+    download_path.write_bytes(content)
+    os.utime(download_path, (200, 200))
+
+    old_node = course_cache.get_old_node_for(syncer, current_second)
+    assert old_node is not None
+    assert old_node.url == DUPLICATE_SECTION_URL_B
+
+    assert download_file(syncer, current_second) is True
+    assert syncer.session.calls == []
+    assert list(download_path.parent.glob("*.syncconflict.*")) == []
+    assert download_path.read_bytes() == content
 
 
 def test_etag_failure_falls_back_to_timestamp_heuristic_conflict(tmp_path, monkeypatch):
@@ -489,7 +580,7 @@ def test_unrecognized_partial_without_sidecar_is_not_resumed(tmp_path):
 SCIEBO_URL = "https://rwth-aachen.sciebo.de/public.php/webdav/notes.pdf"
 
 
-def _sciebo_tree(etag, is_downloaded=False):
+def _sciebo_tree(etag, is_downloaded=False, content_hash=None):
     root = Node("", -1, "Root", None)
     semester = root.add_child("26ss", None, "Semester")
     course = semester.add_child("Download Course", 301, "Course")
@@ -503,18 +594,26 @@ def _sciebo_tree(etag, is_downloaded=False):
         etag=etag,
     )
     file_node.is_downloaded = is_downloaded
+    file_node.content_hash = content_hash
     return root, file_node
 
 
-def _seed_sciebo_cache(config, etag, content):
+def _seed_sciebo_cache(config, etag, content, content_hash=None):
     cache_syncer = make_context(config)
-    root, file_node = _sciebo_tree(etag, is_downloaded=True)
+    root, file_node = _sciebo_tree(etag, is_downloaded=True, content_hash=content_hash)
     cache_syncer.root_node = root
     course_cache.cache_root_node(cache_syncer)
     download_path = node_path(make_context(config), file_node)
     download_path.parent.mkdir(parents=True, exist_ok=True)
     download_path.write_bytes(content)
     return download_path
+
+
+# An opaque Nextcloud/WebDAV revision token (what Sciebo returns for files that
+# have no oc:checksums entry). It is NOT a content hash, so it cannot be used to
+# verify local file contents.
+GETETAG_V1 = '"665f1a2b3c4d5"'
+GETETAG_V2 = '"67a09e8d7c6b5"'
 
 
 def test_sciebo_changed_etag_triggers_redownload(tmp_path):
@@ -549,6 +648,123 @@ def test_sciebo_unchanged_etag_skips_download(tmp_path):
     assert download_file(syncer, current) is True
     assert syncer.session.calls == []
     assert download_path.read_bytes() == content
+
+
+def test_sciebo_unchanged_opaque_getetag_skips_without_conflict(tmp_path):
+    # Regression: files without oc:checksums fall back to an opaque getetag,
+    # which is not a content hash. An unchanged getetag must skip cleanly rather
+    # than re-download and move the identical local copy aside as a conflict on
+    # every run.
+    config = {"basedir": str(tmp_path), "updatefiles": True}
+    content = b"post-quantum notes"
+    download_path = _seed_sciebo_cache(config, GETETAG_V1, content)
+    syncer = make_context(config)
+    syncer.session = FakeSession()
+    _, current = _sciebo_tree(GETETAG_V1)  # same opaque getetag
+
+    assert download_file(syncer, current) is True
+    assert syncer.session.calls == []
+    assert download_path.read_bytes() == content
+    assert list(download_path.parent.glob("*.syncconflict.*")) == []
+
+
+def test_sciebo_download_records_content_hash(tmp_path):
+    # A fresh download stores a sha256 of exactly the bytes we wrote, so later
+    # runs can detect local edits even though the ETag is opaque.
+    config = {"basedir": str(tmp_path), "updatefiles": True}
+    download_path = _seed_sciebo_cache(config, GETETAG_V1, b"old")
+    syncer = make_context(config)
+    syncer.session = FakeSession()
+    new = b"new content"
+    syncer.session.add(
+        "GET",
+        SCIEBO_URL,
+        FakeResponse(headers={"Content-Type": "application/pdf"}, chunks=[new]),
+    )
+    _, current = _sciebo_tree(GETETAG_V2)  # remote changed (opaque etag differs)
+
+    assert download_file(syncer, current) is True
+    assert download_path.read_bytes() == new
+    assert current.content_hash == sha256(new)
+
+
+def test_sciebo_download_keeps_propfind_etag_when_get_etag_differs(tmp_path):
+    # The next sync discovers Sciebo files through PROPFIND again, so the
+    # cached version marker must stay comparable to the PROPFIND value. Some
+    # WebDAV downloads return a different GET ETag for the same file.
+    config = {"basedir": str(tmp_path), "updatefiles": True}
+    download_path = _seed_sciebo_cache(config, GETETAG_V1, b"old")
+    syncer = make_context(config)
+    syncer.session = FakeSession()
+    new = b"new content"
+    syncer.session.add(
+        "GET",
+        SCIEBO_URL,
+        FakeResponse(
+            headers={
+                "Content-Type": "application/pdf",
+                "ETag": '"different-get-etag"',
+            },
+            chunks=[new],
+        ),
+    )
+    _, current = _sciebo_tree(GETETAG_V2)
+
+    assert download_file(syncer, current) is True
+    assert download_path.read_bytes() == new
+    assert current.etag == GETETAG_V2
+    assert current.content_hash == sha256(new)
+
+
+def test_sciebo_changed_getetag_without_local_edit_overwrites_cleanly(tmp_path):
+    # Remote changed but the user did not touch the local file (it matches the
+    # stored content hash): overwrite without a spurious conflict copy.
+    config = {"basedir": str(tmp_path), "updatefiles": True}
+    original = b"our downloaded copy"
+    download_path = _seed_sciebo_cache(
+        config, GETETAG_V1, original, content_hash=sha256(original)
+    )
+    syncer = make_context(config)
+    syncer.session = FakeSession()
+    new = b"remote v2"
+    syncer.session.add(
+        "GET",
+        SCIEBO_URL,
+        FakeResponse(headers={"Content-Type": "application/pdf"}, chunks=[new]),
+    )
+    _, current = _sciebo_tree(GETETAG_V2)
+
+    assert download_file(syncer, current) is True
+    assert download_path.read_bytes() == new
+    assert list(download_path.parent.glob("*.syncconflict.*")) == []
+
+
+def test_sciebo_changed_getetag_with_local_edit_preserves_conflict(tmp_path):
+    # Remote changed AND the user edited the local file (it no longer matches the
+    # stored content hash): preserve the user's version as a conflict copy.
+    config = {"basedir": str(tmp_path), "updatefiles": True}
+    original = b"our downloaded copy"
+    download_path = _seed_sciebo_cache(
+        config, GETETAG_V1, original, content_hash=sha256(original)
+    )
+    edited = b"user edited this locally"
+    download_path.write_bytes(edited)
+
+    syncer = make_context(config)
+    syncer.session = FakeSession()
+    new = b"remote v2"
+    syncer.session.add(
+        "GET",
+        SCIEBO_URL,
+        FakeResponse(headers={"Content-Type": "application/pdf"}, chunks=[new]),
+    )
+    _, current = _sciebo_tree(GETETAG_V2)
+
+    assert download_file(syncer, current) is True
+    assert download_path.read_bytes() == new
+    conflicts = list(download_path.parent.glob("*.syncconflict.*"))
+    assert len(conflicts) == 1
+    assert conflicts[0].read_bytes() == edited
 
 
 # --------------------------------------------------------------------------
@@ -588,6 +804,41 @@ def test_cache_preserves_markers_for_failed_download_over_existing_file(tmp_path
     # The cache keeps the on-disk version's markers, not Moodle's new ones.
     assert cached_file.timemodified == 100
     assert cached_file.etag == sha1(v1)
+    assert cached_file.is_downloaded is True
+
+
+def test_cache_preserves_content_hash_for_skipped_existing_file(tmp_path):
+    config = {"basedir": str(tmp_path), "updatefiles": True}
+    v1 = b"version one"
+    v1_hash = sha256(v1)
+    cache_syncer = make_context(config)
+    cached_root, cached_file = build_single_file_tree(
+        "slides.pdf", URL, timemodified=100, etag='"v1"'
+    )
+    cached_file.is_downloaded = True
+    cached_file.content_hash = v1_hash
+    cache_syncer.root_node = cached_root
+    course_cache.cache_root_node(cache_syncer)
+    download_path = node_path(make_context(config), cached_file)
+    download_path.parent.mkdir(parents=True, exist_ok=True)
+    download_path.write_bytes(v1)
+
+    # The download walk marks an unchanged existing file as handled even though
+    # no bytes were replaced. Cache writing must keep the previous content hash
+    # so a later remote change can still detect local edits precisely.
+    syncer = make_context(config)
+    root, file_node = build_single_file_tree(
+        "slides.pdf", URL, timemodified=100, etag='"v1"'
+    )
+    file_node.is_downloaded = True
+    syncer.downloaded_paths = set()
+    syncer.root_node = root
+    course_cache.cache_root_node(syncer)
+
+    cached_file = _cached_file_node(config, root.children[0].children[0])
+    assert cached_file.timemodified == 100
+    assert cached_file.etag == '"v1"'
+    assert cached_file.content_hash == v1_hash
     assert cached_file.is_downloaded is True
 
 

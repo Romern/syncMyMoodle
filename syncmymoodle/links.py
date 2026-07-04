@@ -82,6 +82,7 @@ def scan_for_links(
                     None,
                     f'Linked file [{response.headers["Content-Type"]}]',
                     url=text,
+                    etag=response.headers.get("ETag"),
                 )
                 # instantly return as it was a direct link
                 return
