@@ -2,10 +2,41 @@ from __future__ import annotations
 
 import base64
 import hashlib
+from enum import StrEnum
 from pathlib import Path
 from typing import Any
 
 NAME_CLASH_ID_UNSET = object()
+
+
+class RemoteMarkerKind(StrEnum):
+    CONTENT_HASH = "content_hash"
+    OPAQUE = "opaque"
+
+
+class DownloadStatus(StrEnum):
+    PENDING = "pending"
+    HANDLED = "handled"
+
+
+def _remote_marker_kind(
+    value: RemoteMarkerKind | str | None,
+) -> RemoteMarkerKind | None:
+    if value is None:
+        return None
+    try:
+        return RemoteMarkerKind(value)
+    except ValueError:
+        return None
+
+
+def _download_status(value: DownloadStatus | str | None) -> DownloadStatus | None:
+    if value is None:
+        return None
+    try:
+        return DownloadStatus(value)
+    except ValueError:
+        return None
 
 
 class Node:
@@ -16,11 +47,13 @@ class Node:
         type: str,  # noqa: A003 - keep original name for compatibility
         parent: Node | None,
         url: str | None = None,
-        additional_info: Any = None,
+        download_headers: dict[str, str] | None = None,
         timemodified: Any = None,
         etag: str | None = None,
+        etag_kind: RemoteMarkerKind | str | None = None,
         content_hash: str | None = None,
         name_clash_id: Any = NAME_CLASH_ID_UNSET,
+        download_status: DownloadStatus | str | None = None,
         is_downloaded: bool = False,
     ) -> None:
         self.name = name
@@ -29,11 +62,10 @@ class Node:
         self.type = type
         self.parent = parent
         self.children: list[Node] = []
-        # Currently only used for course_id in opencast, auth header in sciebo,
-        # and may be extended for other module-specific data.
-        self.additional_info = additional_info
+        self.download_headers = dict(download_headers) if download_headers else None
         self.timemodified = timemodified
         self.etag = etag
+        self.etag_kind = _remote_marker_kind(etag_kind)
         # A content hash (sha256 hex) we compute from the bytes we downloaded.
         # Unlike etag, which for Sciebo/WebDAV is an opaque revision token, this
         # is a real hash of our copy, used to detect local user modifications.
@@ -41,12 +73,29 @@ class Node:
         self.name_clash_id = (
             id if name_clash_id is NAME_CLASH_ID_UNSET else name_clash_id
         )
-        self.is_downloaded = (
-            is_downloaded  # Can also be used to exclude files from being downloaded
+        self.download_status = _download_status(download_status) or (
+            DownloadStatus.HANDLED if is_downloaded else DownloadStatus.PENDING
         )
 
     def __repr__(self) -> str:
         return f"Node(name={self.name}, id={self.id}, url={self.url}, type={self.type})"
+
+    @property
+    def is_handled(self) -> bool:
+        return self.download_status == DownloadStatus.HANDLED
+
+    def mark_handled(self) -> None:
+        self.download_status = DownloadStatus.HANDLED
+
+    @property
+    def is_downloaded(self) -> bool:
+        return self.is_handled
+
+    @is_downloaded.setter
+    def is_downloaded(self, value: bool) -> None:
+        self.download_status = (
+            DownloadStatus.HANDLED if value else DownloadStatus.PENDING
+        )
 
     def add_child(
         self,
@@ -54,9 +103,10 @@ class Node:
         id: Any,
         type: str,  # noqa: A003 - keep original name for compatibility
         url: str | None = None,
-        additional_info: Any = None,
+        download_headers: dict[str, str] | None = None,
         timemodified: Any = None,
         etag: str | None = None,
+        etag_kind: RemoteMarkerKind | str | None = None,
         name_clash_id: Any = NAME_CLASH_ID_UNSET,
     ) -> Node | None:
         if url:
@@ -75,9 +125,10 @@ class Node:
             type,
             self,
             url=url,
-            additional_info=additional_info,
+            download_headers=download_headers,
             timemodified=timemodified,
             etag=etag,
+            etag_kind=etag_kind,
             name_clash_id=name_clash_id,
         )
         self.children.append(temp)
@@ -90,12 +141,13 @@ class Node:
             self.type,
             parent,
             url=self.url,
-            additional_info=self.additional_info,
+            download_headers=self.download_headers,
             timemodified=self.timemodified,
             etag=self.etag,
+            etag_kind=self.etag_kind,
             content_hash=self.content_hash,
             name_clash_id=self.name_clash_id,
-            is_downloaded=self.is_downloaded,
+            download_status=self.download_status,
         )
         clone.children = [child.clone(clone) for child in self.children]
         return clone

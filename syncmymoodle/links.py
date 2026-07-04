@@ -10,7 +10,7 @@ from syncmymoodle import opencast as opencast_api
 from syncmymoodle import sciebo as sciebo_api
 from syncmymoodle.constants import OPENCAST_LINK_RE, YOUTUBE_LINK_RE
 from syncmymoodle.context import SyncContext
-from syncmymoodle.node import Node
+from syncmymoodle.node import Node, RemoteMarkerKind
 
 logger = logging.getLogger(__name__)
 
@@ -83,6 +83,11 @@ def scan_for_links(
                     f'Linked file [{response.headers["Content-Type"]}]',
                     url=text,
                     etag=response.headers.get("ETag"),
+                    etag_kind=(
+                        RemoteMarkerKind.OPAQUE
+                        if response.headers.get("ETag")
+                        else None
+                    ),
                 )
                 # instantly return as it was a direct link
                 return
@@ -141,8 +146,8 @@ def scan_for_links(
                 vid_id,
                 "Opencast",
                 url=track.url,
-                additional_info=course_id,
                 etag=track.remote_marker,
+                etag_kind=track.remote_marker_kind,
             )
 
     # https://rwth-aachen.sciebo.de/s/XXX

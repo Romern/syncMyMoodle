@@ -248,8 +248,8 @@ def handle_embedded_link_module(
                             vid_id,
                             "Opencast",
                             url=track.url,
-                            additional_info=course_id,
                             etag=track.remote_marker,
+                            etag_kind=track.remote_marker_kind,
                         )
 
                 if scan_page_links:
@@ -389,8 +389,8 @@ def handle_opencast_lti_module(
                 episode_id,
                 "Opencast",
                 url=track.url,
-                additional_info=module["id"],
                 etag=track.remote_marker,
+                etag_kind=track.remote_marker_kind,
             )
     else:
         if not engage_single_id:
@@ -413,8 +413,8 @@ def handle_opencast_lti_module(
                 engage_single_id,
                 "Opencast",
                 url=track.url,
-                additional_info=module["id"],
                 etag=track.remote_marker,
+                etag_kind=track.remote_marker_kind,
             )
 
 

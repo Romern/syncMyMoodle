@@ -28,7 +28,7 @@ class SyncContext:
     sciebo_link_cache: dict[str, Node] = field(default_factory=dict)
     opencast_episode_auth_cache: set[tuple[Any, str]] = field(default_factory=set)
     opencast_track_cache: dict[str, OpencastTrack] = field(default_factory=dict)
-    downloaded_paths: set[Path] | None = None
+    downloaded_paths: set[Path] = field(default_factory=set)
 
     def require_session(self) -> requests.Session:
         """Return the active session, or raise if login() has not run yet."""

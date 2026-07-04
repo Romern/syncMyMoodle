@@ -16,6 +16,7 @@ from tqdm import tqdm
 from syncmymoodle import course_cache, filters, pathing
 from syncmymoodle.constants import HASH_ALGOS_BY_LENGTH, YOUTUBE_ID_LENGTH
 from syncmymoodle.context import SyncContext
+from syncmymoodle.node import Node, RemoteMarkerKind
 
 logger = logging.getLogger(__name__)
 
@@ -36,6 +37,27 @@ class LocalCopyState(Enum):
     UP_TO_DATE = "up_to_date"
     CLEAN = "clean"
     MODIFIED = "modified"
+
+
+class ConflictAction(Enum):
+    DOWNLOAD = "download"
+    RENAME_LOCAL = "rename_local"
+    SKIP = "skip"
+
+
+@dataclass
+class TransferPlan:
+    tmp_path: Path
+    etag_sidecar: Path
+    headers: dict[str, str]
+    resume_size: int = 0
+    partial_etag: str | None = None
+
+    def discard_partial(self) -> None:
+        self.resume_size = 0
+        self.partial_etag = None
+        self.tmp_path.unlink(missing_ok=True)
+        self.etag_sidecar.unlink(missing_ok=True)
 
 
 def classify_local_file(path: Path, marker: str | None) -> FileMatch:
@@ -120,7 +142,7 @@ def download_response_is_usable(
 
 def conditional_get_confirms_unchanged(
     ctx: SyncContext,
-    node: Any,
+    node: Node,
     old_etag: str,
     log: logging.Logger = logger,
 ) -> bool:
@@ -135,8 +157,8 @@ def conditional_get_confirms_unchanged(
         return False
 
     headers: dict[str, str] = {"If-None-Match": old_etag}
-    if node.type.lower() == "sciebo file" and isinstance(node.additional_info, dict):
-        headers = {**headers, **node.additional_info}
+    if node.download_headers:
+        headers = {**headers, **node.download_headers}
 
     try:
         with closing(
@@ -145,9 +167,11 @@ def conditional_get_confirms_unchanged(
             response_etag = response.headers.get("ETag")
             if response.status_code == 304:
                 node.etag = old_etag
+                node.etag_kind = RemoteMarkerKind.OPAQUE
                 return True
             if 200 <= response.status_code < 300 and response_etag == old_etag:
                 node.etag = response_etag
+                node.etag_kind = RemoteMarkerKind.OPAQUE
                 return True
     except Exception as exc:
         log.warning("Failed to validate cached ETag for %s: %s", node.url, exc)
@@ -164,8 +188,8 @@ class DownloadDecision:
 
 def remote_unchanged(
     ctx: SyncContext,
-    node: Any,
-    old_node: Any,
+    node: Node,
+    old_node: Node,
     cached_timemodified: Any,
     log: logging.Logger = logger,
 ) -> bool:
@@ -187,20 +211,26 @@ def remote_unchanged(
     return False
 
 
+def local_verification_marker(old_node: Node | None) -> str | None:
+    if old_node is None:
+        return None
+    if old_node.content_hash:
+        return old_node.content_hash
+    if old_node.etag and old_node.etag_kind in (None, RemoteMarkerKind.CONTENT_HASH):
+        return old_node.etag
+    return None
+
+
 def assess_local_copy(
     ctx: SyncContext,
-    node: Any,
+    node: Node,
     downloadpath: Path,
-    old_node: Any,
+    old_node: Node | None,
     cached_timemodified: Any,
     log: logging.Logger = logger,
 ) -> LocalCopyState:
     """Classify the on-disk file when the remote may have changed."""
-    old_etag = getattr(old_node, "etag", None) if old_node is not None else None
-    old_content_hash = (
-        getattr(old_node, "content_hash", None) if old_node is not None else None
-    )
-    verdict = classify_local_file(downloadpath, old_content_hash or old_etag)
+    verdict = classify_local_file(downloadpath, local_verification_marker(old_node))
     if verdict is FileMatch.MATCH:
         return LocalCopyState.CLEAN
     if verdict is FileMatch.DIFFER:
@@ -215,15 +245,21 @@ def assess_local_copy(
             return LocalCopyState.MODIFIED
 
     remote_etag = getattr(node, "etag", None)
+    remote_etag_kind = node.etag_kind
     if remote_etag is None and node.url:
         try:
             head_resp = ctx.require_session().head(node.url, allow_redirects=True)
             remote_etag = head_resp.headers.get("ETag")
+            remote_etag_kind = RemoteMarkerKind.OPAQUE if remote_etag else None
         except Exception:
             remote_etag = None
 
-    if classify_local_file(downloadpath, remote_etag) is FileMatch.MATCH:
+    if (
+        remote_etag_kind == RemoteMarkerKind.CONTENT_HASH
+        and classify_local_file(downloadpath, remote_etag) is FileMatch.MATCH
+    ):
         node.etag = remote_etag
+        node.etag_kind = remote_etag_kind
         if getattr(node, "timemodified", None) is not None:
             try:
                 ts = int(node.timemodified)
@@ -236,7 +272,7 @@ def assess_local_copy(
 
 def decide_download(
     ctx: SyncContext,
-    node: Any,
+    node: Node,
     downloadpath: Path,
     log: logging.Logger = logger,
 ) -> DownloadDecision:
@@ -249,7 +285,7 @@ def decide_download(
         return DownloadDecision(skip=True)
 
     old_node = course_cache.get_old_node_for(ctx, node, log)
-    if old_node is not None and not getattr(old_node, "is_downloaded", False):
+    if old_node is not None and not old_node.is_handled:
         old_node = None
     cached_timemodified = (
         getattr(old_node, "timemodified", None) if old_node is not None else None
@@ -268,201 +304,240 @@ def decide_download(
     return DownloadDecision(skip=False, conflict=verdict is LocalCopyState.MODIFIED)
 
 
-def download_file(
-    ctx: SyncContext,
-    node: Any,
-    log: logging.Logger = logger,
+def should_skip_before_decision(
+    ctx: SyncContext, node: Node, downloadpath: Path, log: logging.Logger = logger
 ) -> bool:
-    """Download file with progress bar if it isn't already downloaded."""
-    downloadpath = pathing.get_sanitized_node_path(node, Path(ctx.config.basedir))
-
     if filters.should_skip_url(ctx.config, node.url, f"{node.type} file", log):
         return True
-
-    # Exclusions must not trigger conflict handling or temp-file writes.
     if node.name.split(".")[-1] in ctx.config.exclude_filetypes:
         return True
     if any(fnmatchcase(node.name, pattern) for pattern in ctx.config.exclude_files):
         return True
+    return downloadpath in ctx.downloaded_paths
 
-    if ctx.downloaded_paths is None:
-        ctx.downloaded_paths = set()
-    elif downloadpath in ctx.downloaded_paths:
-        return True
 
-    decision = decide_download(ctx, node, downloadpath, log)
-    if decision.skip:
-        return True
+def conflict_action(
+    ctx: SyncContext,
+    decision: DownloadDecision,
+    downloadpath: Path,
+    log: logging.Logger = logger,
+) -> ConflictAction:
+    if not decision.conflict:
+        return ConflictAction.DOWNLOAD
 
-    conflict_rename_pending = False
-    if decision.conflict:
-        conflict_mode = ctx.config.update_files_conflict
-        if conflict_mode not in {"rename", "keep", "none", "overwrite"}:
-            conflict_mode = "rename"
-        if conflict_mode in {"keep", "none"}:
-            log.info(
-                "Detected local changes for %s, skipping Moodle update "
-                "due to update_files_conflict=%s",
-                downloadpath,
-                conflict_mode,
-            )
-            return True
-        if conflict_mode == "rename":
-            conflict_rename_pending = True
+    conflict_mode = ctx.config.update_files_conflict
+    if conflict_mode not in {"rename", "keep", "none", "overwrite"}:
+        conflict_mode = "rename"
+    if conflict_mode in {"keep", "none"}:
+        log.info(
+            "Detected local changes for %s, skipping Moodle update "
+            "due to update_files_conflict=%s",
+            downloadpath,
+            conflict_mode,
+        )
+        return ConflictAction.SKIP
+    if conflict_mode == "rename":
+        return ConflictAction.RENAME_LOCAL
+    return ConflictAction.DOWNLOAD
 
-    # Hidden, namespaced temp/sidecar names so we never resume from or
-    # overwrite a file the user happens to own. The sidecar records the ETag a
-    # partial download was fetched against.
-    tmp_downloadpath = downloadpath.parent / f".{downloadpath.name}.smmpart"
-    etag_sidecar = tmp_downloadpath.with_name(tmp_downloadpath.name + ".etag")
 
-    # Only resume a previous partial when we recorded the ETag it was fetched
-    # against, so we can ask the server (via If-Range) to confirm the remote
-    # content is unchanged. Without that proof a blind range request could
-    # splice bytes from a newer version onto an older partial and silently
-    # corrupt the file.
-    resume_size = 0
-    partial_etag: str | None = None
-    header = dict()
-    if tmp_downloadpath.exists():
+def prepare_transfer_plan(node: Node, downloadpath: Path) -> TransferPlan:
+    tmp_path = downloadpath.parent / f".{downloadpath.name}.smmpart"
+    etag_sidecar = tmp_path.with_name(tmp_path.name + ".etag")
+    plan = TransferPlan(tmp_path=tmp_path, etag_sidecar=etag_sidecar, headers={})
+
+    if tmp_path.exists():
         if etag_sidecar.exists():
             try:
-                partial_etag = etag_sidecar.read_text(encoding="utf-8").strip()
+                plan.partial_etag = etag_sidecar.read_text(encoding="utf-8").strip()
             except OSError:
-                partial_etag = None
-        if partial_etag:
-            resume_size = tmp_downloadpath.stat().st_size
-            header = {"Range": f"bytes={resume_size}-", "If-Range": partial_etag}
+                plan.partial_etag = None
+        if plan.partial_etag:
+            plan.resume_size = tmp_path.stat().st_size
+            plan.headers = {
+                "Range": f"bytes={plan.resume_size}-",
+                "If-Range": plan.partial_etag,
+            }
         else:
-            # Cannot validate the partial; discard it and start fresh.
-            tmp_downloadpath.unlink(missing_ok=True)
-            etag_sidecar.unlink(missing_ok=True)
-    if node.type.lower() == "sciebo file":
-        header = {**header, **node.additional_info}
+            plan.discard_partial()
 
-    with closing(
-        ctx.require_session().get(node.url, headers=header, stream=True)
-    ) as response:
-        etag_header = response.headers.get("ETag")
+    if node.download_headers:
+        plan.headers = {**plan.headers, **node.download_headers}
+    return plan
 
-        if resume_size:
-            # The remote content differs from our partial when the server
-            # ignores the range (any non-206) or cannot prove that the returned
-            # tail belongs to the same ETag as the saved partial.
-            valid_resume = response.status_code == 206 and etag_header == partial_etag
-            version_changed = not valid_resume
-            if version_changed:
-                resume_size = 0
-                tmp_downloadpath.unlink(missing_ok=True)
-                etag_sidecar.unlink(missing_ok=True)
-                if response.status_code == 206:
-                    # This 206 body is only a tail, and without an exact ETag
-                    # match it cannot be safely appended. Restart fresh on the
-                    # next run.
-                    return False
 
-        if not download_response_is_usable(node, response, downloadpath, log):
-            return False
+def validate_resume_response(response: Any, transfer: TransferPlan) -> bool:
+    if not transfer.resume_size:
+        return True
 
-        content = response.iter_content(DEFAULT_BLOCK_SIZE)
-        first_chunk = next((chunk for chunk in content if chunk), b"")
-        if (
-            first_chunk
-            and chunk_looks_like_html(first_chunk)
-            and not node_allows_html_download(node)
-        ):
-            log.warning(
-                "Skipping download of %s from %s because the response body "
-                "starts with HTML instead of the expected file. This usually "
-                "means the link requires a separate login or points to an "
-                "error page.",
-                downloadpath,
-                node.url,
-            )
-            return False
+    etag_header = response.headers.get("ETag")
+    valid_resume = response.status_code == 206 and etag_header == transfer.partial_etag
+    if valid_resume:
+        return True
 
-        print(f"Downloading {downloadpath} [{node.type}]")
-        total_size_in_bytes = int(response.headers.get("content-length", 0)) + max(
-            resume_size, 0
-        )
-        progress_bar = tqdm(total=total_size_in_bytes, unit="iB", unit_scale=True)
-        if resume_size:
-            progress_bar.update(resume_size)
+    was_partial_response = response.status_code == 206
+    transfer.discard_partial()
+    return not was_partial_response
+
+
+def response_body_is_usable(
+    node: Node,
+    first_chunk: bytes,
+    downloadpath: Path,
+    log: logging.Logger = logger,
+) -> bool:
+    if not first_chunk:
+        return True
+    if not chunk_looks_like_html(first_chunk):
+        return True
+    if node_allows_html_download(node):
+        return True
+
+    log.warning(
+        "Skipping download of %s from %s because the response body starts "
+        "with HTML instead of the expected file. This usually means the link "
+        "requires a separate login or points to an error page.",
+        downloadpath,
+        node.url,
+    )
+    return False
+
+
+def write_response_body(
+    node: Node,
+    response: Any,
+    transfer: TransferPlan,
+    downloadpath: Path,
+    content: Any,
+    first_chunk: bytes,
+) -> None:
+    print(f"Downloading {downloadpath} [{node.type}]")
+    total_size_in_bytes = int(response.headers.get("content-length", 0)) + max(
+        transfer.resume_size, 0
+    )
+    progress_bar = tqdm(total=total_size_in_bytes, unit="iB", unit_scale=True)
+    try:
+        if transfer.resume_size:
+            progress_bar.update(transfer.resume_size)
         downloadpath.parent.mkdir(parents=True, exist_ok=True)
-        # Record the ETag this partial is being fetched against so an
-        # interrupted download can be safely resumed next time.
+
+        etag_header = response.headers.get("ETag")
         if etag_header:
             try:
-                etag_sidecar.write_text(etag_header, encoding="utf-8")
+                transfer.etag_sidecar.write_text(etag_header, encoding="utf-8")
             except OSError:
                 pass
-        mode = "ab" if resume_size else "wb"
-        with tmp_downloadpath.open(mode) as file:
+
+        mode = "ab" if transfer.resume_size else "wb"
+        with transfer.tmp_path.open(mode) as file:
             if first_chunk:
                 progress_bar.update(len(first_chunk))
                 file.write(first_chunk)
             for data in content:
                 progress_bar.update(len(data))
                 file.write(data)
+    finally:
         progress_bar.close()
 
-        # The replacement is now fully on disk. Only at this point do we move a
-        # conflicting local file aside, so a failure above never empties the
-        # canonical path.
-        if conflict_rename_pending:
-            conflict_path = pathing.make_conflict_path(downloadpath)
-            try:
-                downloadpath.rename(conflict_path)
-                log.warning(
-                    "Detected local changes for %s, moved to %s before "
-                    "installing the updated file from Moodle",
-                    downloadpath,
-                    conflict_path,
-                )
-            except OSError:
-                log.exception(
-                    "Failed to move locally modified file %s to %s; keeping "
-                    "it and discarding the downloaded update to avoid data loss",
-                    downloadpath,
-                    conflict_path,
-                )
-                tmp_downloadpath.unlink(missing_ok=True)
-                etag_sidecar.unlink(missing_ok=True)
-                return True
 
-        os.replace(tmp_downloadpath, downloadpath)
-        etag_sidecar.unlink(missing_ok=True)
-        # Record a content hash of exactly the bytes we just downloaded, so the
-        # next run can detect genuine local modifications even when the remote
-        # only offers an opaque ETag (e.g. Sciebo/WebDAV). We hash the file we
-        # just wrote (untouched by the user at this point), never a pre-existing
-        # file, so a later user edit is never mistaken for our own download.
+def install_downloaded_file(
+    downloadpath: Path,
+    transfer: TransferPlan,
+    action: ConflictAction,
+    log: logging.Logger = logger,
+) -> bool:
+    if action == ConflictAction.RENAME_LOCAL:
+        conflict_path = pathing.make_conflict_path(downloadpath)
         try:
-            with downloadpath.open("rb") as fh:
-                node.content_hash = hashlib.file_digest(fh, "sha256").hexdigest()
+            downloadpath.rename(conflict_path)
+            log.warning(
+                "Detected local changes for %s, moved to %s before installing "
+                "the updated file from Moodle",
+                downloadpath,
+                conflict_path,
+            )
         except OSError:
+            log.exception(
+                "Failed to move locally modified file %s to %s; keeping it "
+                "and discarding the downloaded update to avoid data loss",
+                downloadpath,
+                conflict_path,
+            )
+            transfer.discard_partial()
+            return False
+
+    os.replace(transfer.tmp_path, downloadpath)
+    transfer.etag_sidecar.unlink(missing_ok=True)
+    return True
+
+
+def record_download_metadata(
+    node: Node,
+    downloadpath: Path,
+    etag_header: str | None,
+) -> None:
+    try:
+        with downloadpath.open("rb") as fh:
+            node.content_hash = hashlib.file_digest(fh, "sha256").hexdigest()
+    except OSError:
+        pass
+
+    if node.timemodified is not None:
+        try:
+            ts = int(node.timemodified)
+            os.utime(downloadpath, (ts, ts))
+        except (OSError, OverflowError, ValueError):
             pass
-        # Align the local mtime with Moodle's timemodified to detect local
-        # changes on subsequent runs.
-        if getattr(node, "timemodified", None) is not None:
-            try:
-                ts = int(node.timemodified)
-                os.utime(downloadpath, (ts, ts))
-            except (OSError, OverflowError, ValueError):
-                # If updating timestamps fails, fall back to the current time.
-                pass
-        # Persist a response ETag only when discovery did not already provide a
-        # remote version marker. Sciebo/WebDAV can expose one marker through
-        # PROPFIND and a different ETag on GET; the next scan compares against
-        # the PROPFIND marker, so replacing it here would force re-downloads on
-        # every run.
-        if etag_header is not None and getattr(node, "etag", None) is None:
-            try:
-                node.etag = etag_header
-            except Exception:
-                # If for some reason we cannot set it, just ignore.
-                pass
-        # Remember that we downloaded this path during the current run.
+
+    if etag_header is not None and node.etag is None:
+        node.etag = etag_header
+        node.etag_kind = RemoteMarkerKind.OPAQUE
+
+
+def download_file(
+    ctx: SyncContext,
+    node: Node,
+    log: logging.Logger = logger,
+) -> bool:
+    """Download file with progress bar if it isn't already downloaded."""
+    downloadpath = pathing.get_sanitized_node_path(node, Path(ctx.config.basedir))
+
+    if not node.url:
+        return False
+
+    if should_skip_before_decision(ctx, node, downloadpath, log):
+        return True
+
+    decision = decide_download(ctx, node, downloadpath, log)
+    if decision.skip:
+        return True
+
+    action = conflict_action(ctx, decision, downloadpath, log)
+    if action == ConflictAction.SKIP:
+        return True
+
+    transfer = prepare_transfer_plan(node, downloadpath)
+    with closing(
+        ctx.require_session().get(node.url, headers=transfer.headers, stream=True)
+    ) as response:
+        etag_header = response.headers.get("ETag")
+
+        if not validate_resume_response(response, transfer):
+            return False
+        if not download_response_is_usable(node, response, downloadpath, log):
+            return False
+
+        content = response.iter_content(DEFAULT_BLOCK_SIZE)
+        first_chunk = next((chunk for chunk in content if chunk), b"")
+        if not response_body_is_usable(node, first_chunk, downloadpath, log):
+            return False
+
+        write_response_body(
+            node, response, transfer, downloadpath, content, first_chunk
+        )
+        if not install_downloaded_file(downloadpath, transfer, action, log):
+            return True
+        record_download_metadata(node, downloadpath, etag_header)
         ctx.downloaded_paths.add(downloadpath)
         return True
 
@@ -485,15 +560,15 @@ def download_all_files(
 
 def download_node_tree(
     ctx: SyncContext,
-    cur_node: Any,
+    cur_node: Node,
     log: logging.Logger = logger,
 ) -> None:
     if len(cur_node.children) == 0:
-        if cur_node.url and not cur_node.is_downloaded:
+        if cur_node.url and not cur_node.is_handled:
             if cur_node.type == "Youtube":
                 try:
                     scan_and_download_youtube(ctx, cur_node, log)
-                    cur_node.is_downloaded = True
+                    cur_node.mark_handled()
                 except Exception:
                     log.exception(f"Failed to download the module {cur_node}")
                     log.error(
@@ -508,7 +583,7 @@ def download_node_tree(
                         else:
                             cur_node.name = cur_node.url.split("/")[-1]
                     if download_file(ctx, cur_node, log):
-                        cur_node.is_downloaded = True
+                        cur_node.mark_handled()
                 except Exception:
                     log.exception(f"Failed to download the module {cur_node}")
             elif cur_node.type == "Quiz":
@@ -520,7 +595,7 @@ def download_node_tree(
             else:
                 try:
                     if download_file(ctx, cur_node, log):
-                        cur_node.is_downloaded = True
+                        cur_node.mark_handled()
                 except Exception:
                     log.exception(f"Failed to download the module {cur_node}")
         return
@@ -531,10 +606,12 @@ def download_node_tree(
 
 def scan_and_download_youtube(
     ctx: SyncContext,
-    node: Any,
+    node: Node,
     log: logging.Logger = logger,
 ) -> bool:
     """Download Youtube-Videos using yt_dlp."""
+    if node.parent is None or node.url is None:
+        return False
     path = pathing.get_sanitized_node_path(node.parent, Path(ctx.config.basedir))
     link = node.url
     if filters.should_skip_url(ctx.config, link, "YouTube link", log):

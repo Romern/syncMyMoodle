@@ -3,7 +3,11 @@ from pathlib import Path
 from typing import Any
 
 from syncmymoodle.context import SyncContext
-from syncmymoodle.node import NAME_CLASH_ID_UNSET, Node
+from syncmymoodle.node import (
+    NAME_CLASH_ID_UNSET,
+    DownloadStatus,
+    Node,
+)
 from syncmymoodle.pathing import get_sanitized_node_path
 from syncmymoodle.storage import read_private_gzip_json, write_private_gzip_json
 
@@ -42,12 +46,11 @@ def node_to_cache_data(
 ) -> dict[str, Any]:
     timemodified = node.timemodified
     etag = node.etag
+    etag_kind = node.etag_kind
     content_hash = getattr(node, "content_hash", None)
-    is_downloaded = node.is_downloaded
+    is_handled = node.is_handled
     node_path = _node_path(ctx, node)
-    downloaded_this_run = (
-        ctx.downloaded_paths is not None and node_path in ctx.downloaded_paths
-    )
+    downloaded_this_run = node_path in ctx.downloaded_paths
     # If this file was not actually downloaded this run but a previously
     # downloaded version is still on disk, keep the previously cached version
     # markers. The node may still be marked is_downloaded=True when download
@@ -56,13 +59,14 @@ def node_to_cache_data(
     if (
         not downloaded_this_run
         and old_node is not None
-        and getattr(old_node, "is_downloaded", False)
+        and old_node.is_handled
         and node_path.exists()
     ):
         timemodified = getattr(old_node, "timemodified", None)
         etag = getattr(old_node, "etag", None)
+        etag_kind = getattr(old_node, "etag_kind", None)
         content_hash = getattr(old_node, "content_hash", None)
-        is_downloaded = True
+        is_handled = True
     return {
         "name": node.name,
         "id": node.id,
@@ -70,9 +74,13 @@ def node_to_cache_data(
         "url": node.url,
         "timemodified": timemodified,
         "etag": etag,
+        "etag_kind": str(etag_kind) if etag_kind else None,
         "content_hash": content_hash,
         "name_clash_id": node.name_clash_id,
-        "is_downloaded": is_downloaded,
+        "download_status": str(
+            DownloadStatus.HANDLED if is_handled else DownloadStatus.PENDING
+        ),
+        "is_downloaded": is_handled,
         "children": [
             node_to_cache_data(ctx, child, match_old_cache_child(old_node, child))
             for child in node.children
@@ -89,8 +97,10 @@ def node_from_cache_data(data: dict[str, Any], parent: Node | None = None) -> No
         url=data.get("url"),
         timemodified=data.get("timemodified"),
         etag=data.get("etag"),
+        etag_kind=data.get("etag_kind"),
         content_hash=data.get("content_hash"),
         name_clash_id=data.get("name_clash_id", NAME_CLASH_ID_UNSET),
+        download_status=data.get("download_status"),
         is_downloaded=data.get("is_downloaded", False),
     )
     node.children = [
@@ -107,10 +117,17 @@ def ensure_timemodified_attribute(node: Node) -> None:
         node.timemodified = None
     if not hasattr(node, "etag"):
         node.etag = None
+    if not hasattr(node, "etag_kind"):
+        node.etag_kind = None
     if not hasattr(node, "content_hash"):
         node.content_hash = None
     if not hasattr(node, "name_clash_id"):
         node.name_clash_id = getattr(node, "id", None)
+    if "download_status" not in node.__dict__:
+        legacy_is_downloaded = bool(node.__dict__.pop("is_downloaded", False))
+        node.download_status = (
+            DownloadStatus.HANDLED if legacy_is_downloaded else DownloadStatus.PENDING
+        )
     for child in getattr(node, "children", []):
         ensure_timemodified_attribute(child)
 

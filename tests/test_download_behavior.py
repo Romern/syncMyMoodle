@@ -2,7 +2,7 @@ import hashlib
 import os
 
 from syncmymoodle import course_cache, downloader
-from syncmymoodle.node import Node
+from syncmymoodle.node import Node, RemoteMarkerKind
 
 from .helpers import (
     FakeResponse,
@@ -147,7 +147,7 @@ def test_download_is_skipped_for_excluded_filetypes(tmp_path):
 
 def test_download_path_is_deduplicated_within_a_run(tmp_path):
     # Two distinct nodes that resolve to the same on-disk path must download
-    # only once, exercising the lazy-initialised ``_downloaded_paths`` guard.
+    # only once, exercising the per-run downloaded path guard.
     config = {"basedir": str(tmp_path)}
     syncer = make_context(config)
     syncer.session = FakeSession()
@@ -682,7 +682,7 @@ def test_unrecognized_partial_without_sidecar_is_not_resumed(tmp_path):
 SCIEBO_URL = "https://rwth-aachen.sciebo.de/public.php/webdav/notes.pdf"
 
 
-def _sciebo_tree(etag, is_downloaded=False, content_hash=None):
+def _sciebo_tree(etag, is_downloaded=False, content_hash=None, etag_kind=None):
     root = Node("", -1, "Root", None)
     semester = root.add_child("26ss", None, "Semester")
     course = semester.add_child("Download Course", 301, "Course")
@@ -692,17 +692,23 @@ def _sciebo_tree(etag, is_downloaded=False, content_hash=None):
         None,
         "Sciebo File",
         url=SCIEBO_URL,
-        additional_info={"Authorization": "Basic x"},
+        download_headers={"Authorization": "Basic x"},
         etag=etag,
+        etag_kind=etag_kind,
     )
     file_node.is_downloaded = is_downloaded
     file_node.content_hash = content_hash
     return root, file_node
 
 
-def _seed_sciebo_cache(config, etag, content, content_hash=None):
+def _seed_sciebo_cache(config, etag, content, content_hash=None, etag_kind=None):
     cache_syncer = make_context(config)
-    root, file_node = _sciebo_tree(etag, is_downloaded=True, content_hash=content_hash)
+    root, file_node = _sciebo_tree(
+        etag,
+        is_downloaded=True,
+        content_hash=content_hash,
+        etag_kind=etag_kind,
+    )
     cache_syncer.root_node = root
     course_cache.cache_root_node(cache_syncer)
     download_path = node_path(make_context(config), file_node)
@@ -869,6 +875,34 @@ def test_sciebo_changed_getetag_with_local_edit_preserves_conflict(tmp_path):
     assert conflicts[0].read_bytes() == edited
 
 
+def test_opaque_etag_is_not_treated_as_local_content_hash(tmp_path):
+    config = {"basedir": str(tmp_path), "updatefiles": True}
+    original = b"etag-looking marker is not a content proof"
+    old_marker = sha1(original)
+    download_path = _seed_sciebo_cache(
+        config,
+        old_marker,
+        original,
+        etag_kind=RemoteMarkerKind.OPAQUE,
+    )
+
+    syncer = make_context(config)
+    syncer.session = FakeSession()
+    new = b"remote v2"
+    syncer.session.add(
+        "GET",
+        SCIEBO_URL,
+        FakeResponse(headers={"Content-Type": "application/pdf"}, chunks=[new]),
+    )
+    _, current = _sciebo_tree(GETETAG_V2, etag_kind=RemoteMarkerKind.OPAQUE)
+
+    assert download_file(syncer, current) is True
+    assert download_path.read_bytes() == new
+    conflicts = list(download_path.parent.glob("*.syncconflict.*"))
+    assert len(conflicts) == 1
+    assert conflicts[0].read_bytes() == original
+
+
 # --------------------------------------------------------------------------
 # Cache reflects on-disk state, not optimistic Moodle markers (refinement)
 # --------------------------------------------------------------------------
@@ -933,7 +967,6 @@ def test_cache_preserves_content_hash_for_skipped_existing_file(tmp_path):
         "slides.pdf", URL, timemodified=100, etag='"v1"'
     )
     file_node.is_downloaded = True
-    syncer.downloaded_paths = set()
     syncer.root_node = root
     course_cache.cache_root_node(syncer)
 

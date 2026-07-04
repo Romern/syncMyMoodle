@@ -13,6 +13,7 @@ from syncmymoodle.constants import (
     RWTH_MOODLE_STATUS_URL,
 )
 from syncmymoodle.context import SyncContext
+from syncmymoodle.node import RemoteMarkerKind
 
 logger = logging.getLogger(__name__)
 
@@ -35,6 +36,10 @@ class OpencastTrack:
         # selected mp4 track, which is a better skip marker than a later GET
         # response ETag.
         return self.checksum
+
+    @property
+    def remote_marker_kind(self) -> RemoteMarkerKind | None:
+        return RemoteMarkerKind.CONTENT_HASH if self.checksum else None
 
 
 def log_backend_issue(
@@ -383,6 +388,6 @@ def resolve_track_from_episode(
         return None
 
     # Prefer the highest resolution plain HTTPS mp4 track.
-    selected_track = sorted(tracks, key=lambda track: track[0])[-1][1]
+    selected_track = max(tracks, key=lambda track: track[0])[1]
     ctx.opencast_track_cache[episode_id] = selected_track
     return selected_track

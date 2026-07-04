@@ -7,7 +7,7 @@ from bs4 import BeautifulSoup as bs
 from syncmymoodle import filters
 from syncmymoodle.constants import SCIEBO_LINK_RE
 from syncmymoodle.context import SyncContext
-from syncmymoodle.node import Node
+from syncmymoodle.node import Node, RemoteMarkerKind
 
 logger = logging.getLogger(__name__)
 
@@ -171,7 +171,9 @@ def _add_sciebo_files(
             )
             continue
 
-        etag_value = _extract_stable_etag(resp)
+        remote_marker = _extract_remote_marker(resp)
+        etag_value = remote_marker[0] if remote_marker else None
+        etag_kind = remote_marker[1] if remote_marker else None
 
         log.info(f"Sciebo response href: {new_href}")
         # get the displayname of the response
@@ -188,7 +190,11 @@ def _add_sciebo_files(
         if new_href.endswith("/"):
             # create a new node for the folder
             folder_node = parent_node.add_child(
-                displayname, None, "Sciebo Folder", etag=etag_value
+                displayname,
+                None,
+                "Sciebo Folder",
+                etag=etag_value,
+                etag_kind=etag_kind,
             )
             if folder_node is None:
                 continue
@@ -203,14 +209,15 @@ def _add_sciebo_files(
                 None,
                 "Sciebo File",
                 url=SCIEBO_URL + new_href,
-                additional_info=auth_header,
+                download_headers=auth_header,
                 etag=etag_value,
+                etag_kind=etag_kind,
             )
 
 
-def _extract_stable_etag(response_tag: Any) -> str | None:
-    # Extract a stable content hash for this item. Prefer the SHA1 checksum
-    # from oc:checksums if available; fall back to the raw ETag otherwise.
+def _extract_remote_marker(response_tag: Any) -> tuple[str, RemoteMarkerKind] | None:
+    # Prefer a stable content hash from oc:checksums; fall back to the raw ETag
+    # as an opaque remote-version marker.
     prop = response_tag.find("d:prop")
     if prop is None:
         return None
@@ -220,10 +227,10 @@ def _extract_stable_etag(response_tag: Any) -> str | None:
         for cs in checksums_tag.find_all("oc:checksum"):
             text = (cs.text or "").strip()
             if text.upper().startswith("SHA1:"):
-                return text.split(":", 1)[1]
+                return text.split(":", 1)[1], RemoteMarkerKind.CONTENT_HASH
 
     etag_tag = prop.find("d:getetag")
     if etag_tag and etag_tag.text:
-        return str(etag_tag.text).strip()
+        return str(etag_tag.text).strip(), RemoteMarkerKind.OPAQUE
 
     return None
