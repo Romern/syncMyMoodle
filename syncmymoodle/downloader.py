@@ -106,6 +106,44 @@ def download_response_is_usable(
     return True
 
 
+def conditional_get_confirms_unchanged(
+    ctx: SyncContext,
+    node: Any,
+    old_etag: str,
+    log: logging.Logger = logger,
+) -> bool:
+    """Return True when a cheap conditional GET proves the local file is current.
+
+    Some remote nodes, notably legacy Opencast and embedded video nodes, only
+    expose an ETag on the GET response. When the current scan cannot populate
+    ``node.etag``, ask the server whether the cached GET ETag is still current
+    before committing to a full re-download.
+    """
+    if not node.url:
+        return False
+
+    headers: dict[str, str] = {"If-None-Match": old_etag}
+    if node.type.lower() == "sciebo file" and isinstance(node.additional_info, dict):
+        headers = {**headers, **node.additional_info}
+
+    try:
+        with closing(
+            ctx.require_session().get(node.url, headers=headers, stream=True)
+        ) as response:
+            response_etag = response.headers.get("ETag")
+            if response.status_code == 304:
+                node.etag = old_etag
+                return True
+            if 200 <= response.status_code < 300 and response_etag == old_etag:
+                node.etag = response_etag
+                return True
+    except Exception as exc:
+        # A routine transient (timeout, reset) shouldn't spam a stack trace; we
+        # simply fall back to a normal download below.
+        log.warning("Failed to validate cached ETag for %s: %s", node.url, exc)
+    return False
+
+
 def download_file(
     ctx: SyncContext,
     node: Any,
@@ -177,6 +215,13 @@ def download_file(
                 # here made every checksum-less Sciebo file re-download and its
                 # identical local copy get moved aside as a spurious conflict on
                 # every run.
+                return True
+            if (
+                cached_timemodified is None
+                and old_etag
+                and getattr(node, "etag", None) is None
+                and conditional_get_confirms_unchanged(ctx, node, old_etag, log)
+            ):
                 return True
 
         # At this point, either there is no cache for this course/path, or

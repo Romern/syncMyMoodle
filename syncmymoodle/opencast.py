@@ -2,6 +2,7 @@ import json
 import logging
 import re
 import urllib.parse
+from dataclasses import dataclass
 from typing import Any, cast
 
 from bs4 import BeautifulSoup as bs
@@ -13,6 +14,24 @@ logger = logging.getLogger(__name__)
 
 OPENCAST_LTI_URL = "https://engage.streaming.rwth-aachen.de/lti"
 OPENCAST_SEARCH_URL = "https://engage.streaming.rwth-aachen.de/search/episode.json"
+SUPPORTED_CHECKSUM_LENGTHS = {"md5": 32, "sha1": 40, "sha256": 64}
+
+
+@dataclass(frozen=True)
+class OpencastTrack:
+    url: str
+    checksum_type: str | None = None
+    checksum: str | None = None
+    size: int | None = None
+    duration: int | None = None
+
+    @property
+    def remote_marker(self) -> str | None:
+        # The course cache stores remote version markers in Node.etag. For
+        # Opencast, the episode API exposes a real content checksum for the
+        # selected mp4 track, which is a better skip marker than a later GET
+        # response ETag.
+        return self.checksum
 
 
 def log_backend_issue(
@@ -251,20 +270,92 @@ def resolution_width(resolution: Any) -> int:
     return int(match.group(1))
 
 
-def extract_track_from_episode(
+def optional_int(value: Any) -> int | None:
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        return int(float(str(value)))
+    except (TypeError, ValueError, OverflowError):
+        return None
+
+
+def infer_checksum_type(checksum: str) -> str | None:
+    for checksum_type, expected_length in SUPPORTED_CHECKSUM_LENGTHS.items():
+        if len(checksum) == expected_length:
+            return checksum_type
+    return None
+
+
+def extract_checksum(track: dict[str, Any]) -> tuple[str | None, str | None]:
+    checksum_data = track.get("checksum")
+    checksum_type: str | None = None
+    checksum_value: str | None = None
+
+    if isinstance(checksum_data, dict):
+        raw_type = checksum_data.get("type")
+        if isinstance(raw_type, str):
+            checksum_type = raw_type.strip().lower()
+        for key in ("$", "value", "#text"):
+            raw_value = checksum_data.get(key)
+            if isinstance(raw_value, str) and raw_value.strip():
+                checksum_value = raw_value.strip()
+                break
+    elif isinstance(checksum_data, str):
+        checksum_value = checksum_data.strip()
+
+    if not checksum_value:
+        return None, None
+
+    checksum = checksum_value.lower()
+    checksum_type = checksum_type or infer_checksum_type(checksum)
+    expected_length = (
+        SUPPORTED_CHECKSUM_LENGTHS.get(checksum_type) if checksum_type else None
+    )
+    if expected_length is None:
+        return None, None
+    if len(checksum) != expected_length:
+        return None, None
+    if not re.fullmatch(r"[0-9a-f]+", checksum):
+        return None, None
+    return checksum_type, checksum
+
+
+def opencast_track_from_api(track: dict[str, Any]) -> OpencastTrack | None:
+    video = track.get("video")
+    url = track.get("url")
+    if (
+        not isinstance(url, str)
+        or not url
+        or track.get("mimetype") != "video/mp4"
+        or "transport" in track
+        or not isinstance(video, dict)
+    ):
+        return None
+
+    checksum_type, checksum = extract_checksum(track)
+    return OpencastTrack(
+        url=url,
+        checksum_type=checksum_type,
+        checksum=checksum,
+        size=optional_int(track.get("size")),
+        duration=optional_int(track.get("duration")),
+    )
+
+
+def resolve_track_from_episode(
     ctx: SyncContext,
     episode_id: str,
     log: logging.Logger = logger,
-) -> str | bool:
+) -> OpencastTrack | None:
     if episode_id in ctx.opencast_track_cache:
         return ctx.opencast_track_cache[episode_id]
 
     episode_url = f"{OPENCAST_SEARCH_URL}?id={episode_id}"
     episodejson = fetch_json(ctx, episode_url, f"episode {episode_id}", log)
     if episodejson is None:
-        return False
+        return None
 
-    tracks: list[tuple[int, str]] = []
+    tracks: list[tuple[int, OpencastTrack]] = []
     for entry in get_result_list(ctx, episodejson, f"episode {episode_id}", log):
         if not isinstance(entry, dict):
             continue
@@ -278,21 +369,17 @@ def extract_track_from_episode(
         for track in track_data:
             if not isinstance(track, dict):
                 continue
-            video = track.get("video")
-            url = track.get("url")
-            if (
-                url
-                and track.get("mimetype") == "video/mp4"
-                and "transport" not in track
-                and isinstance(video, dict)
-            ):
-                tracks.append((resolution_width(video.get("resolution")), url))
+            opencast_track = opencast_track_from_api(track)
+            if opencast_track is None:
+                continue
+            video = cast(dict[str, Any], track["video"])
+            tracks.append((resolution_width(video.get("resolution")), opencast_track))
 
     if not tracks:
         log.warning("Opencast: no downloadable mp4 track found for %s", episode_id)
-        return False
+        return None
 
     # Prefer the highest resolution plain HTTPS mp4 track.
-    track_url = sorted(tracks, key=lambda track: track[0])[-1][1]
-    ctx.opencast_track_cache[episode_id] = track_url
-    return track_url
+    selected_track = sorted(tracks, key=lambda track: track[0])[-1][1]
+    ctx.opencast_track_cache[episode_id] = selected_track
+    return selected_track

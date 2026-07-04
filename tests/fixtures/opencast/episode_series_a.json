@@ -6,6 +6,12 @@
           "track": {
             "mimetype": "video/mp4",
             "url": "https://video.example.test/opencast/series-a.mp4",
+            "checksum": {
+              "type": "md5",
+              "$": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+            },
+            "size": 3000,
+            "duration": 180000,
             "video": {
               "resolution": "1280x720"
             }

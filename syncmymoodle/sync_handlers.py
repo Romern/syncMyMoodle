@@ -232,12 +232,14 @@ def handle_embedded_link_module(
                             ctx, course_id, vid_id, log
                         ):
                             continue
-                        vid = opencast_api.extract_track_from_episode(ctx, vid_id, log)
-                        if not isinstance(vid, str) or not vid:
+                        track = opencast_api.resolve_track_from_episode(
+                            ctx, vid_id, log
+                        )
+                        if track is None:
                             continue
 
                         if filters.should_skip_url(
-                            ctx.config, vid, "Opencast video URL"
+                            ctx.config, track.url, "Opencast video URL"
                         ):
                             continue
 
@@ -245,8 +247,9 @@ def handle_embedded_link_module(
                             module["name"],
                             vid_id,
                             "Opencast",
-                            url=vid,
+                            url=track.url,
                             additional_info=course_id,
+                            etag=track.remote_marker,
                         )
 
                 if scan_page_links:
@@ -376,17 +379,18 @@ def handle_opencast_lti_module(
                     series_id,
                 )
                 continue
-            vid = opencast_api.extract_track_from_episode(ctx, episode_id, log)
-            if not isinstance(vid, str) or not vid:
+            track = opencast_api.resolve_track_from_episode(ctx, episode_id, log)
+            if track is None:
                 continue
-            if filters.should_skip_url(ctx.config, vid, "Opencast video URL"):
+            if filters.should_skip_url(ctx.config, track.url, "Opencast video URL"):
                 continue
             series_node.add_child(
                 mediapackage.get("title") or episode_id,
                 episode_id,
                 "Opencast",
-                url=vid,
+                url=track.url,
                 additional_info=module["id"],
+                etag=track.remote_marker,
             )
     else:
         if not engage_single_id:
@@ -399,17 +403,18 @@ def handle_opencast_lti_module(
                 ctx, engage_data, f"LTI module {module['id']}", log
             ):
                 return
-            vid = opencast_api.extract_track_from_episode(ctx, engage_single_id, log)
-            if not isinstance(vid, str) or not vid:
+            track = opencast_api.resolve_track_from_episode(ctx, engage_single_id, log)
+            if track is None:
                 return
-            if filters.should_skip_url(ctx.config, vid, "Opencast video URL"):
+            if filters.should_skip_url(ctx.config, track.url, "Opencast video URL"):
                 return
             section_node.add_child(
                 name,
                 engage_single_id,
                 "Opencast",
-                url=vid,
+                url=track.url,
                 additional_info=module["id"],
+                etag=track.remote_marker,
             )
 
 

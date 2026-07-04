@@ -317,6 +317,91 @@ def test_unchanged_linked_file_etag_skips_download(tmp_path):
     assert download_path.read_bytes() == content
 
 
+def test_get_only_etag_304_skips_download(tmp_path):
+    # Legacy Opencast/embedded nodes may only have the ETag discovered during
+    # the previous GET. If the current scan cannot provide a marker, validate
+    # the cached ETag with If-None-Match before re-downloading.
+    config = {"basedir": str(tmp_path), "updatefiles": True}
+    etag = '"opencast-v1"'
+    content = b"already downloaded video"
+    seed_course_cache(config, timemodified=None, etag=etag, is_downloaded=True)
+    syncer, file_node = make_run_syncer(config, timemodified=None, etag=None)
+    download_path = node_path(syncer, file_node)
+    download_path.parent.mkdir(parents=True, exist_ok=True)
+    download_path.write_bytes(content)
+    seen_headers = []
+
+    def unchanged(url, kwargs):
+        del url
+        seen_headers.append(kwargs.get("headers", {}).copy())
+        return FakeResponse(status_code=304, headers={"ETag": etag})
+
+    syncer.session.add("GET", URL, unchanged)
+
+    assert download_file(syncer, file_node) is True
+    assert syncer.session.count("GET", URL) == 1
+    assert seen_headers == [{"If-None-Match": etag}]
+    assert file_node.etag == etag
+    assert download_path.read_bytes() == content
+
+
+def test_get_only_etag_same_200_skips_download(tmp_path):
+    # Some servers ignore If-None-Match but still return the same ETag on a 200
+    # response. Closing that streamed response without reading the body avoids
+    # a needless full re-download.
+    config = {"basedir": str(tmp_path), "updatefiles": True}
+    etag = '"video-v1"'
+    content = b"already downloaded video"
+    seed_course_cache(config, timemodified=None, etag=etag, is_downloaded=True)
+    syncer, file_node = make_run_syncer(config, timemodified=None, etag=None)
+    download_path = node_path(syncer, file_node)
+    download_path.parent.mkdir(parents=True, exist_ok=True)
+    download_path.write_bytes(content)
+    syncer.session.add(
+        "GET",
+        URL,
+        FakeResponse(
+            headers={"Content-Type": "video/mp4", "ETag": etag},
+            chunks=[b"same remote body that should not be read"],
+        ),
+    )
+
+    assert download_file(syncer, file_node) is True
+    assert syncer.session.count("GET", URL) == 1
+    assert file_node.etag == etag
+    assert download_path.read_bytes() == content
+
+
+def test_get_only_etag_changed_200_downloads_update(tmp_path):
+    config = {"basedir": str(tmp_path), "updatefiles": True}
+    original = b"already downloaded video"
+    old_etag = sha1(original)
+    new_etag = '"video-v2"'
+    seed_course_cache(config, timemodified=None, etag=old_etag, is_downloaded=True)
+    syncer, file_node = make_run_syncer(config, timemodified=None, etag=None)
+    download_path = node_path(syncer, file_node)
+    download_path.parent.mkdir(parents=True, exist_ok=True)
+    download_path.write_bytes(original)
+    responses = [
+        FakeResponse(headers={"Content-Type": "video/mp4", "ETag": new_etag}),
+        FakeResponse(
+            headers={"Content-Type": "video/mp4", "ETag": new_etag},
+            chunks=[b"new remote video"],
+        ),
+    ]
+
+    def changed(url, kwargs):
+        del url, kwargs
+        return responses.pop(0)
+
+    syncer.session.add("GET", URL, changed)
+
+    assert download_file(syncer, file_node) is True
+    assert syncer.session.count("GET", URL) == 2
+    assert file_node.etag == new_etag
+    assert download_path.read_bytes() == b"new remote video"
+
+
 def test_unchanged_duplicate_section_file_uses_matching_cache_node(tmp_path):
     # Some Moodle courses contain duplicate same-named sections that collapse
     # onto the same local directory. Cache lookup must still match the section

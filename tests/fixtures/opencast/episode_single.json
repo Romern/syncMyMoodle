@@ -7,6 +7,12 @@
             {
               "mimetype": "video/mp4",
               "url": "https://video.example.test/opencast/single-low.mp4",
+              "checksum": {
+                "type": "md5",
+                "$": "11111111111111111111111111111111"
+              },
+              "size": 1000,
+              "duration": 120000,
               "video": {
                 "resolution": "640x360"
               }
@@ -14,6 +20,12 @@
             {
               "mimetype": "video/mp4",
               "url": "https://video.example.test/opencast/single-high.mp4",
+              "checksum": {
+                "type": "md5",
+                "$": "22222222222222222222222222222222"
+              },
+              "size": 2000,
+              "duration": 120000,
               "video": {
                 "resolution": "1920x1080"
               }

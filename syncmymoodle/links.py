@@ -128,18 +128,21 @@ def scan_for_links(
                 continue
             if not opencast_api.authenticate_episode(ctx, course_id, vid_id, log):
                 continue
-            vid = opencast_api.extract_track_from_episode(ctx, vid_id, log)
-            if not isinstance(vid, str) or not vid:
+            track = opencast_api.resolve_track_from_episode(ctx, vid_id, log)
+            if track is None:
                 continue
-            if filters.should_skip_url(ctx.config, vid, "Opencast video URL", log):
+            if filters.should_skip_url(
+                ctx.config, track.url, "Opencast video URL", log
+            ):
                 continue
 
             parent_node.add_child(
-                module_title or vid.split("/")[-1],
+                module_title or track.url.split("/")[-1],
                 vid_id,
                 "Opencast",
-                url=vid,
+                url=track.url,
                 additional_info=course_id,
+                etag=track.remote_marker,
             )
 
     # https://rwth-aachen.sciebo.de/s/XXX

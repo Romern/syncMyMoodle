@@ -2,12 +2,15 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import requests
 
 from syncmymoodle.config import Config
 from syncmymoodle.node import Node
+
+if TYPE_CHECKING:
+    from syncmymoodle.opencast import OpencastTrack
 
 
 @dataclass
@@ -24,7 +27,7 @@ class SyncContext:
     opencast_status_hint_logged: bool = False
     sciebo_link_cache: dict[str, Node] = field(default_factory=dict)
     opencast_episode_auth_cache: set[tuple[Any, str]] = field(default_factory=set)
-    opencast_track_cache: dict[str, str] = field(default_factory=dict)
+    opencast_track_cache: dict[str, OpencastTrack] = field(default_factory=dict)
     downloaded_paths: set[Path] | None = None
 
     def require_session(self) -> requests.Session:

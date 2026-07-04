@@ -59,9 +59,13 @@ def test_assignment_intro_opencast_embed_is_added_to_assignment_node(monkeypatch
     )
     monkeypatch.setattr(
         opencast,
-        "extract_track_from_episode",
+        "resolve_track_from_episode",
         lambda ctx, episode_id, *a, **k: (
-            f"https://video.example.test/{episode_id}/presentation.mp4"
+            opencast.OpencastTrack(
+                f"https://video.example.test/{episode_id}/presentation.mp4",
+                checksum_type="md5",
+                checksum="11111111111111111111111111111111",
+            )
         ),
     )
 
@@ -283,9 +287,13 @@ def test_mixed_course_sync_tree_covers_common_module_surfaces(monkeypatch):
     )
     monkeypatch.setattr(
         opencast,
-        "extract_track_from_episode",
+        "resolve_track_from_episode",
         lambda ctx, episode_id, *a, **k: (
-            f"https://video.example.test/{episode_id}/presentation.mp4"
+            opencast.OpencastTrack(
+                f"https://video.example.test/{episode_id}/presentation.mp4",
+                checksum_type="md5",
+                checksum="33333333333333333333333333333333",
+            )
         ),
     )
 

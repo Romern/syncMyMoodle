@@ -14,6 +14,12 @@
             {
               "mimetype": "video/mp4",
               "url": "https://video.example.test/opencast/series-b.mp4",
+              "checksum": {
+                "type": "md5",
+                "$": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+              },
+              "size": 4000,
+              "duration": 240000,
               "video": {
                 "resolution": "1920x1080"
               }
