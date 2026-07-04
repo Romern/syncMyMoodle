@@ -3,7 +3,7 @@ import urllib.parse
 from fnmatch import fnmatchcase
 from typing import Any
 
-from syncmymoodle.config import Config
+from syncmymoodle.config import Config, PatternConfig
 from syncmymoodle.constants import (
     COURSE_PREFIX_HANDLING_OPTIONS,
     COURSE_PREFIX_RE,
@@ -13,15 +13,7 @@ from syncmymoodle.constants import (
 logger = logging.getLogger(__name__)
 
 
-def as_list(value: Any) -> list[Any]:
-    if value is None:
-        return []
-    if isinstance(value, list):
-        return value
-    return [value]
-
-
-def course_id_in_filter(course_id: Any, entries: Any) -> bool:
+def course_id_in_filter(course_id: Any, entries: list[str]) -> bool:
     """Return True if ``course_id`` is referenced by a configured entry.
 
     Entries are course URLs (``.../course/view.php?id=NNN``). The ``id``
@@ -29,8 +21,7 @@ def course_id_in_filter(course_id: Any, entries: Any) -> bool:
     match courses ``1`` or ``2``. A bare numeric id entry is also accepted.
     """
     course_id = str(course_id)
-    for entry in entries or []:
-        entry = str(entry)
+    for entry in entries:
         parsed = urllib.parse.urlparse(entry)
         if course_id in urllib.parse.parse_qs(parsed.query).get("id", []):
             return True
@@ -39,20 +30,11 @@ def course_id_in_filter(course_id: Any, entries: Any) -> bool:
     return False
 
 
-def pattern_list(value: Any, course_id: Any = None) -> list[str]:
-    """Flatten a config exclusion value into a list of glob patterns.
-
-    ``value`` may be a flat list, or a per-course dict of the form
-    ``{"*": [...], "<course_id>": [...]}``.
-    """
-    patterns = []
-    if isinstance(value, dict):
-        patterns.extend(as_list(value.get("*")))
-        if course_id is not None:
-            patterns.extend(as_list(value.get(str(course_id))))
-    else:
-        patterns.extend(as_list(value))
-    return [str(pattern) for pattern in patterns if pattern is not None]
+def pattern_list(value: PatternConfig, course_id: Any = None) -> list[str]:
+    patterns = list(value.get("*", []))
+    if course_id is not None:
+        patterns.extend(value.get(str(course_id), []))
+    return patterns
 
 
 def format_course_name(

@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 import copy
+from collections.abc import Mapping
 from dataclasses import dataclass, field
-from typing import Any, Mapping
+from typing import Any, TypeAlias
+
+PatternConfig: TypeAlias = dict[str, list[str]]
 
 # Default module toggle tree used when the config file does not define one.
 DEFAULT_USED_MODULES: dict[str, Any] = {
@@ -11,6 +14,27 @@ DEFAULT_USED_MODULES: dict[str, Any] = {
     "url": {"youtube": True, "opencast": True, "sciebo": True, "quiz": False},
     "folder": True,
 }
+
+
+def as_string_list(value: Any) -> list[str]:
+    if value is None:
+        return []
+    if isinstance(value, list):
+        values = value
+    else:
+        values = [value]
+    return [str(item) for item in values if item is not None]
+
+
+def normalize_pattern_config(value: Any) -> PatternConfig:
+    if isinstance(value, Mapping):
+        return {
+            str(key): patterns
+            for key, raw_patterns in value.items()
+            if (patterns := as_string_list(raw_patterns))
+        }
+    patterns = as_string_list(value)
+    return {"*": patterns} if patterns else {}
 
 
 @dataclass
@@ -39,18 +63,16 @@ class Config:
     update_files_conflict: str = "rename"
 
     # Course/semester selection
-    selected_courses: list[Any] = field(default_factory=list)
-    skip_courses: list[Any] = field(default_factory=list)
-    only_sync_semester: list[Any] = field(default_factory=list)
+    selected_courses: list[str] = field(default_factory=list)
+    skip_courses: list[str] = field(default_factory=list)
+    only_sync_semester: list[str] = field(default_factory=list)
 
-    # Exclusions. exclude_links/sections/modules and allowed_domains may be
-    # either a flat list or a per-course dict ({"*": [...], "<id>": [...]}).
-    exclude_filetypes: list[Any] = field(default_factory=list)
-    exclude_files: list[Any] = field(default_factory=list)
-    exclude_links: Any = field(default_factory=list)
-    allowed_domains: Any = field(default_factory=list)
-    exclude_sections: Any = field(default_factory=list)
-    exclude_modules: Any = field(default_factory=list)
+    exclude_filetypes: list[str] = field(default_factory=list)
+    exclude_files: list[str] = field(default_factory=list)
+    exclude_links: PatternConfig = field(default_factory=dict)
+    allowed_domains: PatternConfig = field(default_factory=dict)
+    exclude_sections: PatternConfig = field(default_factory=dict)
+    exclude_modules: PatternConfig = field(default_factory=dict)
 
     # Module toggle tree (see DEFAULT_USED_MODULES).
     used_modules: dict[str, Any] = field(default_factory=dict)
@@ -77,17 +99,19 @@ class Config:
             nolinks=bool(raw.get("nolinks", raw.get("no_links", False))),
             updatefiles=bool(raw.get("updatefiles", raw.get("update_files", False))),
             update_files_conflict=raw.get("update_files_conflict") or "rename",
-            selected_courses=raw.get("selected_courses") or [],
-            skip_courses=raw.get("skip_courses") or [],
-            only_sync_semester=raw.get("only_sync_semester") or [],
-            exclude_filetypes=raw.get("exclude_filetypes") or [],
-            exclude_files=raw.get("exclude_files") or [],
-            exclude_links=raw.get("exclude_links") or [],
-            allowed_domains=raw.get("allowed_domains") or [],
-            exclude_sections=raw.get("exclude_sections", raw.get("skip_sections", []))
-            or [],
-            exclude_modules=raw.get("exclude_modules", raw.get("skip_modules", []))
-            or [],
+            selected_courses=as_string_list(raw.get("selected_courses")),
+            skip_courses=as_string_list(raw.get("skip_courses")),
+            only_sync_semester=as_string_list(raw.get("only_sync_semester")),
+            exclude_filetypes=as_string_list(raw.get("exclude_filetypes")),
+            exclude_files=as_string_list(raw.get("exclude_files")),
+            exclude_links=normalize_pattern_config(raw.get("exclude_links")),
+            allowed_domains=normalize_pattern_config(raw.get("allowed_domains")),
+            exclude_sections=normalize_pattern_config(
+                raw.get("exclude_sections", raw.get("skip_sections"))
+            ),
+            exclude_modules=normalize_pattern_config(
+                raw.get("exclude_modules", raw.get("skip_modules"))
+            ),
             used_modules=used_modules,
         )
 

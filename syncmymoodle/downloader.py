@@ -14,14 +14,12 @@ import yt_dlp
 from tqdm import tqdm
 
 from syncmymoodle import course_cache, filters, pathing
-from syncmymoodle.constants import YOUTUBE_ID_LENGTH
+from syncmymoodle.constants import HASH_ALGOS_BY_LENGTH, YOUTUBE_ID_LENGTH
 from syncmymoodle.context import SyncContext
 
 logger = logging.getLogger(__name__)
 
 DEFAULT_BLOCK_SIZE = 1024
-
-_HASH_ALGOS_BY_LENGTH = {32: "md5", 40: "sha1", 64: "sha256"}
 
 
 class FileMatch(Enum):
@@ -52,7 +50,7 @@ def classify_local_file(path: Path, marker: str | None) -> FileMatch:
     if not match:
         return FileMatch.UNKNOWN
     hex_str = match.group(1).lower()
-    algo = _HASH_ALGOS_BY_LENGTH.get(len(hex_str))
+    algo = HASH_ALGOS_BY_LENGTH.get(len(hex_str))
     if algo is None:
         return FileMatch.UNKNOWN
     try:

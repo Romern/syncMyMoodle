@@ -14,7 +14,7 @@ def test_defaults_applied_for_empty_config():
     assert cfg.nolinks is False
     assert cfg.updatefiles is False
     assert cfg.selected_courses == []
-    assert cfg.exclude_links == []
+    assert cfg.exclude_links == {}
     # A default module tree is provided when none is configured.
     assert cfg.module_enabled("assign")
     assert cfg.module_enabled("folder")
@@ -32,8 +32,8 @@ def test_legacy_key_aliases_are_resolved():
     )
     assert cfg.nolinks is True
     assert cfg.updatefiles is True
-    assert cfg.exclude_sections == ["Hidden*"]
-    assert cfg.exclude_modules == ["Skip Module"]
+    assert cfg.exclude_sections == {"*": ["Hidden*"]}
+    assert cfg.exclude_modules == {"*": ["Skip Module"]}
 
 
 def test_canonical_keys_win_over_aliases():
@@ -83,6 +83,24 @@ def test_module_helpers_reflect_toggles():
 def test_from_dict_accepts_none():
     cfg = Config.from_dict(None)
     assert cfg.basedir == "./"
+
+
+def test_filter_values_are_normalized():
+    cfg = Config.from_dict(
+        {
+            "selected_courses": 12,
+            "exclude_links": "*calendar*",
+            "allowed_domains": "moodle.rwth-aachen.de",
+            "exclude_sections": {"*": "General", 42: ["Hidden", None]},
+            "exclude_modules": {"42": "Quiz*"},
+        }
+    )
+
+    assert cfg.selected_courses == ["12"]
+    assert cfg.exclude_links == {"*": ["*calendar*"]}
+    assert cfg.allowed_domains == {"*": ["moodle.rwth-aachen.de"]}
+    assert cfg.exclude_sections == {"*": ["General"], "42": ["Hidden"]}
+    assert cfg.exclude_modules == {"42": ["Quiz*"]}
 
 
 def test_cli_preserves_canonical_config_keys(tmp_path, monkeypatch):

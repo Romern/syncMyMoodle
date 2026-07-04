@@ -4,6 +4,10 @@ import re
 INVALID_CHARS = '~"#%&*:<>?/\\{|}'
 
 YOUTUBE_ID_LENGTH = 11
+HASH_ALGOS_BY_LENGTH = {32: "md5", 40: "sha1", 64: "sha256"}
+CHECKSUM_LENGTHS_BY_ALGO = {
+    algo: length for length, algo in HASH_ALGOS_BY_LENGTH.items()
+}
 YOUTUBE_LINK_RE = re.compile(
     r"(https?://(www\.)?(youtube\.com/(watch\?[a-zA-Z0-9_=&-]*v=|embed/)|youtu.be/).{11})"
 )

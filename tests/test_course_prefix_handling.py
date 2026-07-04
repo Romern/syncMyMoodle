@@ -147,3 +147,27 @@ def test_clashing_files_without_name_clash_id_use_url_for_distinct_names():
     assert len(names) == 2
     assert len(set(names)) == 2
     assert "slides.pdf" not in names
+
+
+def test_opencast_name_clashes_use_uploaded_filename_suffix():
+    root = Node("", -1, "Root", None)
+    section = root.add_child("General", None, "Section")
+    section.add_child(
+        "Recording",
+        "episode-a",
+        "Opencast",
+        url="https://video.example.test/opencast/high.mp4",
+    )
+    section.add_child(
+        "Recording",
+        "episode-b",
+        "Opencast",
+        url="https://video.example.test/opencast/low.mp4",
+    )
+
+    root.remove_children_nameclashes()
+
+    assert [child.name for child in section.children] == [
+        "Recording_high.mp4",
+        "Recording_low.mp4",
+    ]

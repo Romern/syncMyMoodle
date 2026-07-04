@@ -7,14 +7,17 @@ from typing import Any, cast
 
 from bs4 import BeautifulSoup as bs
 
-from syncmymoodle.constants import MOODLE_URL, RWTH_MOODLE_STATUS_URL
+from syncmymoodle.constants import (
+    CHECKSUM_LENGTHS_BY_ALGO,
+    MOODLE_URL,
+    RWTH_MOODLE_STATUS_URL,
+)
 from syncmymoodle.context import SyncContext
 
 logger = logging.getLogger(__name__)
 
 OPENCAST_LTI_URL = "https://engage.streaming.rwth-aachen.de/lti"
 OPENCAST_SEARCH_URL = "https://engage.streaming.rwth-aachen.de/search/episode.json"
-SUPPORTED_CHECKSUM_LENGTHS = {"md5": 32, "sha1": 40, "sha256": 64}
 
 
 @dataclass(frozen=True)
@@ -280,7 +283,7 @@ def optional_int(value: Any) -> int | None:
 
 
 def infer_checksum_type(checksum: str) -> str | None:
-    for checksum_type, expected_length in SUPPORTED_CHECKSUM_LENGTHS.items():
+    for checksum_type, expected_length in CHECKSUM_LENGTHS_BY_ALGO.items():
         if len(checksum) == expected_length:
             return checksum_type
     return None
@@ -309,7 +312,7 @@ def extract_checksum(track: dict[str, Any]) -> tuple[str | None, str | None]:
     checksum = checksum_value.lower()
     checksum_type = checksum_type or infer_checksum_type(checksum)
     expected_length = (
-        SUPPORTED_CHECKSUM_LENGTHS.get(checksum_type) if checksum_type else None
+        CHECKSUM_LENGTHS_BY_ALGO.get(checksum_type) if checksum_type else None
     )
     if expected_length is None:
         return None, None

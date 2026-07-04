@@ -3,7 +3,7 @@ from __future__ import annotations
 import base64
 import hashlib
 from pathlib import Path
-from typing import Any, cast
+from typing import Any
 
 NAME_CLASH_ID_UNSET = object()
 
@@ -136,73 +136,79 @@ class Node:
             hashlib.md5(str(key).encode("utf-8")).hexdigest().encode("utf-8")
         ).decode()[:10]
 
-    def remove_children_nameclashes(self) -> None:
-        # Check for duplicate filenames
+    def _stable_clash_name(self) -> str:
+        filename = Path(self.name)
+        return filename.stem + "_" + self._clash_suffix() + filename.suffix
 
-        unclashed_children = []
-        # work on copy since deleting from the iterated list breaks stuff
-        copy_children = self.children.copy()
-        for child in copy_children:
-            if child not in self.children:
+    def _opencast_clash_name(self) -> str:
+        return f"{Path(self.name).name}_{str(self.url).split('/')[-1]}"
+
+    @staticmethod
+    def _general_name_clash(left: Node, right: Node) -> bool:
+        if left.name != right.name:
+            return False
+        if left.url != right.url:
+            return True
+        return (
+            left.type == "Course"
+            and right.type == "Course"
+            and left.name_clash_id != right.name_clash_id
+        )
+
+    @staticmethod
+    def _apply_opencast_name_clashes(children: list[Node]) -> list[Node]:
+        remaining = children.copy()
+        renamed: list[Node] = []
+
+        while remaining:
+            child = remaining.pop(0)
+            renamed.append(child)
+            if child.type != "Opencast":
                 continue
-            self.children.remove(child)
-            unclashed_children.append(child)
-            if child.type == "Opencast":
-                siblings = [
-                    c
-                    for c in self.children
-                    if c.name == child.name and c.url != child.url
-                ]
-                if len(siblings) > 0:
-                    # if an Opencast filename is duplicate in its directory, we append the filename as it was uploaded
-                    tmp_name = Path(child.name).name
-                    child.name = f"{tmp_name}_{cast(str, child.url).split('/')[-1]}"
-                    for s in siblings:
-                        tmp_name = Path(s.name).name
-                        s.name = f"{s.name}_{cast(str, s.url).split('/')[-1]}"
-                        self.children.remove(s)
-                    unclashed_children.extend(siblings)
 
-        self.children = unclashed_children
-
-        unclashed_children = []
-        copy_children = self.children.copy()
-        for child in copy_children:
-            if child not in self.children:
-                continue
-            self.children.remove(child)
-            unclashed_children.append(child)
             siblings = [
-                c
-                for c in self.children
-                if c.name == child.name
-                and (
-                    c.url != child.url
-                    # Course prefix handling may create duplicate URL-less course
-                    # folders. Other URL-less nodes, such as duplicate Moodle
-                    # sections, keep the legacy behavior and merge silently.
-                    or (
-                        child.type == "Course"
-                        and c.type == "Course"
-                        and c.name_clash_id != child.name_clash_id
-                    )
-                )
+                sibling
+                for sibling in remaining
+                if sibling.name == child.name and sibling.url != child.url
             ]
-            if len(siblings) > 0:
-                # if a filename is still duplicate in its directory, we rename
-                # it by appending a stable per-node key (works for ids and urls).
-                filename = Path(child.name)
-                child.name = (
-                    filename.stem + "_" + child._clash_suffix() + filename.suffix
-                )
-                for s in siblings:
-                    filename = Path(s.name)
-                    s.name = filename.stem + "_" + s._clash_suffix() + filename.suffix
-                    self.children.remove(s)
-                unclashed_children.extend(siblings)
+            if not siblings:
+                continue
 
-        self.children = unclashed_children
+            child.name = child._opencast_clash_name()
+            for sibling in siblings:
+                sibling.name = sibling._opencast_clash_name()
+                remaining.remove(sibling)
+                renamed.append(sibling)
+
+        return renamed
+
+    @classmethod
+    def _apply_general_name_clashes(cls, children: list[Node]) -> list[Node]:
+        remaining = children.copy()
+        renamed: list[Node] = []
+
+        while remaining:
+            child = remaining.pop(0)
+            renamed.append(child)
+            siblings = [
+                sibling
+                for sibling in remaining
+                if cls._general_name_clash(child, sibling)
+            ]
+            if not siblings:
+                continue
+
+            child.name = child._stable_clash_name()
+            for sibling in siblings:
+                sibling.name = sibling._stable_clash_name()
+                remaining.remove(sibling)
+                renamed.append(sibling)
+
+        return renamed
+
+    def remove_children_nameclashes(self) -> None:
+        self.children = self._apply_opencast_name_clashes(self.children)
+        self.children = self._apply_general_name_clashes(self.children)
 
         for child in self.children:
-            # recurse whole tree
             child.remove_children_nameclashes()
