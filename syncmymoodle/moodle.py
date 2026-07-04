@@ -1,5 +1,4 @@
 import base64
-import http.client
 import json
 import logging
 import sys
@@ -12,13 +11,7 @@ logger = logging.getLogger(__name__)
 
 MOODLE_HOST = "moodle.rwth-aachen.de"
 MOODLE_REST_URL = f"https://{MOODLE_HOST}/webservice/rest/server.php"
-
-
-def _cookie_header(cookie_jar: Any, domain: str) -> str:
-    # workaround for macos
-    cookie_dict = cookie_jar.get_dict(domain=domain)
-    found = ["%s=%s" % (name, value) for (name, value) in cookie_dict.items()]
-    return ";".join(found)
+MOODLE_MOBILE_LAUNCH_URL = f"https://{MOODLE_HOST}/admin/tool/mobile/launch.php"
 
 
 def get_moodle_wstoken(
@@ -28,25 +21,22 @@ def get_moodle_wstoken(
         raise Exception("You need to login() first.")
     params = {
         "service": "moodle_mobile_app",
-        "passport": 1,
+        "passport": "1",
         "urlscheme": "moodlemobile",
     }
-    # response = session.head("https://moodle.rwth-aachen.de/admin/tool/mobile/launch.php", params=params, allow_redirects=False)
-
-    conn = http.client.HTTPSConnection(MOODLE_HOST)
-    conn.request(
-        "GET",
-        "/admin/tool/mobile/launch.php?" + urllib.parse.urlencode(params),
-        headers={"Cookie": _cookie_header(session.cookies, MOODLE_HOST)},
+    # The launch endpoint answers with a redirect to a non-HTTP app scheme,
+    # moodlemobile://token=BASE64[&...]. Do NOT follow it: making requests
+    # resolve the redirect makes it look for a connection adapter for the
+    # moodlemobile:// scheme and raise InvalidSchema.
+    response = session.get(
+        MOODLE_MOBILE_LAUNCH_URL, params=params, allow_redirects=False
     )
-    response = conn.getresponse()
 
     # token is in an app schema, which contains the wstoken base64-encoded along with some other token
-    location = response.getheader("Location")
+    location = response.headers.get("Location")
     if location is None or "token=" not in location:
         location_path = urllib.parse.urlparse(location).path if location else None
-        body_prefix = response.read(1000).decode("utf-8", errors="replace")
-        conn.close()
+        body_prefix = response.text[:1000]
 
         if location_path and location_path.startswith("/admin/tool/policy/"):
             log.critical(
@@ -92,7 +82,6 @@ def get_moodle_wstoken(
     # token value and decode it defensively so a malformed redirect yields a
     # clear message instead of a traceback.
     token_base64d = location.split("token=", 1)[1].split("&")[0]
-    conn.close()
     try:
         token_parts = base64.b64decode(token_base64d).decode().split(":::")
     except (ValueError, UnicodeDecodeError):
