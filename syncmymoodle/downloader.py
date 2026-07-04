@@ -222,12 +222,10 @@ def local_verification_marker(old_node: Node | None) -> str | None:
 
 
 def assess_local_copy(
-    ctx: SyncContext,
     node: Node,
     downloadpath: Path,
     old_node: Node | None,
     cached_timemodified: Any,
-    log: logging.Logger = logger,
 ) -> LocalCopyState:
     """Classify the on-disk file when the remote may have changed."""
     verdict = classify_local_file(downloadpath, local_verification_marker(old_node))
@@ -246,14 +244,6 @@ def assess_local_copy(
 
     remote_etag = getattr(node, "etag", None)
     remote_etag_kind = node.etag_kind
-    if remote_etag is None and node.url:
-        try:
-            head_resp = ctx.require_session().head(node.url, allow_redirects=True)
-            remote_etag = head_resp.headers.get("ETag")
-            remote_etag_kind = RemoteMarkerKind.OPAQUE if remote_etag else None
-        except Exception:
-            remote_etag = None
-
     if (
         remote_etag_kind == RemoteMarkerKind.CONTENT_HASH
         and classify_local_file(downloadpath, remote_etag) is FileMatch.MATCH
@@ -296,9 +286,7 @@ def decide_download(
     ):
         return DownloadDecision(skip=True)
 
-    verdict = assess_local_copy(
-        ctx, node, downloadpath, old_node, cached_timemodified, log
-    )
+    verdict = assess_local_copy(node, downloadpath, old_node, cached_timemodified)
     if verdict is LocalCopyState.UP_TO_DATE:
         return DownloadDecision(skip=True)
     return DownloadDecision(skip=False, conflict=verdict is LocalCopyState.MODIFIED)

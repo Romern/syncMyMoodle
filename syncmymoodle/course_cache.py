@@ -53,9 +53,9 @@ def node_to_cache_data(
     downloaded_this_run = node_path in ctx.downloaded_paths
     # If this file was not actually downloaded this run but a previously
     # downloaded version is still on disk, keep the previously cached version
-    # markers. The node may still be marked is_downloaded=True when download
-    # traversal skipped an unchanged existing file; downloaded_paths tells us
-    # whether bytes were really replaced in this run.
+    # markers. The node may still be marked as handled when download traversal
+    # skipped an unchanged existing file; downloaded_paths tells us whether
+    # bytes were really replaced in this run.
     if (
         not downloaded_this_run
         and old_node is not None
@@ -80,7 +80,6 @@ def node_to_cache_data(
         "download_status": str(
             DownloadStatus.HANDLED if is_handled else DownloadStatus.PENDING
         ),
-        "is_downloaded": is_handled,
         "children": [
             node_to_cache_data(ctx, child, match_old_cache_child(old_node, child))
             for child in node.children
@@ -101,7 +100,6 @@ def node_from_cache_data(data: dict[str, Any], parent: Node | None = None) -> No
         content_hash=data.get("content_hash"),
         name_clash_id=data.get("name_clash_id", NAME_CLASH_ID_UNSET),
         download_status=data.get("download_status"),
-        is_downloaded=data.get("is_downloaded", False),
     )
     node.children = [
         node_from_cache_data(child, node)
@@ -123,11 +121,6 @@ def ensure_timemodified_attribute(node: Node) -> None:
         node.content_hash = None
     if not hasattr(node, "name_clash_id"):
         node.name_clash_id = getattr(node, "id", None)
-    if "download_status" not in node.__dict__:
-        legacy_is_downloaded = bool(node.__dict__.pop("is_downloaded", False))
-        node.download_status = (
-            DownloadStatus.HANDLED if legacy_is_downloaded else DownloadStatus.PENDING
-        )
     for child in getattr(node, "children", []):
         ensure_timemodified_attribute(child)
 
