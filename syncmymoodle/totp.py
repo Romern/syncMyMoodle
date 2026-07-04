@@ -11,6 +11,9 @@ https://github.com/susam/mintotp
 
 
 def hotp(key: str, counter: int, digits: int = 6, digest: str = "sha1") -> str:
+    # Secrets are often copied with grouping spaces or dashes; base32 decoding
+    # would reject those, so strip them first.
+    key = key.replace(" ", "").replace("-", "")
     key_bytes = base64.b32decode(key.upper() + "=" * ((8 - len(key)) % 8))
     counter_bytes = struct.pack(">Q", counter)
     mac = hmac.new(key_bytes, counter_bytes, digest).digest()

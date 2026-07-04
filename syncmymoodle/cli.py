@@ -134,9 +134,12 @@ def main() -> None:
 
     if args.config:
         overwrite_config = Path(args.config)
-        if overwrite_config.is_file():
-            with overwrite_config.open() as f:
-                config = json.load(f)
+        if not overwrite_config.is_file():
+            # Silently continuing without the explicitly requested file would
+            # sync with unintended settings (or crash later); fail fast instead.
+            parser.error(f"config file not found: {args.config}")
+        with overwrite_config.open() as f:
+            config = json.load(f)
     else:
         config = {}
 
@@ -216,7 +219,7 @@ def main() -> None:
             sys.exit(1)
 
         if (
-            config.get("secretservicetotpsecret")
+            config.get("secret_service_store_totp_secret")
             and not args.totp
             and not config.get("totp")
         ):

@@ -107,7 +107,30 @@ def get_moodle_wstoken(
     return token_parts[1]
 
 
-def get_all_courses(session: requests.Session, wstoken: str, user_id: Any) -> Any:
+def api_error_message(payload: Any) -> str | None:
+    """Return a description when ``payload`` is a Moodle error object.
+
+    Moodle webservice endpoints answer errors (expired token, missing
+    permission, hidden course, ...) with a JSON object carrying ``exception``/
+    ``errorcode`` instead of the expected data. Callers previously indexed
+    straight into the expected shape, turning such errors into KeyError
+    tracebacks.
+    """
+    if not isinstance(payload, dict):
+        return None
+    if not (payload.get("exception") or payload.get("errorcode")):
+        return None
+    message = payload.get("message") or payload.get("exception") or "unknown error"
+    errorcode = payload.get("errorcode")
+    return f"{message} (errorcode: {errorcode})" if errorcode else str(message)
+
+
+def get_all_courses(
+    session: requests.Session,
+    wstoken: str,
+    user_id: Any,
+    log: logging.Logger = logger,
+) -> Any:
     data = {
         "requests[0][function]": "core_enrol_get_users_courses",
         "requests[0][arguments]": json.dumps(
@@ -123,10 +146,35 @@ def get_all_courses(session: requests.Session, wstoken: str, user_id: Any) -> An
         "wsfunction": "tool_mobile_call_external_functions",
     }
     resp = session.post(MOODLE_REST_URL, params=params, data=data)
-    return json.loads(resp.json()["responses"][0]["data"])
+    payload = resp.json()
+
+    # Without the course list nothing can be synced, so API errors here are
+    # fatal. A clear message beats the KeyError traceback this used to raise.
+    error = api_error_message(payload)
+    if error is None:
+        responses = payload.get("responses") if isinstance(payload, dict) else None
+        first = responses[0] if responses else None
+        if first is None:
+            error = "unexpected response shape"
+        elif first.get("error"):
+            error = str(first.get("exception") or first.get("data"))
+        else:
+            return json.loads(first["data"])
+    log.critical(
+        "Failed to retrieve the course list from Moodle: %s. Your session "
+        "or webservice token may have expired; delete the cookie file and "
+        "try again.",
+        error,
+    )
+    sys.exit(1)
 
 
-def get_course(session: requests.Session, wstoken: str, course_id: Any) -> Any:
+def get_course(
+    session: requests.Session,
+    wstoken: str,
+    course_id: Any,
+    log: logging.Logger = logger,
+) -> Any:
     data = {
         "courseid": int(course_id),
         "moodlewssettingfilter": True,
@@ -139,7 +187,14 @@ def get_course(session: requests.Session, wstoken: str, course_id: Any) -> Any:
         "wsfunction": "core_course_get_contents",
     }
     resp = session.post(MOODLE_REST_URL, params=params, data=data)
-    return resp.json()
+    payload = resp.json()
+    # A course-specific error (hidden course, missing permission) should skip
+    # this course but not abort the whole sync.
+    error = api_error_message(payload)
+    if error is not None:
+        log.error("Skipping course %s: %s", course_id, error)
+        return []
+    return payload
 
 
 def get_userid(
@@ -159,7 +214,7 @@ def get_userid(
     }
     resp = session.post(MOODLE_REST_URL, params=params, data=data)
     payload = resp.json()
-    if not payload.get("userid") or not payload["userprivateaccesskey"]:
+    if not payload.get("userid") or not payload.get("userprivateaccesskey"):
         log.critical(
             f"Error while getting userid and access key: {json.dumps(payload, indent=4)}"
         )
@@ -167,7 +222,12 @@ def get_userid(
     return payload["userid"], payload["userprivateaccesskey"]
 
 
-def get_assignment(session: requests.Session, wstoken: str, course_id: Any) -> Any:
+def get_assignment(
+    session: requests.Session,
+    wstoken: str,
+    course_id: Any,
+    log: logging.Logger = logger,
+) -> Any:
     data = {
         "courseids[0]": int(course_id),
         "includenotenrolledcourses": 1,
@@ -181,7 +241,12 @@ def get_assignment(session: requests.Session, wstoken: str, course_id: Any) -> A
         "wsfunction": "mod_assign_get_assignments",
     }
     resp = session.post(MOODLE_REST_URL, params=params, data=data)
-    courses = resp.json()["courses"]
+    payload = resp.json()
+    error = api_error_message(payload)
+    if error is not None:
+        log.error("Skipping assignments for course %s: %s", course_id, error)
+        return None
+    courses = payload.get("courses") or []
     return courses[0] if courses else None
 
 
@@ -212,22 +277,29 @@ def get_assignment_submission_files(
     log.info(response.text)
 
     payload = response.json()
-    files = payload.get("lastattempt", {}).get("submission", {}).get("plugins", [])
-    files += payload.get("lastattempt", {}).get("teamsubmission", {}).get("plugins", [])
-    files += payload.get("feedback", {}).get("plugins", [])
+    # Per-assignment errors (e.g. no permission to view the submission) keep
+    # their historical behavior of contributing no files. The "or {}" also
+    # guards against JSON null values, which .get(key, {}) does not.
+    lastattempt = payload.get("lastattempt") or {}
+    files = (lastattempt.get("submission") or {}).get("plugins") or []
+    files += (lastattempt.get("teamsubmission") or {}).get("plugins") or []
+    files += (payload.get("feedback") or {}).get("plugins") or []
 
     files = [
         f.get("files", [])
         for p in files
         for f in p.get("fileareas", [])
-        if f["area"] in ["download", "submission_files", "feedback_files"]
+        if f.get("area") in ["download", "submission_files", "feedback_files"]
     ]
     files = [f for folder in files for f in folder]
     return files
 
 
 def get_folders_by_courses(
-    session: requests.Session, wstoken: str, course_id: Any
+    session: requests.Session,
+    wstoken: str,
+    course_id: Any,
+    log: logging.Logger = logger,
 ) -> Any:
     data = {
         "courseids[0]": str(course_id),
@@ -243,5 +315,9 @@ def get_folders_by_courses(
     }
 
     response = session.post(MOODLE_REST_URL, params=params, data=data)
-    folder = response.json()["folders"]
-    return folder
+    payload = response.json()
+    error = api_error_message(payload)
+    if error is not None:
+        log.error("Skipping folders for course %s: %s", course_id, error)
+        return []
+    return payload.get("folders") or []

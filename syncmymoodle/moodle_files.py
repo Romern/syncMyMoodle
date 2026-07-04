@@ -65,9 +65,15 @@ def add_moodle_content_file_node(
         return None
 
     mimetype = content.get("mimetype") or "unknown"
-    filename = urllib.parse.urlsplit(file_url).path.split("/")[-1]
-    if not filename:
-        filename = content.get("filename")
+    # A fileurl whose path ends in "/" yields an empty segment, and the payload
+    # may lack a filename too; a None node name would crash path sanitization
+    # at download time, so fall back to a placeholder (name-clash resolution
+    # disambiguates duplicates by URL).
+    filename = (
+        urllib.parse.urlsplit(file_url).path.split("/")[-1]
+        or content.get("filename")
+        or "file"
+    )
     return add_moodle_file_node(
         parent_node,
         "/",
