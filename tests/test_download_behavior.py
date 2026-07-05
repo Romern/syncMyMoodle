@@ -40,10 +40,11 @@ def test_classify_local_file_is_tristate(tmp_path):
 
     f = tmp_path / "f.bin"
     f.write_bytes(b"hello world\n")
+    hello_world_sha1 = sha1(b"hello world\n")
 
-    assert classify_local_file(f, sha1(b"hello world\n")) is FileMatch.MATCH
+    assert classify_local_file(f, hello_world_sha1) is FileMatch.MATCH
     assert classify_local_file(f, sha256(b"hello world\n")) is FileMatch.MATCH
-    assert classify_local_file(f, f'"{sha1(b"hello world\n")}"') is FileMatch.MATCH
+    assert classify_local_file(f, f'"{hello_world_sha1}"') is FileMatch.MATCH
     assert classify_local_file(f, sha1(b"other")) is FileMatch.DIFFER
 
     assert classify_local_file(f, '"66a1b2c3d4e5"') is FileMatch.UNKNOWN
