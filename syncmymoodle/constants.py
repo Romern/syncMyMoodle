@@ -1,7 +1,11 @@
 import re
+import urllib.parse
 
 # Characters removed from any path segment derived from Moodle names/URLs.
 INVALID_CHARS = '~"#%&*:<>?/\\{|}'
+
+# Chunk size for streamed HTTP reads.
+DEFAULT_BLOCK_SIZE = 1024
 
 YOUTUBE_ID_LENGTH = 11
 HASH_ALGOS_BY_LENGTH = {32: "md5", 40: "sha1", 64: "sha256"}
@@ -16,6 +20,8 @@ OPENCAST_LINK_RE = re.compile(
 )
 SCIEBO_LINK_RE = re.compile(r"https://rwth-aachen\.sciebo\.de/s/[a-zA-Z0-9-]+")
 MOODLE_URL = "https://moodle.rwth-aachen.de/"
+# Canonical host for same-origin checks (no port, lowercase).
+MOODLE_NETLOC = urllib.parse.urlparse(MOODLE_URL).netloc.lower()
 RWTH_HOMEPAGE_URL = "https://www.rwth-aachen.de/"
 RWTH_STATUS_URL = "https://maintenance.itc.rwth-aachen.de/ticket/status/messages"
 RWTH_MOODLE_STATUS_URL = (
@@ -32,3 +38,44 @@ RWTH_DISRUPTIVE_STATUS_CLASSES = {
 }
 COURSE_PREFIX_RE = re.compile(r"^\((?P<prefix>[^()]{2})\) +(?P<course_name>.+)$")
 COURSE_PREFIX_HANDLING_OPTIONS = ("keep", "remove", "suffix")
+
+# Quiz review pages can be saved as a self-contained HTML snapshot ("html"),
+# rendered to PDF via a headless Chromium-family browser ("pdf"), both, or not
+# at all ("off"). Legacy boolean config values map to "both"/"off".
+QUIZ_MODES = ("off", "html", "pdf", "both")
+
+# Per-resource and total budgets for inlining quiz snapshot assets. This keeps
+# quiz snapshots offline-safe without accidentally pulling huge media files.
+QUIZ_ASSET_MAX_BYTES = 10 * 1024 * 1024
+QUIZ_SNAPSHOT_MAX_ASSET_BYTES = 50 * 1024 * 1024
+
+# Chromium-family binaries used to render quiz snapshots to PDF, in preference
+# order. Looked up on PATH via shutil.which; CHROMIUM_KNOWN_PATHS covers the
+# platform-specific install locations that are usually not on PATH.
+CHROMIUM_BINARY_NAMES = (
+    "chromium",
+    "chromium-browser",
+    "chrome",
+    "google-chrome",
+    "google-chrome-stable",
+    "msedge",
+    "microsoft-edge",
+    "microsoft-edge-stable",
+)
+
+# Absolute locations checked when none of CHROMIUM_BINARY_NAMES is on PATH
+# (macOS app bundles and Windows Program Files installs).
+CHROMIUM_KNOWN_PATHS = (
+    "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+    "/Applications/Chromium.app/Contents/MacOS/Chromium",
+    "/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge",
+    r"C:\Program Files\Google\Chrome\Application\chrome.exe",
+    r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe",
+    r"C:\Program Files\Microsoft\Edge\Application\msedge.exe",
+    r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe",
+)
+
+# Headless render budget (ms). Chromium's --virtual-time-budget lets client-side
+# MathJax finish typesetting before the page is printed, replacing the fixed
+# javascript-delay the old wkhtmltopdf renderer relied on.
+CHROMIUM_PDF_TIMEOUT_MS = 30000

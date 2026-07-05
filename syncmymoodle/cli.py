@@ -191,17 +191,6 @@ def main() -> None:
 
     logging.basicConfig(level=args.loglevel)
 
-    url_modules = (
-        config.get("used_modules", {}).get("url")
-        if isinstance(config.get("used_modules"), dict)
-        else None
-    )
-    if isinstance(url_modules, dict) and url_modules.get("quiz"):
-        logger.warning(
-            "Quiz PDF generation is disabled until the pdfkit/wkhtmltopdf "
-            "renderer is replaced with a safer implementation."
-        )
-
     if keyring and config.get("use_secret_service"):
         if config.get("password"):
             logger.critical("You need to remove your password from your config file!")

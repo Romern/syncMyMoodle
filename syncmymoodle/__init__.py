@@ -25,6 +25,7 @@ Sync tree:
 
 Download:
     downloader      tree walk, update/conflict policy, ETag/resume handling
+    quiz            quiz review HTML snapshots and Chromium PDF rendering
 
 Persistence:
     storage         private gzip-JSON and cookie (de)serialization
@@ -36,5 +37,6 @@ Core (cross-cutting):
     context         SyncContext: per-run mutable state (session, caches, ...)
     config          Config: typed, normalized view of user settings
     constants       shared URLs, regexes and option constants
+    http_utils      small shared HTTP response helpers
     filters         course/section/module/link skip rules
 """

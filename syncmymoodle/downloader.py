@@ -13,14 +13,17 @@ from typing import Any
 import yt_dlp
 from tqdm import tqdm
 
-from syncmymoodle import course_cache, filters, pathing
-from syncmymoodle.constants import HASH_ALGOS_BY_LENGTH, YOUTUBE_ID_LENGTH
+from syncmymoodle import course_cache, filters, pathing, quiz
+from syncmymoodle.constants import (
+    DEFAULT_BLOCK_SIZE,
+    HASH_ALGOS_BY_LENGTH,
+    YOUTUBE_ID_LENGTH,
+)
 from syncmymoodle.context import SyncContext
+from syncmymoodle.http_utils import content_type_without_parameters
 from syncmymoodle.node import Node, RemoteMarkerKind
 
 logger = logging.getLogger(__name__)
-
-DEFAULT_BLOCK_SIZE = 1024
 
 
 class FileMatch(Enum):
@@ -81,11 +84,6 @@ def classify_local_file(path: Path, marker: str | None) -> FileMatch:
     except OSError:
         return FileMatch.UNKNOWN
     return FileMatch.MATCH if digest == hex_str else FileMatch.DIFFER
-
-
-def content_type_without_parameters(response: Any) -> str:
-    content_type = str(response.headers.get("Content-Type", ""))
-    return content_type.split(";", 1)[0].strip().lower()
 
 
 def node_allows_html_download(node: Any) -> bool:
@@ -575,11 +573,11 @@ def download_node_tree(
                 except Exception:
                     log.exception(f"Failed to download the module {cur_node}")
             elif cur_node.type == "Quiz":
-                log.warning(
-                    "Skipping quiz PDF generation for %s because it is disabled "
-                    "for security.",
-                    cur_node.name,
-                )
+                try:
+                    if quiz.download_quiz(ctx, cur_node, log):
+                        cur_node.mark_handled()
+                except Exception:
+                    log.exception(f"Failed to download the module {cur_node}")
             else:
                 try:
                     if download_file(ctx, cur_node, log):
@@ -618,11 +616,3 @@ def scan_and_download_youtube(
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
         ydl.download([link])
     return True
-
-
-def download_quiz(node: Any, log: logging.Logger = logger) -> bool:
-    log.warning(
-        "Quiz PDF generation is disabled until the pdfkit/wkhtmltopdf "
-        "renderer is replaced with a safer implementation."
-    )
-    return False

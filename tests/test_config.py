@@ -49,16 +49,41 @@ def test_canonical_keys_win_over_aliases():
     assert cfg.updatefiles is False
 
 
-def test_quiz_is_forced_off_even_when_enabled():
-    cfg = Config.from_dict({"used_modules": {"url": {"quiz": True, "opencast": True}}})
-    assert cfg.url_module_enabled("quiz") is False
-    assert cfg.url_module_enabled("opencast") is True
+def test_quiz_mode_normalizes_values():
+    # Legacy booleans map onto the mode strings.
+    assert (
+        Config.from_dict({"used_modules": {"url": {"quiz": True}}}).quiz_mode == "both"
+    )
+    assert (
+        Config.from_dict({"used_modules": {"url": {"quiz": False}}}).quiz_mode == "off"
+    )
+    # Explicit modes are passed through (case-insensitively).
+    for mode in ("off", "html", "pdf", "both"):
+        cfg = Config.from_dict({"used_modules": {"url": {"quiz": mode.upper()}}})
+        assert cfg.quiz_mode == mode
+    # Unrecognized values disable quizzes rather than crashing.
+    assert (
+        Config.from_dict({"used_modules": {"url": {"quiz": "wat"}}}).quiz_mode == "off"
+    )
+
+
+def test_quiz_enabled_helper_tracks_mode():
+    on = Config.from_dict({"used_modules": {"url": {"quiz": "pdf", "opencast": True}}})
+    assert on.url_module_enabled("quiz") is True
+    assert on.url_module_enabled("opencast") is True
+    off = Config.from_dict({"used_modules": {"url": {"quiz": "off"}}})
+    assert off.url_module_enabled("quiz") is False
+
+
+def test_quiz_defaults_to_html_when_no_modules_configured():
+    # HTML is the safe default: it archives e-tests without launching a browser.
+    assert Config.from_dict({}).quiz_mode == "html"
 
 
 def test_from_dict_does_not_mutate_input():
     raw = {"used_modules": {"url": {"quiz": True, "opencast": True}}}
     cfg = Config.from_dict(raw)
-    assert cfg.url_module_enabled("quiz") is False
+    assert cfg.quiz_mode == "both"
     assert raw["used_modules"]["url"]["quiz"] is True
 
 

@@ -8,7 +8,7 @@ Downloads the following materials:
 * Resource files
 * URLs: OpenCast, Youtube and Sciebo videos/files, and all other non HTML files
 * Folders
-* Quizzes (**Disabled by default**)
+* Quizzes: Downloads offline HTML of quiz attempts, with opt-in PDF generation
 * Pages and Labels: Embedded Opencast and Youtube Videos
 
 On subsequent runs, *syncMyMoodle* can also update existing files when the
@@ -180,6 +180,7 @@ configuration does:
     "basedir": "./", // The base directory where all your files will be synced to
     "course_prefix_handling": "suffix", // How to handle local course folders starting with a two-character prefix like "(VO) ": "keep" (backwards-compatible default), "remove", or "suffix" (recommended)
     "cookie_file": "./session", // The location of the session/cookie file, which can be used instead of a password.
+    "chromium_path": "", // Optional path to a Chrome/Chromium/Edge binary for quiz PDF rendering. Leave empty to auto-detect.
     "use_secret_service": false, // Use the system keyring (see README), instead of a password.
     "secret_service_store_totp_secret": false, // Store the TOTP secret in the system keyring.
     "no_links": false, // Skip links embedded in pages. Warning: This *will* prevent Onlycast videos from being downloaded.
@@ -190,7 +191,7 @@ configuration does:
             "youtube": true, // Include YouTube Links/Embeds
             "opencast": true, // Include Opencast Links/Embeds
             "sciebo": true, // Include Sciebo Links/Embeds
-            "quiz": false // Quiz PDF generation is currently disabled for security reasons
+            "quiz": "html" // Save quiz review attempts: "off", "html" (self-contained snapshot, default), "pdf" (browser-rendered PDF), or "both"
         },
         "folder": true // Include folders
     },
@@ -235,9 +236,19 @@ syncMyMoodle stores per-course metadata in a hidden `.syncmymoodle_cache` file
 inside each synced course directory. Delete that file to force a fresh metadata
 cache for a course.
 
-Quiz PDF generation is currently disabled. The previous optional
-`pdfkit`/`wkhtmltopdf` renderer is no longer maintained
-and has open security issues leading to RCE.
+Quiz review attempts are saved as self-contained HTML snapshots by default
+(`url.quiz = "html"`). The snapshot inlines same-origin Moodle assets and strips
+network-bearing content so it remains readable offline and does not contact
+Moodle when opened later. Set `url.quiz` to `"off"` to disable quiz snapshots.
+
+PDF rendering is separate and opt-in: set `url.quiz` to `"pdf"` or `"both"` to
+render snapshots with a locally installed Chrome, Chromium or Edge browser. This
+uses the browser's built-in headless PDF output, which avoids the old
+`pdfkit`/`wkhtmltopdf` renderer and its security issues, but syncMyMoodle does
+not launch a browser unless you explicitly choose one of the PDF modes. The
+browser is auto-detected on PATH and in the usual macOS/Windows install
+locations, or you can point `chromium_path` at a specific binary. When no
+browser is found, the HTML snapshot is kept as a fallback so nothing is lost.
 
 ### TOTP
 

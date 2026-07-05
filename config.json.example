@@ -9,6 +9,7 @@
     "basedir": "./",
     "course_prefix_handling": "suffix",
     "cookie_file": "./session",
+    "chromium_path": "",
     "use_secret_service": false,
     "secret_service_store_totp_secret": false,
     "no_links": false,
@@ -19,7 +20,7 @@
             "youtube": true,
             "opencast": true,
             "sciebo": true,
-            "quiz": false
+            "quiz": "html"
         },
         "folder": true
     },

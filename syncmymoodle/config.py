@@ -1,17 +1,22 @@
 from __future__ import annotations
 
 import copy
+import logging
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Any, TypeAlias
 
+from syncmymoodle.constants import QUIZ_MODES
+
 PatternConfig: TypeAlias = dict[str, list[str]]
+
+logger = logging.getLogger(__name__)
 
 # Default module toggle tree used when the config file does not define one.
 DEFAULT_USED_MODULES: dict[str, Any] = {
     "assign": True,
     "resource": True,
-    "url": {"youtube": True, "opencast": True, "sciebo": True, "quiz": False},
+    "url": {"youtube": True, "opencast": True, "sciebo": True, "quiz": "html"},
     "folder": True,
 }
 
@@ -37,6 +42,32 @@ def normalize_pattern_config(value: Any) -> PatternConfig:
     return {"*": patterns} if patterns else {}
 
 
+def normalize_quiz_mode(value: Any, log: logging.Logger = logger) -> str:
+    """Map a configured quiz value onto one of :data:`QUIZ_MODES`.
+
+    Accepts the legacy booleans (``True`` -> ``"both"``, ``False``/absent ->
+    ``"off"``) as well as the mode strings ``"off"``/``"html"``/``"pdf"``/
+    ``"both"``. Unrecognized values are treated as ``"off"`` with a warning.
+    """
+    if value is True:
+        return "both"
+    if value is False or value is None:
+        return "off"
+    mode = str(value).strip().lower()
+    if mode in QUIZ_MODES:
+        return mode
+    if mode in ("none", "false", "no"):
+        return "off"
+    if mode in ("true", "yes"):
+        return "both"
+    log.warning(
+        "Unrecognized quiz mode %r; expected one of %s. Disabling quizzes.",
+        value,
+        ", ".join(QUIZ_MODES),
+    )
+    return "off"
+
+
 @dataclass
 class Config:
     """Typed view of the user configuration.
@@ -56,6 +87,10 @@ class Config:
     # Local sync target and naming
     basedir: str = "./"
     course_prefix_handling: str = "keep"
+
+    # Explicit path to a Chromium-family browser used to render quiz PDFs. When
+    # unset, the browser is auto-discovered (see downloader.find_chromium).
+    chromium_path: str | None = None
 
     # Link/download behaviour
     nolinks: bool = False
@@ -82,11 +117,12 @@ class Config:
         raw = dict(raw or {})
 
         used_modules = copy.deepcopy(raw.get("used_modules") or DEFAULT_USED_MODULES)
-        # Quiz PDF generation is disabled until the pdfkit/wkhtmltopdf renderer
-        # is replaced with a safer implementation. Enforce it regardless of the
-        # configured value so no entry point can accidentally re-enable it.
+        # Normalize the quiz toggle to a mode string so the rest of the code can
+        # branch on off/html/pdf/both without re-parsing legacy booleans.
         if isinstance(used_modules.get("url"), dict):
-            used_modules["url"]["quiz"] = False
+            used_modules["url"]["quiz"] = normalize_quiz_mode(
+                used_modules["url"].get("quiz")
+            )
 
         return cls(
             user=raw.get("user"),
@@ -94,6 +130,7 @@ class Config:
             totp=raw.get("totp"),
             totpsecret=raw.get("totpsecret"),
             cookie_file=raw.get("cookie_file") or "./session",
+            chromium_path=raw.get("chromium_path") or None,
             basedir=raw.get("basedir") or "./",
             course_prefix_handling=raw.get("course_prefix_handling") or "keep",
             nolinks=bool(raw.get("nolinks", raw.get("no_links", False))),
@@ -122,4 +159,16 @@ class Config:
     def url_module_enabled(self, name: str) -> bool:
         """Whether a url sub-module is enabled (youtube/opencast/sciebo/quiz)."""
         url = self.used_modules.get("url")
-        return bool(url.get(name)) if isinstance(url, dict) else False
+        if not isinstance(url, dict):
+            return False
+        if name == "quiz":
+            # quiz is a mode string ("off"/"html"/"pdf"/"both"), not a bool.
+            return normalize_quiz_mode(url.get("quiz")) != "off"
+        return bool(url.get(name))
+
+    @property
+    def quiz_mode(self) -> str:
+        """Quiz output mode: one of off/html/pdf/both (see QUIZ_MODES)."""
+        url = self.used_modules.get("url")
+        value = url.get("quiz") if isinstance(url, dict) else None
+        return normalize_quiz_mode(value)

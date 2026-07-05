@@ -4,12 +4,12 @@ from typing import Any, cast
 
 from bs4 import BeautifulSoup as bs
 
-from syncmymoodle import downloader as downloader_api
 from syncmymoodle import filters
 from syncmymoodle import opencast as opencast_api
 from syncmymoodle import sciebo as sciebo_api
 from syncmymoodle.constants import OPENCAST_LINK_RE, YOUTUBE_LINK_RE
 from syncmymoodle.context import SyncContext
+from syncmymoodle.http_utils import content_type_without_parameters
 from syncmymoodle.node import Node, RemoteMarkerKind
 
 logger = logging.getLogger(__name__)
@@ -66,7 +66,7 @@ def scan_for_links(
             if filters.should_skip_url(ctx.config, text, "link", log):
                 return
             response = ctx.require_session().head(text, allow_redirects=True)
-            content_type = downloader_api.content_type_without_parameters(response)
+            content_type = content_type_without_parameters(response)
             if "youtube.com" in text or "youtu.be" in text:
                 # workaround for youtube providing bad headers when using HEAD
                 pass
