@@ -7,11 +7,12 @@ from typing import Any
 
 import requests
 
+from syncmymoodle.constants import MOODLE_URL
+
 logger = logging.getLogger(__name__)
 
-MOODLE_HOST = "moodle.rwth-aachen.de"
-MOODLE_REST_URL = f"https://{MOODLE_HOST}/webservice/rest/server.php"
-MOODLE_MOBILE_LAUNCH_URL = f"https://{MOODLE_HOST}/admin/tool/mobile/launch.php"
+MOODLE_REST_URL = f"{MOODLE_URL}webservice/rest/server.php"
+MOODLE_MOBILE_LAUNCH_URL = f"{MOODLE_URL}admin/tool/mobile/launch.php"
 
 
 def get_moodle_wstoken(

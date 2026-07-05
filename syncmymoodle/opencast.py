@@ -5,14 +5,13 @@ import urllib.parse
 from dataclasses import dataclass
 from typing import Any, cast
 
-from bs4 import BeautifulSoup as bs
-
 from syncmymoodle.constants import (
     CHECKSUM_LENGTHS_BY_ALGO,
     MOODLE_URL,
     RWTH_MOODLE_STATUS_URL,
 )
 from syncmymoodle.context import SyncContext
+from syncmymoodle.http_utils import parse_html
 from syncmymoodle.node import RemoteMarkerKind
 
 logger = logging.getLogger(__name__)
@@ -95,13 +94,6 @@ def extract_lti_form_data(soup: Any) -> dict[str, Any]:
     }
 
 
-def get_input_value(soup: Any, name: str) -> str | None:
-    input_tag = soup.find("input", {"name": name})
-    if input_tag and input_tag.get("value"):
-        return cast(str, input_tag["value"])
-    return None
-
-
 def submit_lti_form(
     ctx: SyncContext,
     engage_data: dict[str, Any],
@@ -153,7 +145,7 @@ def fetch_lti_form_data(
         log_backend_issue(ctx, response.text, log)
         return None
 
-    soup = bs(response.text, features="lxml")
+    soup = parse_html(response.text)
     engage_data = extract_lti_form_data(soup)
     if not engage_data:
         log.info("Opencast: no LTI form fields found for %s", context)

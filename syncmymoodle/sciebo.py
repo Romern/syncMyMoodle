@@ -7,6 +7,7 @@ from bs4 import BeautifulSoup as bs
 from syncmymoodle import filters
 from syncmymoodle.constants import SCIEBO_LINK_RE
 from syncmymoodle.context import SyncContext
+from syncmymoodle.http_utils import get_input_value, parse_html
 from syncmymoodle.node import Node, RemoteMarkerKind
 
 logger = logging.getLogger(__name__)
@@ -64,7 +65,7 @@ def scan_public_shares(
             continue
 
         # parse html code
-        soup = bs(response.text, features="lxml")
+        soup = parse_html(response.text)
 
         # get the requesttoken
         requestToken = cast(
@@ -76,16 +77,13 @@ def scan_public_shares(
             continue
         log.info(f"Sciebo request token: {requestToken}")
 
-        # get the property value of the input tag with the name sharingToken
-        sharing_input = soup.find("input", {"name": "sharingToken"})
-        if sharing_input and sharing_input.get("value"):
-            sharingToken = cast(str, sharing_input["value"])
-        else:
-            # Newer Sciebo/Nextcloud share pages no longer render the token as a
-            # hidden input. It matches the /s/<token> segment of the share URL,
-            # which is what the public WebDAV endpoint expects, so fall back to
-            # deriving it from the link instead of skipping the share.
-            sharingToken = sharing_token_from_link(link)
+        # Newer Sciebo/Nextcloud share pages no longer render the token as a
+        # hidden input. It matches the /s/<token> segment of the share URL,
+        # which is what the public WebDAV endpoint expects, so fall back to
+        # deriving it from the link instead of skipping the share.
+        sharingToken = get_input_value(soup, "sharingToken") or sharing_token_from_link(
+            link
+        )
         if not sharingToken:
             log.warning("Sciebo: missing sharingToken for link %s, skipping", link)
             continue

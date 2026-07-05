@@ -20,7 +20,10 @@ from syncmymoodle.constants import (
     YOUTUBE_ID_LENGTH,
 )
 from syncmymoodle.context import SyncContext
-from syncmymoodle.http_utils import content_type_without_parameters
+from syncmymoodle.http_utils import (
+    HTML_CONTENT_TYPES,
+    content_type_without_parameters,
+)
 from syncmymoodle.node import Node, RemoteMarkerKind
 
 logger = logging.getLogger(__name__)
@@ -124,7 +127,7 @@ def download_response_is_usable(
         return False
 
     content_type = content_type_without_parameters(response)
-    if content_type in {"text/html", "application/xhtml+xml"}:
+    if content_type in HTML_CONTENT_TYPES:
         if not node_allows_html_download(node):
             log.warning(
                 "Skipping download of %s from %s because the server returned "
@@ -209,6 +212,20 @@ def remote_unchanged(
     return False
 
 
+def align_mtime_with_timemodified(node: Node, downloadpath: Path) -> None:
+    """Set the local file's mtime to Moodle's timemodified.
+
+    Later runs use the timestamp to detect local changes
+    """
+    if getattr(node, "timemodified", None) is None:
+        return
+    try:
+        ts = int(node.timemodified)
+        os.utime(downloadpath, (ts, ts))
+    except (OSError, OverflowError, ValueError):
+        pass
+
+
 def local_verification_marker(old_node: Node | None) -> str | None:
     if old_node is None:
         return None
@@ -248,12 +265,7 @@ def assess_local_copy(
     ):
         node.etag = remote_etag
         node.etag_kind = remote_etag_kind
-        if getattr(node, "timemodified", None) is not None:
-            try:
-                ts = int(node.timemodified)
-                os.utime(downloadpath, (ts, ts))
-            except (OSError, OverflowError, ValueError):
-                pass
+        align_mtime_with_timemodified(node, downloadpath)
         return LocalCopyState.UP_TO_DATE
     return LocalCopyState.MODIFIED
 
@@ -468,12 +480,7 @@ def record_download_metadata(
     except OSError:
         pass
 
-    if node.timemodified is not None:
-        try:
-            ts = int(node.timemodified)
-            os.utime(downloadpath, (ts, ts))
-        except (OSError, OverflowError, ValueError):
-            pass
+    align_mtime_with_timemodified(node, downloadpath)
 
     if etag_header is not None and node.etag is None:
         node.etag = etag_header

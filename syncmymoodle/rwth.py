@@ -4,10 +4,9 @@ import sys
 import time
 import urllib.parse
 from pathlib import Path
-from typing import Any, cast
+from typing import Any
 
 import requests
-from bs4 import BeautifulSoup as bs
 
 from syncmymoodle.constants import (
     MOODLE_URL,
@@ -18,6 +17,7 @@ from syncmymoodle.constants import (
     RWTH_STATUS_URL,
 )
 from syncmymoodle.context import SyncContext
+from syncmymoodle.http_utils import get_input_value, parse_html
 from syncmymoodle.storage import (
     load_cookies_from_data,
     read_private_gzip_json,
@@ -37,13 +37,6 @@ def _tag_classes(tag: Any) -> set[str]:
     return {str(class_name) for class_name in classes or []}
 
 
-def _get_input_value(soup: Any, name: str) -> str | None:
-    input_tag = soup.find("input", {"name": name})
-    if input_tag and input_tag.get("value"):
-        return cast(str, input_tag["value"])
-    return None
-
-
 def _get_session_key(soup: Any, log: logging.Logger = logger) -> str:
     script = soup.find("script", string=lambda text: text and "sesskey" in text)
     match = re.search(r'"sesskey":"(.*?)"', script.text) if script is not None else None
@@ -59,7 +52,7 @@ def _require_input_value(
     context: str,
     log: logging.Logger = logger,
 ) -> str:
-    value = _get_input_value(soup, name)
+    value = get_input_value(soup, name)
     if value is None:
         log.critical(
             "Failed to login: expected form field %r was missing at the "
@@ -120,7 +113,7 @@ def current_rwth_service_issues(
         )
         return []
 
-    soup = bs(response.text, features="lxml")
+    soup = parse_html(response.text)
     issues: list[dict[str, str]] = []
     for card in soup.select(".notification-card"):
         indicator = card.select_one(".notification-status-indicator")
@@ -234,13 +227,13 @@ def login(ctx: SyncContext, log: logging.Logger = logger) -> None:
         check_rwth_status_page(log)
         sys.exit(1)
     if resp.url.startswith(f"{MOODLE_URL}my/"):
-        soup = bs(resp.text, features="lxml")
+        soup = parse_html(resp.text)
         ctx.session_key = _get_session_key(soup, log)
         save_session_cookies(cookie_file, session.cookies)
         return
 
     # Create a separate soup for maintenance detection
-    soup_check = bs(resp.text, features="lxml")
+    soup_check = parse_html(resp.text)
 
     # Remove known info banners by class
     for banner in soup_check.select(".themeboostunioninfobanner"):
@@ -262,7 +255,7 @@ def login(ctx: SyncContext, log: logging.Logger = logger) -> None:
         log.info(f"Cleaned page body:\n{body_text}")
         sys.exit()
 
-    soup = bs(resp.text, features="lxml")
+    soup = parse_html(resp.text)
     if soup.find("input", {"name": "RelayState"}) is None:
         csrf_token = _require_input_value(
             soup, "csrf_token", "username/password form", log
@@ -275,7 +268,7 @@ def login(ctx: SyncContext, log: logging.Logger = logger) -> None:
         }
         resp2 = session.post(resp.url, data=login_data)
 
-        soup = bs(resp2.text, features="lxml")
+        soup = parse_html(resp2.text)
 
         if soup.find(id="fudis_selected_token_ids_input") is None:
             log.critical(
@@ -302,7 +295,7 @@ def login(ctx: SyncContext, log: logging.Logger = logger) -> None:
 
         resp3 = session.post(resp2.url, data=totp_selection_data)
 
-        soup = bs(resp3.text, features="lxml")
+        soup = parse_html(resp3.text)
         if soup.find(id="fudis_otp_input") is None:
             log.critical(
                 "Failed to select TOTP generator. Maybe your TOTP serial "
@@ -333,7 +326,7 @@ def login(ctx: SyncContext, log: logging.Logger = logger) -> None:
         resp4 = session.post(resp3.url, data=totp_login_data)
 
         time.sleep(1)  # if we go too fast, we might have our connection closed
-        soup = bs(resp4.text, features="lxml")
+        soup = parse_html(resp4.text)
     if soup.find("input", {"name": "RelayState"}) is None:
         log.critical(
             "Failed to login. Maybe your login-info was wrong or the RWTH "
@@ -352,6 +345,6 @@ def login(ctx: SyncContext, log: logging.Logger = logger) -> None:
         ),
     }
     resp = session.post(f"{MOODLE_URL}Shibboleth.sso/SAML2/POST", data=data)
-    soup = bs(resp.text, features="lxml")
+    soup = parse_html(resp.text)
     ctx.session_key = _get_session_key(soup, log)
     save_session_cookies(cookie_file, session.cookies)

@@ -35,7 +35,11 @@ from syncmymoodle.constants import (
     QUIZ_SNAPSHOT_MAX_ASSET_BYTES,
 )
 from syncmymoodle.context import SyncContext
-from syncmymoodle.http_utils import content_type_without_parameters
+from syncmymoodle.http_utils import (
+    HTML_CONTENT_TYPES,
+    content_type_without_parameters,
+    parse_html,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -241,7 +245,7 @@ def _fetch_quiz_asset_data_uri(
         url,
         remaining_bytes,
         # Never embed HTML (login/error pages) as an asset.
-        lambda ct: ct not in {"text/html", "application/xhtml+xml"},
+        lambda ct: ct not in HTML_CONTENT_TYPES,
         "asset",
         "application/octet-stream",
         log,
@@ -698,7 +702,7 @@ def build_quiz_snapshot(
     referenced assets are stripped, direct quiz images and inline-style assets
     are embedded as data URIs with size budgets.
     """
-    soup = bs(html, features="lxml")
+    soup = parse_html(html)
     head = _ensure_quiz_snapshot_head(soup)
     asset_cache: dict[str, str | None] = {}
     remaining_bytes = [QUIZ_SNAPSHOT_MAX_ASSET_BYTES]
@@ -814,7 +818,7 @@ def quiz_response_is_usable(
         return False
 
     content_type = content_type_without_parameters(response)
-    if content_type and content_type not in {"text/html", "application/xhtml+xml"}:
+    if content_type and content_type not in HTML_CONTENT_TYPES:
         log.warning(
             "Skipping quiz snapshot for %s because Moodle returned %s",
             requested_url,

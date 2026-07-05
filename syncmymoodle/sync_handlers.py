@@ -3,14 +3,13 @@ import urllib.parse
 from dataclasses import dataclass
 from typing import Any, Callable, cast
 
-from bs4 import BeautifulSoup as bs
-
 from syncmymoodle import filters, moodle_files, pathing
 from syncmymoodle import links as links_api
 from syncmymoodle import moodle as moodle_api
 from syncmymoodle import opencast as opencast_api
 from syncmymoodle.constants import MOODLE_URL
 from syncmymoodle.context import SyncContext
+from syncmymoodle.http_utils import get_input_value, parse_html
 from syncmymoodle.node import Node
 
 logger = logging.getLogger(__name__)
@@ -211,10 +210,7 @@ def handle_embedded_link_module(
                 response = None
             if response:
                 if opencast_enabled:
-                    html = bs(
-                        response.text,
-                        features="lxml",
-                    )
+                    html = parse_html(response.text)
                     for iframe in html.find_all("iframe"):
                         iframe_src_value = iframe.get("src")
                         if not iframe_src_value:
@@ -262,21 +258,13 @@ def handle_embedded_link_module(
     # "Interactive" h5p videos
     elif module["modname"] == "h5pactivity":
         html_url = f"{MOODLE_URL}mod/h5pactivity/view.php?id={module['id']}"
-        html = bs(
-            ctx.require_session().get(html_url).text,
-            features="lxml",
-        )
+        html = parse_html(ctx.require_session().get(html_url).text)
         # Get h5p iframe
         h5p_iframe = html.find("iframe")
         iframe_src_value = h5p_iframe.get("src") if h5p_iframe else None
         if iframe_src_value:
             iframe_src = urllib.parse.urljoin(html_url, cast(str, iframe_src_value))
-            iframe_html = str(
-                bs(
-                    ctx.require_session().get(iframe_src).text,
-                    features="lxml",
-                )
-            )
+            iframe_html = str(parse_html(ctx.require_session().get(iframe_src).text))
             # Moodle devs dont know how to use CDATA correctly, so we need to remove all backslashes
             sanitized_html = iframe_html.replace("\\", "")
         else:
@@ -333,13 +321,11 @@ def handle_opencast_lti_module(
         opencast_api.log_backend_issue(ctx, info_response.text, log)
         return
 
-    info_res = bs(info_response.text, features="lxml")
+    info_res = parse_html(info_response.text)
 
-    engage_series_id = opencast_api.get_input_value(info_res, "custom_series")
-    engage_single_id = opencast_api.get_input_value(info_res, "custom_id")
-    name = (
-        opencast_api.get_input_value(info_res, "resource_link_title") or module["name"]
-    )
+    engage_series_id = get_input_value(info_res, "custom_series")
+    engage_single_id = get_input_value(info_res, "custom_id")
+    name = get_input_value(info_res, "resource_link_title") or module["name"]
     engage_data = opencast_api.extract_lti_form_data(info_res)
 
     if engage_series_id:
@@ -429,7 +415,7 @@ def handle_quiz_module(
         return
 
     info_url = f"{MOODLE_URL}mod/quiz/view.php?id={module['id']}"
-    info_res = bs(ctx.require_session().get(info_url).text, features="lxml")
+    info_res = parse_html(ctx.require_session().get(info_url).text)
     attempts = info_res.find_all(
         "a",
         {"title": "Überprüfung der eigenen Antworten dieses Versuchs"},
@@ -438,10 +424,7 @@ def handle_quiz_module(
     for attempt in attempts:
         attempt_cnt += 1
         review_url = cast(str, attempt.get("href"))
-        quiz_res = bs(
-            ctx.require_session().get(review_url).text,
-            features="lxml",
-        )
+        quiz_res = parse_html(ctx.require_session().get(review_url).text)
         title = cast(Any, quiz_res.find("title"))
         name = (
             title.get_text().replace(": Überprüfung des Testversuchs", "")

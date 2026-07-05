@@ -2,14 +2,17 @@ import logging
 import urllib.parse
 from typing import Any, cast
 
-from bs4 import BeautifulSoup as bs
-
 from syncmymoodle import filters
 from syncmymoodle import opencast as opencast_api
 from syncmymoodle import sciebo as sciebo_api
 from syncmymoodle.constants import OPENCAST_LINK_RE, YOUTUBE_LINK_RE
 from syncmymoodle.context import SyncContext
-from syncmymoodle.http_utils import content_type_without_parameters
+from syncmymoodle.http_utils import (
+    HTML_CONTENT_TYPES,
+    content_type_without_parameters,
+    filename_from_url,
+    parse_html,
+)
 from syncmymoodle.node import Node, RemoteMarkerKind
 
 logger = logging.getLogger(__name__)
@@ -25,7 +28,7 @@ def scan_html_text_for_links(
     log: logging.Logger = logger,
 ) -> None:
     if "video-js" in html_text and "<source" in html_text.lower():
-        soup = bs(html_text, features="lxml")
+        soup = parse_html(html_text)
         videojs = soup.select_one(".video-js")
         if videojs:
             videojs = videojs.select_one("source")
@@ -73,10 +76,10 @@ def scan_for_links(
             elif (
                 200 <= response.status_code < 300
                 and content_type
-                and content_type not in {"text/html", "application/xhtml+xml"}
+                and content_type not in HTML_CONTENT_TYPES
             ):
                 # non html links, assume the filename is in the path
-                filename = urllib.parse.urlsplit(text).path.split("/")[-1]
+                filename = filename_from_url(text)
                 parent_node.add_child(
                     filename,
                     None,

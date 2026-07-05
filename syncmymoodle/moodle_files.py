@@ -1,6 +1,10 @@
-import urllib.parse
 from typing import Any
 
+from syncmymoodle.http_utils import (
+    HTML_CONTENT_TYPES,
+    filename_from_url,
+    media_type_without_parameters,
+)
 from syncmymoodle.node import NAME_CLASH_ID_UNSET, Node
 from syncmymoodle.pathing import sanitize_path_part
 
@@ -69,11 +73,7 @@ def add_moodle_content_file_node(
     # may lack a filename too; a None node name would crash path sanitization
     # at download time, so fall back to a placeholder (name-clash resolution
     # disambiguates duplicates by URL).
-    filename = (
-        urllib.parse.urlsplit(file_url).path.split("/")[-1]
-        or content.get("filename")
-        or "file"
-    )
+    filename = filename_from_url(file_url) or content.get("filename") or "file"
     return add_moodle_file_node(
         parent_node,
         "/",
@@ -93,13 +93,8 @@ def is_direct_moodle_file_content(
     if not file_url or content.get("type") != "file":
         return False
 
-    mimetype = str(content.get("mimetype") or "").split(";", 1)[0].lower()
-    if not mimetype or mimetype in {
-        "document/unknown",
-        "unknown",
-        "text/html",
-        "application/xhtml+xml",
-    }:
+    mimetype = media_type_without_parameters(content.get("mimetype"))
+    if not mimetype or mimetype in {"document/unknown", "unknown"} | HTML_CONTENT_TYPES:
         return False
     if mimetype.startswith("text/"):
         return False
