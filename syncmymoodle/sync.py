@@ -2,9 +2,8 @@ import json
 import logging
 from typing import cast
 
-from syncmymoodle import filters
+from syncmymoodle import filters, sync_handlers
 from syncmymoodle import moodle as moodle_api
-from syncmymoodle import sync_handlers
 from syncmymoodle.context import SyncContext
 from syncmymoodle.node import Node
 

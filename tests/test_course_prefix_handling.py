@@ -71,8 +71,7 @@ def test_page_content_url_normalization_preserves_larger_content_ids():
         "mod_page/content/315/page-video.mp4"
     )
     assert normalized_child.url == (
-        "https://moodle.rwth-aachen.de/pluginfile.php/104/"
-        "mod_page/content/legacy.pdf"
+        "https://moodle.rwth-aachen.de/pluginfile.php/104/mod_page/content/legacy.pdf"
     )
 
 

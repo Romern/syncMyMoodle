@@ -5,12 +5,10 @@ from typing import Any, Callable, cast
 
 from bs4 import BeautifulSoup as bs
 
-from syncmymoodle import filters
+from syncmymoodle import filters, moodle_files, pathing
 from syncmymoodle import links as links_api
 from syncmymoodle import moodle as moodle_api
-from syncmymoodle import moodle_files
 from syncmymoodle import opencast as opencast_api
-from syncmymoodle import pathing
 from syncmymoodle.constants import MOODLE_URL
 from syncmymoodle.context import SyncContext
 from syncmymoodle.node import Node
@@ -190,7 +188,7 @@ def handle_embedded_link_module(
     if module["modname"] == "page":
         opencast_enabled = ctx.config.url_module_enabled("opencast")
         html_url = (
-            module.get("url") or f'{MOODLE_URL}mod/page/view.php?id={module["id"]}'
+            module.get("url") or f"{MOODLE_URL}mod/page/view.php?id={module['id']}"
         )
         scan_page_links = not ctx.config.nolinks and not filters.should_skip_url(
             ctx.config, html_url, "page link"
@@ -263,7 +261,7 @@ def handle_embedded_link_module(
                     )
     # "Interactive" h5p videos
     elif module["modname"] == "h5pactivity":
-        html_url = f'{MOODLE_URL}mod/h5pactivity/view.php?id={module["id"]}'
+        html_url = f"{MOODLE_URL}mod/h5pactivity/view.php?id={module['id']}"
         html = bs(
             ctx.require_session().get(html_url).text,
             features="lxml",
@@ -317,7 +315,7 @@ def handle_opencast_lti_module(
     if module["modname"] != "lti" or not ctx.config.url_module_enabled("opencast"):
         return
 
-    info_url = f'{MOODLE_URL}mod/lti/launch.php?id={module["id"]}' "&triggerview=0"
+    info_url = f"{MOODLE_URL}mod/lti/launch.php?id={module['id']}&triggerview=0"
     try:
         info_response = ctx.require_session().get(info_url)
     except Exception:
@@ -356,7 +354,7 @@ def handle_opencast_lti_module(
             return
 
         series_url = (
-            f"{opencast_api.OPENCAST_SEARCH_URL}" f"?limit=100&offset=0&sid={series_id}"
+            f"{opencast_api.OPENCAST_SEARCH_URL}?limit=100&offset=0&sid={series_id}"
         )
         series_response = opencast_api.fetch_json(
             ctx, series_url, f"series {series_id}", log
@@ -430,7 +428,7 @@ def handle_quiz_module(
     if module["modname"] != "quiz" or not ctx.config.url_module_enabled("quiz"):
         return
 
-    info_url = f'{MOODLE_URL}mod/quiz/view.php?id={module["id"]}'
+    info_url = f"{MOODLE_URL}mod/quiz/view.php?id={module['id']}"
     info_res = bs(ctx.require_session().get(info_url).text, features="lxml")
     attempts = info_res.find_all(
         "a",

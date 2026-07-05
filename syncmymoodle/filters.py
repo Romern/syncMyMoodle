@@ -130,8 +130,7 @@ def should_skip_section(
     values = [section.get("name"), section.get("id")]
     if matches_any_pattern(values, patterns):
         log.info(
-            "Skipping section %s (%s) in course %s because it matches "
-            "exclude_sections",
+            "Skipping section %s (%s) in course %s because it matches exclude_sections",
             section.get("name"),
             section.get("id"),
             course_id,
@@ -167,8 +166,7 @@ def should_skip_module(
     values = [module_id, module_name, modname, *module_urls]
     if matches_any_pattern(values, patterns):
         log.info(
-            "Skipping module %s (%s) in course %s because it matches "
-            "exclude_modules",
+            "Skipping module %s (%s) in course %s because it matches exclude_modules",
             module_name,
             module_id,
             course_id,

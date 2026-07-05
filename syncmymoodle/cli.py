@@ -9,9 +9,8 @@ from argparse import ArgumentParser
 from pathlib import Path
 from types import ModuleType
 
-from syncmymoodle import course_cache, downloader
+from syncmymoodle import course_cache, downloader, rwth, sync
 from syncmymoodle import moodle as moodle_api
-from syncmymoodle import rwth, sync
 from syncmymoodle.config import Config
 from syncmymoodle.constants import (
     COURSE_PREFIX_HANDLING_OPTIONS,

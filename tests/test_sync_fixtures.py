@@ -52,20 +52,17 @@ def test_assignment_intro_opencast_embed_is_added_to_assignment_node(monkeypatch
     monkeypatch.setattr(
         opencast,
         "authenticate_episode",
-        lambda ctx, course_id, episode_id, *a, **k: authenticated.append(
-            (course_id, episode_id)
-        )
-        or True,
+        lambda ctx, course_id, episode_id, *a, **k: (
+            authenticated.append((course_id, episode_id)) or True
+        ),
     )
     monkeypatch.setattr(
         opencast,
         "resolve_track_from_episode",
-        lambda ctx, episode_id, *a, **k: (
-            opencast.OpencastTrack(
-                f"https://video.example.test/{episode_id}/presentation.mp4",
-                checksum_type="md5",
-                checksum="11111111111111111111111111111111",
-            )
+        lambda ctx, episode_id, *a, **k: opencast.OpencastTrack(
+            f"https://video.example.test/{episode_id}/presentation.mp4",
+            checksum_type="md5",
+            checksum="11111111111111111111111111111111",
         ),
     )
 
@@ -215,8 +212,7 @@ def test_sciebo_share_without_token_input_uses_url_token():
         "Sciebo File | Section/sciebo-share-token-123/readme.pdf | "
         "https://rwth-aachen.sciebo.de/public.php/webdav/readme.pdf |  | "
         "1111111111111111111111111111111111111111",
-        "Sciebo Folder | Section/sciebo-share-token-123/slides |  |  | "
-        '"folder-slides"',
+        'Sciebo Folder | Section/sciebo-share-token-123/slides |  |  | "folder-slides"',
         "Sciebo File | Section/sciebo-share-token-123/slides/deck.pdf | "
         "https://rwth-aachen.sciebo.de/public.php/webdav/slides/deck.pdf |  | "
         "2222222222222222222222222222222222222222",
@@ -288,12 +284,10 @@ def test_mixed_course_sync_tree_covers_common_module_surfaces(monkeypatch):
     monkeypatch.setattr(
         opencast,
         "resolve_track_from_episode",
-        lambda ctx, episode_id, *a, **k: (
-            opencast.OpencastTrack(
-                f"https://video.example.test/{episode_id}/presentation.mp4",
-                checksum_type="md5",
-                checksum="33333333333333333333333333333333",
-            )
+        lambda ctx, episode_id, *a, **k: opencast.OpencastTrack(
+            f"https://video.example.test/{episode_id}/presentation.mp4",
+            checksum_type="md5",
+            checksum="33333333333333333333333333333333",
         ),
     )
 

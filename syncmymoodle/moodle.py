@@ -69,12 +69,11 @@ def get_moodle_wstoken(
             "returned an unexpected redirect instead of a token."
         )
         log.info(
-            "Unexpected mobile launch redirect target: "
-            f"{location_path or '<missing>'}"
+            f"Unexpected mobile launch redirect target: {location_path or '<missing>'}"
         )
         if body_prefix:
             log.info(
-                "Unexpected mobile launch response body (truncated): " f"{body_prefix}"
+                f"Unexpected mobile launch response body (truncated): {body_prefix}"
             )
         sys.exit(1)
 

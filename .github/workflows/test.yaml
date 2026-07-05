@@ -30,17 +30,14 @@ jobs:
           python -m pip install --upgrade pip
           pip install .[test]
 
-      - name: Check formatting with black and isort
-        run: |
-          black --check syncmymoodle tests
-          isort --check-only syncmymoodle tests
+      - name: Check formatting with ruff
+        run: ruff format --check syncmymoodle tests
+
+      - name: Lint with ruff
+        run: ruff check syncmymoodle tests
 
       - name: Run tests
         run: python -m pytest
-
-      # Disabled for now, until we refactor the main project
-      # - name: Lint with flake8
-      #   run: flake8 syncmymoodle
 
       - name: Analyze with mypy
         run: mypy syncmymoodle

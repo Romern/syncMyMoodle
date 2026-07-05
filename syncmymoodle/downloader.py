@@ -110,7 +110,7 @@ def download_response_is_usable(
 ) -> bool:
     if response.status_code == 204:
         log.warning(
-            "Skipping download of %s from %s because the server returned no " "content",
+            "Skipping download of %s from %s because the server returned no content",
             downloadpath,
             node.url,
         )
@@ -118,7 +118,7 @@ def download_response_is_usable(
 
     if not (200 <= response.status_code < 300):
         log.warning(
-            "Skipping download of %s from %s because the server returned " "HTTP %s",
+            "Skipping download of %s from %s because the server returned HTTP %s",
             downloadpath,
             node.url,
             response.status_code,

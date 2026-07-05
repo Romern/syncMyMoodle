@@ -174,7 +174,11 @@ class Node:
                     ][0]
                 )
             except IndexError:
-                raise Exception("The path is not found in this root node. Wrong path?")
+                # The IndexError just means "no matching child"; its traceback
+                # adds no useful context to the error.
+                raise Exception(
+                    "The path is not found in this root node. Wrong path?"
+                ) from None
         return target_node[-1]
 
     def _clash_suffix(self) -> str:

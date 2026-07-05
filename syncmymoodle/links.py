@@ -80,7 +80,7 @@ def scan_for_links(
                 parent_node.add_child(
                     filename,
                     None,
-                    f'Linked file [{response.headers["Content-Type"]}]',
+                    f"Linked file [{response.headers['Content-Type']}]",
                     url=text,
                     etag=response.headers.get("ETag"),
                     etag_kind=(
