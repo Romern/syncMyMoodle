@@ -7,6 +7,9 @@ INVALID_CHARS = '~"#%&*:<>?/\\{|}'
 # Chunk size for streamed HTTP reads.
 DEFAULT_BLOCK_SIZE = 1024
 
+# Hidden per-course metadata cache filename.
+COURSE_CACHE_FILENAME = ".syncmymoodle_cache"
+
 YOUTUBE_ID_LENGTH = 11
 HASH_ALGOS_BY_LENGTH = {32: "md5", 40: "sha1", 64: "sha256"}
 CHECKSUM_LENGTHS_BY_ALGO = {

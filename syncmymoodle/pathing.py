@@ -3,7 +3,9 @@ from __future__ import annotations
 import hashlib
 import ntpath
 import os
+import re
 import urllib.parse
+from dataclasses import dataclass
 from pathlib import Path, PureWindowsPath
 from typing import TYPE_CHECKING
 
@@ -24,6 +26,22 @@ def is_windows_reserved_path_part(path: str) -> bool:
     if isreserved is not None:
         return bool(isreserved(path))
     return PureWindowsPath(path).is_reserved()
+
+
+CONFLICT_MARKER = "syncconflict"
+CONFLICT_GLOB = f"*.{CONFLICT_MARKER}.*"
+CONFLICT_RE = re.compile(
+    rf"^(?P<stem>.+)\.{CONFLICT_MARKER}\."
+    r"(?P<tag>[0-9a-f]{8}|unknown|missing)"
+    r"(?:\.(?P<index>\d+))?"
+    r"(?P<suffix>.*)$"
+)
+
+
+@dataclass(frozen=True)
+class ConflictPathInfo:
+    canonical: Path
+    index: int
 
 
 def sanitize_path_part(path: str) -> str:
@@ -81,11 +99,24 @@ def get_sanitized_node_path(node: Node, basedir: Path) -> Path:
     return with_windows_extended_length_prefix(target_path)
 
 
+def parse_conflict_path(path: Path) -> ConflictPathInfo | None:
+    match = CONFLICT_RE.match(path.name)
+    if match is None:
+        return None
+    index = int(match.group("index")) if match.group("index") else 0
+    canonical = path.with_name(f"{match.group('stem')}{match.group('suffix')}")
+    return ConflictPathInfo(canonical, index)
+
+
+def format_conflict_path(path: Path, hash_str: str, index: int | None = None) -> Path:
+    indexed = "" if index is None else f".{index}"
+    return path.with_name(
+        f"{path.stem}.{CONFLICT_MARKER}.{hash_str}{indexed}{path.suffix}"
+    )
+
+
 def make_conflict_path(path: Path) -> Path:
     """Return a unique path for storing a locally modified file."""
-    suffix = path.suffix
-    stem = path.stem
-
     # Derive a short hash from the current contents to make the filename
     # stable and recognizable while remaining reasonably unique.
     hash_str = "unknown"
@@ -96,11 +127,9 @@ def make_conflict_path(path: Path) -> Path:
     except FileNotFoundError:
         hash_str = "missing"
 
-    conflict_path = path.with_name(f"{stem}.syncconflict.{hash_str}{suffix}")
+    conflict_path = format_conflict_path(path, hash_str)
     index = 1
     while conflict_path.exists():
-        conflict_path = path.with_name(
-            f"{stem}.syncconflict.{hash_str}.{index}{suffix}"
-        )
+        conflict_path = format_conflict_path(path, hash_str, index)
         index += 1
     return with_windows_extended_length_prefix(conflict_path)

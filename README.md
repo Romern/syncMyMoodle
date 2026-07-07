@@ -125,7 +125,7 @@ usage: python3 -m syncmymoodle [-h] [--config CONFIG] [--version]
                                [--no-follow-links] [--no-youtube]
                                [--no-opencast] [--no-sciebo]
                                [--quiz {off,html,pdf,both}] [-v]
-                               {config} ...
+                               {config,clean} ...
 
 Synchronization client for RWTH Moodle. All optional arguments override those
 in config.toml/config.json.
@@ -336,6 +336,20 @@ downloaded without writing any files or caches.
 syncMyMoodle stores per-course metadata in a hidden `.syncmymoodle_cache` file
 inside each synced course directory. Delete that file to force a fresh metadata
 cache for a course.
+
+Local cleanup commands operate on `paths.sync_directory` by default and do not
+log in to Moodle. They print a dry-run plan unless `--apply` is passed:
+
+```shell
+syncmymoodle clean conflicts
+syncmymoodle clean caches
+```
+
+`clean conflicts` removes redundant `.syncconflict.*` files only when their
+content is identical to the current file or another conflict file. `clean
+caches` is a recovery/debug command, not routine cleanup: it removes
+`.syncmymoodle_cache` metadata files so the next sync has to rebuild them. Most
+users should not need it unless cache metadata appears broken or stale.
 
 Quiz review attempts are saved as self-contained HTML snapshots by default
 (`quiz = "html"` in the `[modules]` table). The snapshot inlines same-origin

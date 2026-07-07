@@ -2,6 +2,7 @@ import hashlib
 import os
 
 from syncmymoodle import course_cache, downloader, pathing
+from syncmymoodle.constants import COURSE_CACHE_FILENAME
 from syncmymoodle.node import Node, RemoteMarkerKind
 from syncmymoodle.storage import write_private_gzip_json
 
@@ -1164,7 +1165,7 @@ def test_legacy_is_downloaded_cache_key_is_read_as_handled(tmp_path):
     course_path = node_path(make_context(config), course_node)
     course_path.mkdir(parents=True, exist_ok=True)
     write_private_gzip_json(
-        course_path / ".syncmymoodle_cache",
+        course_path / COURSE_CACHE_FILENAME,
         {
             "format": "syncmymoodle.course-cache.v1",
             "course": {

@@ -106,8 +106,7 @@ class CliOverride:
     arg_name: str
     value_kind: CliValueKind
     help: str
-    # Value a "flag" kind writes when given (--no-follow-links writes False
-    # into links.follow_links).
+    # Value a "flag" kind writes when given (--no-follow-links writes False into links.follow_links).
     flag_value: bool = True
     requires_keyring: bool = False
     # Deprecated spellings that are still accepted but hidden from --help.
@@ -158,9 +157,9 @@ def option(
     """Declare a :class:`Config` field together with its option schema.
 
     ``key`` is the spelling used inside the option's ``group`` table
-    (defaults to the field name); the flat canonical spelling is
-    ``"group.key"``. ``validate`` returns an error fragment for values the
-    option's ``normalize`` cannot handle, or None when the value is fine.
+    (defaults to the field name); the flat canonical spelling is ``"group.key"``.
+    ``validate`` returns an error fragment for values the option's ``normalize`` cannot handle,
+    or None when the value is fine.
     """
     metadata = {
         "config": {
@@ -278,9 +277,8 @@ class Config:
         normalize=as_string_list,
         cli=cli_csv(
             "courses",
-            "specify the courses that should be synced using comma-separated "
-            "links. Defaults to all courses, if no additional restrictions "
-            "e.g. semester are defined.",
+            "specify the courses that should be synced using comma-separated links. "
+            "Defaults to all courses, if no additional restrictions e.g. semester are defined.",
         ),
     )
     skip_courses: list[str] = option(
@@ -302,8 +300,7 @@ class Config:
         cli=cli_csv(
             "semesters",
             "specify semesters to be synced e.g. `22s`, comma-separated. "
-            "Defaults to all semesters, if no additional restrictions e.g. "
-            "courses are defined.",
+            "Defaults to all semesters, if no additional restrictions e.g. courses are defined.",
             aliases=("semester",),
         ),
     )
@@ -359,6 +356,39 @@ class Config:
     )
 
     # Exclude/allow rules
+    allowed_domains: PatternConfig = option(
+        group="filters",
+        factory=dict,
+        normalize=normalize_pattern_config,
+        cli=cli_csv(
+            "allowed-domains",
+            "only keep discovered links on these comma-separated domains",
+            aliases=("alloweddomains",),
+        ),
+    )
+    # Byte limits for downloads (None/0 = no limit). Applied where a size is
+    # known up front: direct downloads with a Content-Length and YouTube
+    # videos whose size yt-dlp can estimate before downloading.
+    max_file_size: int | None = option(
+        group="filters",
+        normalize=parse_file_size,
+        falsey_uses_default=True,
+        validate=file_size_error,
+        cli=cli_arg(
+            "max-file-size",
+            "skip files larger than this size, e.g. '500M' or '2G'",
+        ),
+    )
+    min_file_size: int | None = option(
+        group="filters",
+        normalize=parse_file_size,
+        falsey_uses_default=True,
+        validate=file_size_error,
+        cli=cli_arg(
+            "min-file-size",
+            "skip files smaller than this size, e.g. '10K'",
+        ),
+    )
     exclude_filetypes: list[str] = option(
         group="filters",
         factory=list,
@@ -390,16 +420,6 @@ class Config:
             aliases=("excludelinks",),
         ),
     )
-    allowed_domains: PatternConfig = option(
-        group="filters",
-        factory=dict,
-        normalize=normalize_pattern_config,
-        cli=cli_csv(
-            "allowed-domains",
-            "only keep discovered links on these comma-separated domains",
-            aliases=("alloweddomains",),
-        ),
-    )
     exclude_sections: PatternConfig = option(
         group="filters",
         factory=dict,
@@ -419,29 +439,6 @@ class Config:
             "exclude Moodle modules by comma-separated names, ids, types, "
             "URLs or patterns",
             aliases=("excludemodules",),
-        ),
-    )
-    # Byte limits for downloads (None/0 = no limit). Applied where a size is
-    # known up front: direct downloads with a Content-Length and YouTube
-    # videos whose size yt-dlp can estimate before downloading.
-    max_file_size: int | None = option(
-        group="filters",
-        normalize=parse_file_size,
-        falsey_uses_default=True,
-        validate=file_size_error,
-        cli=cli_arg(
-            "max-file-size",
-            "skip files larger than this size, e.g. '500M' or '2G'",
-        ),
-    )
-    min_file_size: int | None = option(
-        group="filters",
-        normalize=parse_file_size,
-        falsey_uses_default=True,
-        validate=file_size_error,
-        cli=cli_arg(
-            "min-file-size",
-            "skip files smaller than this size, e.g. '10K'",
         ),
     )
 
@@ -828,8 +825,7 @@ def _convert_legacy_used_modules(tree: Mapping[str, Any]) -> ConfigDict:
 
 
 def _convert_legacy_quiz_value(value: Any) -> Any:
-    """Map legacy quiz values (booleans, yes/no strings, mixed case) onto a
-    mode string.
+    """Map legacy quiz values (booleans, yes/no strings, mixed case) onto a mode string.
 
     Unrecognized values pass through so validation can report them.
     """

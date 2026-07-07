@@ -31,6 +31,7 @@ Persistence:
     storage         private gzip-JSON and cookie (de)serialization
     course_cache    per-course sync-tree cache (.syncmymoodle_cache)
     pathing         path sanitization, traversal safety, conflict paths
+    cleanup         local cleanup of redundant conflict files and caches
 
 Core (cross-cutting):
     node            Node tree model and name-clash resolution

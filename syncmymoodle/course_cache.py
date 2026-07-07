@@ -2,6 +2,7 @@ import logging
 from pathlib import Path
 from typing import Any
 
+from syncmymoodle.constants import COURSE_CACHE_FILENAME
 from syncmymoodle.context import SyncContext
 from syncmymoodle.node import (
     NAME_CLASH_ID_UNSET,
@@ -150,7 +151,7 @@ def get_course_cache_root(
     if course_path in ctx.course_caches:
         return ctx.course_caches[course_path]
 
-    cache_path = course_path / ".syncmymoodle_cache"
+    cache_path = course_path / COURSE_CACHE_FILENAME
     if not cache_path.exists():
         return None
 
@@ -229,7 +230,7 @@ def cache_root_node(
             # this run (see node_to_cache_data).
             old_course_root = get_course_cache_root(ctx, course_node, log)
             course_path.mkdir(parents=True, exist_ok=True)
-            cache_path = course_path / ".syncmymoodle_cache"
+            cache_path = course_path / COURSE_CACHE_FILENAME
             write_private_gzip_json(
                 cache_path,
                 {

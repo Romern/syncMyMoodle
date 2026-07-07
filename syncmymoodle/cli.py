@@ -15,7 +15,7 @@ from typing import Any
 
 import tomli_w
 
-from syncmymoodle import course_cache, downloader, rwth, sync
+from syncmymoodle import cleanup, course_cache, downloader, rwth, sync
 from syncmymoodle import moodle as moodle_api
 from syncmymoodle.config import (
     CONFIG_OPTIONS,
@@ -27,7 +27,7 @@ from syncmymoodle.config import (
     convert_legacy_config,
     group_config_for_toml,
 )
-from syncmymoodle.constants import RWTH_MOODLE_STATUS_URL
+from syncmymoodle.constants import COURSE_CACHE_FILENAME, RWTH_MOODLE_STATUS_URL
 from syncmymoodle.context import SyncContext
 
 try:
@@ -53,7 +53,7 @@ def build_parser(keyring_backend: Any = None) -> ArgumentParser:
         prog="python3 -m syncmymoodle",
         description=(
             "Synchronization client for RWTH Moodle. All optional arguments "
-            "override those in config.toml/config.json."
+            "override those set in a config file."
         ),
     )
     parser.add_argument("--config", default=None, help="set your configuration file")
@@ -78,8 +78,8 @@ def build_parser(keyring_backend: Any = None) -> ArgumentParser:
             kwargs["choices"] = option.choices
         argument_group.add_argument(f"--{cli.arg_name}", help=cli.help, **kwargs)
         if cli.aliases:
-            # Deprecated spellings: still accepted, hidden from --help. SUPPRESS
-            # keeps an absent alias from clobbering the primary flag's default.
+            # Legacy spellings hidden from --help. SUPPRESS keeps an absent alias from clobbering the primary flag's
+            # default.
             argument_group.add_argument(
                 *(f"--{alias}" for alias in cli.aliases),
                 dest=cli.dest,
@@ -133,7 +133,45 @@ def build_parser(keyring_backend: Any = None) -> ArgumentParser:
         default=SUPPRESS,
         help="config file to validate; defaults to discovered config.toml/config.json",
     )
+    clean_parser = subparsers.add_parser("clean", help="clean local sync artifacts")
+    clean_subparsers = clean_parser.add_subparsers(
+        dest="clean_command",
+        required=True,
+    )
+    conflicts_parser = clean_subparsers.add_parser(
+        "conflicts",
+        help="remove redundant .syncconflict files",
+    )
+    add_clean_path_apply_options(
+        conflicts_parser,
+        "actually delete redundant conflict files",
+    )
+    caches_parser = clean_subparsers.add_parser(
+        "caches",
+        help="reset per-course metadata caches; rarely needed",
+        description=(
+            f"Reset per-course {COURSE_CACHE_FILENAME} metadata files. "
+            f"This is a recovery/debug command, the next sync will rebuild metadata caches and may do extra work."
+        ),
+    )
+    add_clean_path_apply_options(caches_parser, "actually delete cache files")
     return parser
+
+
+def add_clean_path_apply_options(
+    subparser: ArgumentParser,
+    apply_help: str,
+) -> None:
+    subparser.add_argument(
+        "--path",
+        default=None,
+        help="directory to scan; defaults to paths.sync_directory",
+    )
+    subparser.add_argument(
+        "--apply",
+        action="store_true",
+        help=apply_help,
+    )
 
 
 def warn_legacy_json_config(path: Path) -> None:
@@ -149,7 +187,7 @@ def read_config_file(path: Path, warn_legacy_json: bool = True) -> ConfigDict:
     """Parse, canonicalize and validate a single config file.
 
     Raises OSError if the file cannot be read, ValueError if it cannot be
-    parsed and ConfigValidationError if it fails validation.
+     parsed, and ConfigValidationError if it fails validation.
     """
     if path.suffix == ".toml":
         with path.open("rb") as fb:
@@ -228,6 +266,13 @@ def load_config(args: Namespace, parser: ArgumentParser) -> ConfigDict:
         except ValueError as error:
             parser.error(f"could not parse config file {config_path}: {error}")
     return config
+
+
+def config_or_error(config: Mapping[str, Any], parser: ArgumentParser) -> Config:
+    try:
+        return Config.from_dict(config)
+    except ConfigValidationError as error:
+        parser.error(str(error))
 
 
 def migrate_json_config(
@@ -316,6 +361,86 @@ def run_config_command(args: Namespace, parser: ArgumentParser) -> None:
         check_config_command(args, parser)
         return
     parser.error(f"unknown config command: {args.config_command}")
+
+
+def count_phrase(count: int, singular: str, plural: str) -> str:
+    noun = singular if count == 1 else plural
+    return f"{count} {noun}"
+
+
+def cleanup_root_from_args(args: Namespace, parser: ArgumentParser) -> Path:
+    if args.path:
+        root = Path(args.path)
+    else:
+        file_config = load_config(args, parser)
+        merged = dict(file_config)
+        apply_cli_overrides(merged, args)
+        has_configured_root = bool(merged.get("paths.sync_directory"))
+        if args.apply and not has_configured_root:
+            parser.error(
+                "clean --apply requires --path or a configured paths.sync_directory"
+            )
+        root = Path(config_or_error(merged, parser).sync_directory)
+    root = root.expanduser()
+    if not root.is_dir():
+        parser.error(f"{root} is not a directory")
+    return root
+
+
+def clean_conflicts_command(args: Namespace, parser: ArgumentParser) -> None:
+    root = cleanup_root_from_args(args, parser)
+    conflicts = cleanup.iter_conflicts(root)
+    plan = cleanup.conflict_cleanup_plan(conflicts)
+    action = "Deleting" if args.apply else "Would delete"
+    for path in plan.remove:
+        print(f"{action}: {path}")
+    if args.apply:
+        cleanup.delete_paths(plan.remove)
+
+    print(
+        f"Scanned {count_phrase(len(conflicts), 'syncconflict file', 'syncconflict files')}; "
+        f"{count_phrase(len(plan.remove), 'file', 'files')} "
+        f"{'deleted' if args.apply else 'would be deleted'}; "
+        f"{count_phrase(len(plan.keep), 'unique differing conflict file', 'unique differing conflict files')} kept."
+    )
+    if not args.apply:
+        print("Dry run only. Re-run with --apply to delete these files.")
+
+
+def clean_caches_command(args: Namespace, parser: ArgumentParser) -> None:
+    root = cleanup_root_from_args(args, parser)
+    cache_paths = cleanup.iter_course_caches(root)
+    print(
+        "This resets syncMyMoodle metadata caches. It is usually only useful "
+        "when recovering from broken or stale cache metadata."
+    )
+    action = "Deleting" if args.apply else "Would delete"
+    for path in cache_paths:
+        print(f"{action}: {path}")
+    if args.apply:
+        cleanup.delete_paths(cache_paths)
+
+    print(
+        f"Scanned {root}; "
+        f"{count_phrase(len(cache_paths), 'cache file', 'cache files')} "
+        f"{'deleted' if args.apply else 'would be deleted'}."
+    )
+    if not args.apply:
+        print(
+            "Dry run only. Re-run with --apply to delete these files. "
+            "Do this only when you intentionally want the next sync to rebuild "
+            "course metadata caches."
+        )
+
+
+def run_clean_command(args: Namespace, parser: ArgumentParser) -> None:
+    if args.clean_command == "conflicts":
+        clean_conflicts_command(args, parser)
+        return
+    if args.clean_command == "caches":
+        clean_caches_command(args, parser)
+        return
+    parser.error(f"unknown clean command: {args.clean_command}")
 
 
 def apply_cli_overrides(config: ConfigDict, args: Namespace) -> None:
@@ -418,14 +543,17 @@ def config_from_args(
     args: Namespace,
     parser: ArgumentParser,
     keyring_backend: Any = None,
+    *,
+    require_credentials: bool = True,
 ) -> Config:
     file_config = load_config(args, parser)
     merged = dict(file_config)
     apply_cli_overrides(merged, args)
-    config = Config.from_dict(merged)
-    if config.use_keyring:
+    config = config_or_error(merged, parser)
+    if require_credentials and config.use_keyring:
         resolve_keyring_credentials(config, file_config, keyring_backend)
-    validate_required_credentials(config)
+    if require_credentials:
+        validate_required_credentials(config)
     return config
 
 
@@ -435,6 +563,9 @@ def main(argv: Sequence[str] | None = None) -> None:
     logging.basicConfig(level=args.loglevel)
     if args.command == "config":
         run_config_command(args, parser)
+        return
+    if args.command == "clean":
+        run_clean_command(args, parser)
         return
     run(SyncContext(config=config_from_args(args, parser, keyring)))
 

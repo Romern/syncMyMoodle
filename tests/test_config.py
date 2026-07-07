@@ -898,6 +898,34 @@ prefix_handling = "later"
     assert "courses.prefix_handling must be one of" in capsys.readouterr().err
 
 
+def test_cli_rejects_invalid_cli_overrides_without_traceback(
+    tmp_path, monkeypatch, capsys
+):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "xdg"))
+    parser = cli.build_parser()
+    args = parser.parse_args(
+        [
+            "--user",
+            "user",
+            "--password",
+            "password",
+            "--totp-serial",
+            "totp",
+            "--max-file-size",
+            "huge",
+        ]
+    )
+
+    with pytest.raises(SystemExit) as exc_info:
+        cli.config_from_args(args, parser)
+
+    assert exc_info.value.code == 2
+    captured = capsys.readouterr()
+    assert "filters.max_file_size must be a size" in captured.err
+    assert "Traceback" not in captured.err
+
+
 def test_cli_overrides_are_applied_after_config():
     fake_keyring = object()
     parser = cli.build_parser(fake_keyring)
