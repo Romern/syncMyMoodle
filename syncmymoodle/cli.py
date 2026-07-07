@@ -5,17 +5,16 @@ import json
 import logging
 import os
 import sys
-from argparse import ArgumentParser
+from argparse import ArgumentParser, Namespace
+from collections.abc import Sequence
 from pathlib import Path
 from types import ModuleType
+from typing import Any, cast
 
 from syncmymoodle import course_cache, downloader, rwth, sync
 from syncmymoodle import moodle as moodle_api
-from syncmymoodle.config import Config
-from syncmymoodle.constants import (
-    COURSE_PREFIX_HANDLING_OPTIONS,
-    RWTH_MOODLE_STATUS_URL,
-)
+from syncmymoodle.config import CONFIG_OPTIONS, CONFIG_OPTIONS_BY_FIELD, Config
+from syncmymoodle.constants import RWTH_MOODLE_STATUS_URL
 from syncmymoodle.context import SyncContext
 
 try:
@@ -26,15 +25,16 @@ except ImportError:
     keyring = None
 
 logger = logging.getLogger(__name__)
+ConfigDict = dict[str, Any]
 
 
-def main() -> None:
+def build_parser(keyring_backend: Any = None) -> ArgumentParser:
     parser = ArgumentParser(
         prog="python3 -m syncmymoodle",
         description="Synchronization client for RWTH Moodle. All optional arguments override those in config.json.",
     )
 
-    if keyring:
+    if keyring_backend:
         parser.add_argument(
             "--secretservice",
             action="store_true",
@@ -88,7 +88,7 @@ def main() -> None:
     )
     parser.add_argument(
         "--courseprefix",
-        choices=COURSE_PREFIX_HANDLING_OPTIONS,
+        choices=CONFIG_OPTIONS_BY_FIELD["course_prefix_handling"].choices,
         default=None,
         help=(
             "handle leading two-character course prefixes in local folder names: "
@@ -112,7 +112,7 @@ def main() -> None:
     )
     parser.add_argument(
         "--updatefilesconflict",
-        choices=["rename", "keep", "overwrite"],
+        choices=CONFIG_OPTIONS_BY_FIELD["update_files_conflict"].choices,
         default=None,
         help=(
             "define how to handle locally modified files when updating: "
@@ -129,127 +129,158 @@ def main() -> None:
         default=logging.WARNING,
         help="show information useful for debugging",
     )
-    args = parser.parse_args()
+    return parser
 
+
+def read_json_config(path: Path) -> ConfigDict:
+    with path.open() as f:
+        return cast(ConfigDict, json.load(f))
+
+
+def global_config_path() -> Path:
+    xdg_config_home = Path(os.environ.get("XDG_CONFIG_HOME", "~/.config")).expanduser()
+    return xdg_config_home / "syncmymoodle" / "config.json"
+
+
+def load_config(args: Namespace, parser: ArgumentParser) -> ConfigDict:
     if args.config:
         overwrite_config = Path(args.config)
         if not overwrite_config.is_file():
             # Silently continuing without the explicitly requested file would
             # sync with unintended settings (or crash later); fail fast instead.
             parser.error(f"config file not found: {args.config}")
-        with overwrite_config.open() as f:
-            config = json.load(f)
-    else:
-        config = {}
+        return read_json_config(overwrite_config)
 
-        global_config = (
-            Path(os.environ.get("XDG_CONFIG_HOME", Path("~/.config").expanduser()))
-            / "syncmymoodle"
-            / "config.json"
-        )
-        if global_config.is_file():
-            with global_config.open() as f:
-                config.update(json.load(f))
+    config: ConfigDict = {}
+    global_config = global_config_path()
+    if global_config.is_file():
+        config.update(read_json_config(global_config))
 
-        local_config = Path("config.json")
-        if local_config.is_file():
-            with local_config.open() as f:
-                config.update(json.load(f))
+    local_config = Path("config.json")
+    if local_config.is_file():
+        config.update(read_json_config(local_config))
 
-    if args.user is not None:
-        config["user"] = args.user
-    if args.password is not None:
-        config["password"] = args.password
-    if args.totp is not None:
-        config["totp"] = args.totp
-    if args.totpsecret is not None:
-        config["totpsecret"] = args.totpsecret
-    if args.cookiefile is not None:
-        config["cookie_file"] = args.cookiefile
-    if args.courses is not None:
-        config["selected_courses"] = args.courses.split(",")
-    if args.semester is not None:
-        config["only_sync_semester"] = args.semester.split(",")
-    if args.basedir is not None:
-        config["basedir"] = args.basedir
-    if args.courseprefix is not None:
-        config["course_prefix_handling"] = args.courseprefix
-    if keyring and args.secretservice:
-        config["use_secret_service"] = True
-    if keyring and args.secretservicetotpsecret:
-        config["secret_service_store_totp_secret"] = True
-    if args.skipcourses is not None:
-        config["skip_courses"] = args.skipcourses.split(",")
-    if args.nolinks:
-        config["nolinks"] = True
-    if args.excludefiletypes is not None:
-        config["exclude_filetypes"] = args.excludefiletypes.split(",")
-    if args.updatefiles:
-        config["updatefiles"] = True
-    if args.updatefilesconflict is not None:
-        config["update_files_conflict"] = args.updatefilesconflict
+    return config
 
-    logging.basicConfig(level=args.loglevel)
 
-    if keyring and config.get("use_secret_service"):
-        if config.get("password"):
-            logger.critical("You need to remove your password from your config file!")
-            sys.exit(1)
-
-        if config.get("secret_service_store_totp_secret") and config.get("totpsecret"):
-            logger.critical("You need to remove your totpsecret from your config file!")
-            sys.exit(1)
-
-        if not args.user and not config.get("user"):
-            print(
-                "You need to provide your username in the config file or through --user!"
-            )
-            sys.exit(1)
-
-        if (
-            config.get("secret_service_store_totp_secret")
-            and not args.totp
-            and not config.get("totp")
-        ):
-            print(
-                "You need to provide your TOTP provider in the config file or through --totp!"
-            )
-            sys.exit(1)
-
-        config["password"] = keyring.get_password("syncmymoodle", config.get("user"))
-        if config["password"] is None:
-            if args.password:
-                password = args.password
+def apply_cli_overrides(
+    config: ConfigDict,
+    args: Namespace,
+    keyring_backend: Any = None,
+) -> None:
+    for option in CONFIG_OPTIONS:
+        if option.cli is None:
+            continue
+        value = getattr(args, option.cli.arg_name)
+        if option.cli.value_kind == "flag":
+            if value:
+                config[option.canonical_key] = True
+        elif value is not None:
+            if option.cli.value_kind == "csv":
+                config[option.canonical_key] = value.split(",")
             else:
-                password = getpass.getpass("Password:")
-            keyring.set_password("syncmymoodle", config.get("user"), password)
-            config["password"] = password
+                config[option.canonical_key] = value
 
-        if config.get("secret_service_store_totp_secret"):
-            config["totpsecret"] = keyring.get_password(
-                "syncmymoodle", config.get("totp")
-            )
-            if config["totpsecret"] is None:
-                if args.totpsecret:
-                    totpsecret = args.totpsecret
-                else:
-                    totpsecret = getpass.getpass("TOTP-Secret:")
-                keyring.set_password("syncmymoodle", config.get("totp"), totpsecret)
-                config["totpsecret"] = totpsecret
+    if keyring_backend and getattr(args, "secretservice", False):
+        config["use_secret_service"] = True
+    if keyring_backend and getattr(args, "secretservicetotpsecret", False):
+        config["secret_service_store_totp_secret"] = True
 
+
+def validate_keyring_config(config: ConfigDict, args: Namespace) -> None:
+    if config.get("password"):
+        logger.critical("You need to remove your password from your config file!")
+        sys.exit(1)
+
+    if config.get("secret_service_store_totp_secret") and config.get("totpsecret"):
+        logger.critical("You need to remove your totpsecret from your config file!")
+        sys.exit(1)
+
+    if not args.user and not config.get("user"):
+        print("You need to provide your username in the config file or through --user!")
+        sys.exit(1)
+
+    if (
+        config.get("secret_service_store_totp_secret")
+        and not args.totp
+        and not config.get("totp")
+    ):
+        print(
+            "You need to provide your TOTP provider in the config file or through --totp!"
+        )
+        sys.exit(1)
+
+
+def get_or_prompt_keyring_secret(
+    keyring_backend: Any,
+    key_name: Any,
+    prompt: str,
+    fallback: Any,
+) -> Any:
+    secret = keyring_backend.get_password("syncmymoodle", key_name)
+    if secret is not None:
+        return secret
+
+    secret = fallback if fallback else getpass.getpass(prompt)
+    keyring_backend.set_password("syncmymoodle", key_name, secret)
+    return secret
+
+
+def resolve_keyring_credentials(
+    config: ConfigDict,
+    args: Namespace,
+    keyring_backend: Any = None,
+) -> None:
+    if not keyring_backend or not config.get("use_secret_service"):
+        return
+
+    validate_keyring_config(config, args)
+    config["password"] = get_or_prompt_keyring_secret(
+        keyring_backend,
+        config.get("user"),
+        "Password:",
+        args.password,
+    )
+
+    if config.get("secret_service_store_totp_secret"):
+        config["totpsecret"] = get_or_prompt_keyring_secret(
+            keyring_backend,
+            config.get("totp"),
+            "TOTP-Secret:",
+            args.totpsecret,
+        )
+
+
+def validate_required_credentials(config: ConfigDict) -> None:
     if not config.get("user") or not config.get("password"):
         logger.critical(
             "You need to specify your username and password in the config file or as an argument!"
         )
         sys.exit(1)
-
     if not config.get("totp"):
         logger.critical(
             "You need to specify your TOTP generator in the config file or as an argument!"
         )
         sys.exit(1)
 
-    run(SyncContext(config=Config.from_dict(config)))
+
+def config_from_args(
+    args: Namespace,
+    parser: ArgumentParser,
+    keyring_backend: Any = None,
+) -> Config:
+    config = load_config(args, parser)
+    apply_cli_overrides(config, args, keyring_backend)
+    resolve_keyring_credentials(config, args, keyring_backend)
+    validate_required_credentials(config)
+    return Config.from_dict(config)
+
+
+def main(argv: Sequence[str] | None = None) -> None:
+    parser = build_parser(keyring)
+    args = parser.parse_args(argv)
+    logging.basicConfig(level=args.loglevel)
+    run(SyncContext(config=config_from_args(args, parser, keyring)))
 
 
 def run(ctx: SyncContext) -> None:

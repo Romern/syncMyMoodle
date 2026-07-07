@@ -1,8 +1,39 @@
 import json
 import sys
+from dataclasses import fields
+from types import SimpleNamespace
 
 import syncmymoodle.cli as cli
-from syncmymoodle.config import Config
+from syncmymoodle.config import CONFIG_OPTIONS, Config
+
+
+def test_config_options_cover_typed_config_fields():
+    assert tuple(field.name for field in fields(Config)) == tuple(
+        option.field_name for option in CONFIG_OPTIONS
+    )
+
+
+def test_config_options_record_existing_cli_overrides():
+    assert {
+        option.cli.arg_name: option.canonical_key
+        for option in CONFIG_OPTIONS
+        if option.cli
+    } == {
+        "user": "user",
+        "password": "password",
+        "totp": "totp",
+        "totpsecret": "totpsecret",
+        "cookiefile": "cookie_file",
+        "basedir": "basedir",
+        "courseprefix": "course_prefix_handling",
+        "nolinks": "nolinks",
+        "updatefiles": "updatefiles",
+        "updatefilesconflict": "update_files_conflict",
+        "courses": "selected_courses",
+        "skipcourses": "skip_courses",
+        "semester": "only_sync_semester",
+        "excludefiletypes": "exclude_filetypes",
+    }
 
 
 def test_defaults_applied_for_empty_config():
@@ -126,6 +157,169 @@ def test_filter_values_are_normalized():
     assert cfg.allowed_domains == {"*": ["moodle.rwth-aachen.de"]}
     assert cfg.exclude_sections == {"*": ["General"], "42": ["Hidden"]}
     assert cfg.exclude_modules == {"42": ["Quiz*"]}
+
+
+def test_cli_loads_global_then_local_config(tmp_path, monkeypatch):
+    xdg_config = tmp_path / "xdg" / "syncmymoodle" / "config.json"
+    xdg_config.parent.mkdir(parents=True)
+    xdg_config.write_text(
+        json.dumps(
+            {
+                "user": "global-user",
+                "password": "global-password",
+                "totp": "global-totp",
+                "basedir": "/global",
+            }
+        ),
+        encoding="utf-8",
+    )
+    local_config = tmp_path / "config.json"
+    local_config.write_text(
+        json.dumps({"user": "local-user", "basedir": "/local"}),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "xdg"))
+    monkeypatch.chdir(tmp_path)
+
+    parser = cli.build_parser()
+    args = parser.parse_args([])
+
+    config = cli.load_config(args, parser)
+
+    assert config["user"] == "local-user"
+    assert config["password"] == "global-password"
+    assert config["totp"] == "global-totp"
+    assert config["basedir"] == "/local"
+
+
+def test_cli_explicit_config_skips_discovery(tmp_path, monkeypatch):
+    xdg_config = tmp_path / "xdg" / "syncmymoodle" / "config.json"
+    xdg_config.parent.mkdir(parents=True)
+    xdg_config.write_text(json.dumps({"user": "global-user"}), encoding="utf-8")
+    (tmp_path / "config.json").write_text(
+        json.dumps({"user": "local-user"}), encoding="utf-8"
+    )
+    explicit_config = tmp_path / "chosen.json"
+    explicit_config.write_text(
+        json.dumps(
+            {
+                "user": "explicit-user",
+                "password": "explicit-password",
+                "totp": "explicit-totp",
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "xdg"))
+    monkeypatch.chdir(tmp_path)
+
+    parser = cli.build_parser()
+    args = parser.parse_args(["--config", str(explicit_config)])
+
+    assert cli.load_config(args, parser) == {
+        "user": "explicit-user",
+        "password": "explicit-password",
+        "totp": "explicit-totp",
+    }
+
+
+def test_cli_overrides_are_applied_after_config():
+    fake_keyring = object()
+    parser = cli.build_parser(fake_keyring)
+    args = parser.parse_args(
+        [
+            "--user",
+            "cli-user",
+            "--password",
+            "cli-password",
+            "--totp",
+            "cli-totp",
+            "--totpsecret",
+            "cli-totp-secret",
+            "--cookiefile",
+            "/tmp/session",
+            "--courses",
+            "course-a,course-b",
+            "--skipcourses",
+            "course-c,course-d",
+            "--semester",
+            "25ws,26ss",
+            "--basedir",
+            "/tmp/moodle",
+            "--courseprefix",
+            "suffix",
+            "--secretservice",
+            "--secretservicetotpsecret",
+            "--nolinks",
+            "--excludefiletypes",
+            "pdf,mp4",
+            "--updatefiles",
+            "--updatefilesconflict",
+            "keep",
+        ]
+    )
+    config = {
+        "user": "config-user",
+        "password": "config-password",
+        "totp": "config-totp",
+    }
+
+    cli.apply_cli_overrides(config, args, fake_keyring)
+
+    assert config == {
+        "user": "cli-user",
+        "password": "cli-password",
+        "totp": "cli-totp",
+        "totpsecret": "cli-totp-secret",
+        "cookie_file": "/tmp/session",
+        "selected_courses": ["course-a", "course-b"],
+        "skip_courses": ["course-c", "course-d"],
+        "only_sync_semester": ["25ws", "26ss"],
+        "basedir": "/tmp/moodle",
+        "course_prefix_handling": "suffix",
+        "use_secret_service": True,
+        "secret_service_store_totp_secret": True,
+        "nolinks": True,
+        "exclude_filetypes": ["pdf", "mp4"],
+        "updatefiles": True,
+        "update_files_conflict": "keep",
+    }
+
+
+def test_cli_keyring_resolution_reads_password_and_totp_secret():
+    calls = []
+    fake_keyring = SimpleNamespace(
+        get_password=lambda service, name: (
+            calls.append((service, name))
+            or {
+                "user": "stored-password",
+                "totp-provider": "stored-totp-secret",
+            }[name]
+        ),
+        set_password=lambda service, name, value: calls.append((service, name, value)),
+    )
+    parser = cli.build_parser(fake_keyring)
+    args = parser.parse_args(
+        [
+            "--user",
+            "user",
+            "--totp",
+            "totp-provider",
+            "--secretservice",
+            "--secretservicetotpsecret",
+        ]
+    )
+    config = {}
+
+    cli.apply_cli_overrides(config, args, fake_keyring)
+    cli.resolve_keyring_credentials(config, args, fake_keyring)
+
+    assert config["password"] == "stored-password"
+    assert config["totpsecret"] == "stored-totp-secret"
+    assert calls == [
+        ("syncmymoodle", "user"),
+        ("syncmymoodle", "totp-provider"),
+    ]
 
 
 def test_cli_preserves_canonical_config_keys(tmp_path, monkeypatch):

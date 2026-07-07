@@ -4,13 +4,15 @@ import copy
 import logging
 from collections.abc import Mapping
 from dataclasses import dataclass, field
-from typing import Any, TypeAlias
+from typing import Any, Callable, Literal, TypeAlias
 
-from syncmymoodle.constants import QUIZ_MODES
+from syncmymoodle.constants import COURSE_PREFIX_HANDLING_OPTIONS, QUIZ_MODES
 
 PatternConfig: TypeAlias = dict[str, list[str]]
+CliValueKind: TypeAlias = Literal["scalar", "csv", "flag"]
 
 logger = logging.getLogger(__name__)
+UPDATE_FILES_CONFLICT_OPTIONS = ("rename", "keep", "overwrite")
 
 # Default module toggle tree used when the config file does not define one.
 DEFAULT_USED_MODULES: dict[str, Any] = {
@@ -68,6 +70,185 @@ def normalize_quiz_mode(value: Any, log: logging.Logger = logger) -> str:
     return "off"
 
 
+def normalize_used_modules(value: Any) -> dict[str, Any]:
+    used_modules = copy.deepcopy(value or DEFAULT_USED_MODULES)
+    if isinstance(used_modules.get("url"), dict):
+        used_modules["url"]["quiz"] = normalize_quiz_mode(
+            used_modules["url"].get("quiz")
+        )
+    return used_modules
+
+
+def identity(value: Any) -> Any:
+    return value
+
+
+@dataclass(frozen=True)
+class CliOverride:
+    arg_name: str
+    value_kind: CliValueKind
+
+
+@dataclass(frozen=True)
+class ConfigOption:
+    field_name: str
+    config_keys: tuple[str, ...]
+    default: Any = None
+    normalize: Callable[[Any], Any] = identity
+    falsey_uses_default: bool = False
+    cli: CliOverride | None = None
+    choices: tuple[str, ...] = ()
+
+    @property
+    def canonical_key(self) -> str:
+        return self.config_keys[0]
+
+    def value_from(self, raw: Mapping[str, Any]) -> Any:
+        value: Any = _MISSING
+        for key in self.config_keys:
+            if key in raw:
+                value = raw[key]
+                break
+
+        if value is _MISSING or (self.falsey_uses_default and not value):
+            value = self.default
+
+        return self.normalize(copy.deepcopy(value))
+
+
+_MISSING = object()
+
+CONFIG_OPTIONS = (
+    ConfigOption(
+        "user",
+        ("user",),
+        cli=CliOverride("user", "scalar"),
+    ),
+    ConfigOption(
+        "password",
+        ("password",),
+        cli=CliOverride("password", "scalar"),
+    ),
+    ConfigOption(
+        "totp",
+        ("totp",),
+        cli=CliOverride("totp", "scalar"),
+    ),
+    ConfigOption(
+        "totpsecret",
+        ("totpsecret",),
+        cli=CliOverride("totpsecret", "scalar"),
+    ),
+    ConfigOption(
+        "cookie_file",
+        ("cookie_file",),
+        "./session",
+        falsey_uses_default=True,
+        cli=CliOverride("cookiefile", "scalar"),
+    ),
+    ConfigOption(
+        "basedir",
+        ("basedir",),
+        "./",
+        falsey_uses_default=True,
+        cli=CliOverride("basedir", "scalar"),
+    ),
+    ConfigOption(
+        "course_prefix_handling",
+        ("course_prefix_handling",),
+        "keep",
+        falsey_uses_default=True,
+        cli=CliOverride("courseprefix", "scalar"),
+        choices=COURSE_PREFIX_HANDLING_OPTIONS,
+    ),
+    ConfigOption(
+        "chromium_path",
+        ("chromium_path",),
+        None,
+        falsey_uses_default=True,
+    ),
+    ConfigOption(
+        "nolinks",
+        ("nolinks", "no_links"),
+        False,
+        bool,
+        cli=CliOverride("nolinks", "flag"),
+    ),
+    ConfigOption(
+        "updatefiles",
+        ("updatefiles", "update_files"),
+        False,
+        bool,
+        cli=CliOverride("updatefiles", "flag"),
+    ),
+    ConfigOption(
+        "update_files_conflict",
+        ("update_files_conflict",),
+        "rename",
+        falsey_uses_default=True,
+        cli=CliOverride("updatefilesconflict", "scalar"),
+        choices=UPDATE_FILES_CONFLICT_OPTIONS,
+    ),
+    ConfigOption(
+        "selected_courses",
+        ("selected_courses",),
+        normalize=as_string_list,
+        cli=CliOverride("courses", "csv"),
+    ),
+    ConfigOption(
+        "skip_courses",
+        ("skip_courses",),
+        normalize=as_string_list,
+        cli=CliOverride("skipcourses", "csv"),
+    ),
+    ConfigOption(
+        "only_sync_semester",
+        ("only_sync_semester",),
+        normalize=as_string_list,
+        cli=CliOverride("semester", "csv"),
+    ),
+    ConfigOption(
+        "exclude_filetypes",
+        ("exclude_filetypes",),
+        normalize=as_string_list,
+        cli=CliOverride("excludefiletypes", "csv"),
+    ),
+    ConfigOption(
+        "exclude_files",
+        ("exclude_files",),
+        normalize=as_string_list,
+    ),
+    ConfigOption(
+        "exclude_links",
+        ("exclude_links",),
+        normalize=normalize_pattern_config,
+    ),
+    ConfigOption(
+        "allowed_domains",
+        ("allowed_domains",),
+        normalize=normalize_pattern_config,
+    ),
+    ConfigOption(
+        "exclude_sections",
+        ("exclude_sections", "skip_sections"),
+        normalize=normalize_pattern_config,
+    ),
+    ConfigOption(
+        "exclude_modules",
+        ("exclude_modules", "skip_modules"),
+        normalize=normalize_pattern_config,
+    ),
+    ConfigOption(
+        "used_modules",
+        ("used_modules",),
+        DEFAULT_USED_MODULES,
+        normalize_used_modules,
+        falsey_uses_default=True,
+    ),
+)
+CONFIG_OPTIONS_BY_FIELD = {option.field_name: option for option in CONFIG_OPTIONS}
+
+
 @dataclass
 class Config:
     """Typed view of the user configuration.
@@ -115,41 +296,8 @@ class Config:
     @classmethod
     def from_dict(cls, raw: Mapping[str, Any] | None) -> "Config":
         raw = dict(raw or {})
-
-        used_modules = copy.deepcopy(raw.get("used_modules") or DEFAULT_USED_MODULES)
-        # Normalize the quiz toggle to a mode string so the rest of the code can
-        # branch on off/html/pdf/both without re-parsing legacy booleans.
-        if isinstance(used_modules.get("url"), dict):
-            used_modules["url"]["quiz"] = normalize_quiz_mode(
-                used_modules["url"].get("quiz")
-            )
-
         return cls(
-            user=raw.get("user"),
-            password=raw.get("password"),
-            totp=raw.get("totp"),
-            totpsecret=raw.get("totpsecret"),
-            cookie_file=raw.get("cookie_file") or "./session",
-            chromium_path=raw.get("chromium_path") or None,
-            basedir=raw.get("basedir") or "./",
-            course_prefix_handling=raw.get("course_prefix_handling") or "keep",
-            nolinks=bool(raw.get("nolinks", raw.get("no_links", False))),
-            updatefiles=bool(raw.get("updatefiles", raw.get("update_files", False))),
-            update_files_conflict=raw.get("update_files_conflict") or "rename",
-            selected_courses=as_string_list(raw.get("selected_courses")),
-            skip_courses=as_string_list(raw.get("skip_courses")),
-            only_sync_semester=as_string_list(raw.get("only_sync_semester")),
-            exclude_filetypes=as_string_list(raw.get("exclude_filetypes")),
-            exclude_files=as_string_list(raw.get("exclude_files")),
-            exclude_links=normalize_pattern_config(raw.get("exclude_links")),
-            allowed_domains=normalize_pattern_config(raw.get("allowed_domains")),
-            exclude_sections=normalize_pattern_config(
-                raw.get("exclude_sections", raw.get("skip_sections"))
-            ),
-            exclude_modules=normalize_pattern_config(
-                raw.get("exclude_modules", raw.get("skip_modules"))
-            ),
-            used_modules=used_modules,
+            **{option.field_name: option.value_from(raw) for option in CONFIG_OPTIONS}
         )
 
     def module_enabled(self, name: str) -> bool:
