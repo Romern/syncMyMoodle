@@ -53,14 +53,22 @@ def build_parser(keyring_backend: Any = None) -> ArgumentParser:
         cli = option.cli
         if cli is None or (cli.requires_keyring and not keyring_backend):
             continue
+        kwargs: dict[str, Any] = {}
         if cli.value_kind == "flag":
-            parser.add_argument(f"--{cli.arg_name}", action="store_true", help=cli.help)
+            kwargs["action"] = "store_true"
         elif option.choices:
+            kwargs["choices"] = option.choices
+        parser.add_argument(f"--{cli.arg_name}", help=cli.help, **kwargs)
+        if cli.aliases:
+            # Deprecated spellings: still accepted, hidden from --help. SUPPRESS
+            # keeps an absent alias from clobbering the primary flag's default.
             parser.add_argument(
-                f"--{cli.arg_name}", choices=option.choices, default=None, help=cli.help
+                *(f"--{alias}" for alias in cli.aliases),
+                dest=cli.dest,
+                default=SUPPRESS,
+                help=SUPPRESS,
+                **kwargs,
             )
-        else:
-            parser.add_argument(f"--{cli.arg_name}", default=None, help=cli.help)
     parser.add_argument(
         "-v",
         "--verbose",
@@ -297,7 +305,7 @@ def apply_cli_overrides(config: ConfigDict, args: Namespace) -> None:
         cli = option.cli
         if cli is None:
             continue
-        value = getattr(args, cli.arg_name, None)
+        value = getattr(args, cli.dest, None)
         if cli.value_kind == "flag":
             if value:
                 config[option.canonical_key] = cli.flag_value
@@ -328,7 +336,7 @@ def resolve_keyring_credentials(
     file_config: ConfigDict,
     keyring_backend: Any,
 ) -> None:
-    """Fill config.password/totpsecret from the keyring (prompting once).
+    """Fill config.password/totp_secret from the keyring (prompting once).
 
     ``file_config`` is the merged file-only config, used to insist that
     secrets are not stored in config files; CLI-provided values are allowed
@@ -336,7 +344,7 @@ def resolve_keyring_credentials(
     """
     if not keyring_backend:
         logger.critical(
-            "use_secret_service is enabled, but the keyring package is not installed!"
+            "use_keyring is enabled, but the keyring package is not installed!"
         )
         sys.exit(1)
 
@@ -344,17 +352,18 @@ def resolve_keyring_credentials(
         logger.critical("You need to remove your password from your config file!")
         sys.exit(1)
 
-    if config.secret_service_store_totp_secret and file_config.get("auth.totpsecret"):
-        logger.critical("You need to remove your totpsecret from your config file!")
+    if config.keyring_store_totp_secret and file_config.get("auth.totp_secret"):
+        logger.critical("You need to remove your TOTP secret from your config file!")
         sys.exit(1)
 
     if not config.user:
         print("You need to provide your username in the config file or through --user!")
         sys.exit(1)
 
-    if config.secret_service_store_totp_secret and not config.totp:
+    if config.keyring_store_totp_secret and not config.totp_serial:
         print(
-            "You need to provide your TOTP provider in the config file or through --totp!"
+            "You need to provide your TOTP provider in the config file or "
+            "through --totp-serial!"
         )
         sys.exit(1)
 
@@ -365,12 +374,12 @@ def resolve_keyring_credentials(
         config.password,
     )
 
-    if config.secret_service_store_totp_secret:
-        config.totpsecret = get_or_prompt_keyring_secret(
+    if config.keyring_store_totp_secret:
+        config.totp_secret = get_or_prompt_keyring_secret(
             keyring_backend,
-            config.totp,
+            config.totp_serial,
             "TOTP-Secret:",
-            config.totpsecret,
+            config.totp_secret,
         )
 
 
@@ -380,7 +389,7 @@ def validate_required_credentials(config: Config) -> None:
             "You need to specify your username and password in the config file or as an argument!"
         )
         sys.exit(1)
-    if not config.totp:
+    if not config.totp_serial:
         logger.critical(
             "You need to specify your TOTP generator in the config file or as an argument!"
         )
@@ -396,7 +405,7 @@ def config_from_args(
     merged = dict(file_config)
     apply_cli_overrides(merged, args)
     config = Config.from_dict(merged)
-    if config.use_secret_service:
+    if config.use_keyring:
         resolve_keyring_credentials(config, file_config, keyring_backend)
     validate_required_credentials(config)
     return config

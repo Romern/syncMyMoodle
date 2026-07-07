@@ -1,15 +1,15 @@
 [auth]
 user = ""
 password = ""
-totp = ""
-totpsecret = ""
-use_secret_service = false
-secret_service_store_totp_secret = false
+totp_serial = ""
+totp_secret = ""
+use_keyring = false
+keyring_store_totp_secret = false
 
 [paths]
-basedir = "./"
+sync_directory = "./"
 cookie_file = "./session"
-chromium_path = ""
+browser = ""
 
 [courses]
 selected = []
@@ -19,7 +19,7 @@ prefix_handling = "suffix"
 
 [downloads]
 update_files = true
-update_files_conflict = "rename"
+conflict_handling = "rename"
 
 [filters]
 exclude_filetypes = []

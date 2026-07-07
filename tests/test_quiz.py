@@ -37,7 +37,7 @@ QUIZ_HTML = (
 def quiz_context(tmp_path, mode):
     ctx = make_context(
         {
-            "paths.basedir": str(tmp_path),
+            "paths.sync_directory": str(tmp_path),
             "modules.quiz": mode,
         }
     )
@@ -305,7 +305,7 @@ def test_find_chromium_prefers_configured_path(tmp_path):
     browser = tmp_path / "my-chromium"
     browser.write_text("#!/bin/sh\n")
     ctx = quiz_context(tmp_path, "pdf")
-    ctx.config.chromium_path = str(browser)
+    ctx.config.browser = str(browser)
     assert quiz.find_chromium(ctx.config) == str(browser)
 
 

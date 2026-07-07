@@ -733,17 +733,16 @@ def build_quiz_snapshot(
 def find_chromium(config: Config, log: logging.Logger = logger) -> str | None:
     """Locate a Chromium-family browser for PDF rendering.
 
-    Prefers an explicitly configured ``chromium_path``, then binaries on PATH,
+    Prefers an explicitly configured ``browser``, then binaries on PATH,
     then well-known macOS/Windows install locations. Returns ``None`` when no
     browser is found.
     """
-    if config.chromium_path:
-        if Path(config.chromium_path).exists():
-            return config.chromium_path
+    if config.browser:
+        if Path(config.browser).exists():
+            return config.browser
         log.warning(
-            "Configured chromium_path %s does not exist; falling back to "
-            "auto-discovery.",
-            config.chromium_path,
+            "Configured browser %s does not exist; falling back to auto-discovery.",
+            config.browser,
         )
     for name in CHROMIUM_BINARY_NAMES:
         found = shutil.which(name)
@@ -864,7 +863,7 @@ def download_quiz(ctx: SyncContext, node: Any, log: logging.Logger = logger) -> 
     want_html = mode in ("html", "both")
     want_pdf = mode in ("pdf", "both")
 
-    path = pathing.get_sanitized_node_path(node.parent, Path(ctx.config.basedir))
+    path = pathing.get_sanitized_node_path(node.parent, Path(ctx.config.sync_directory))
     safe_name = pathing.sanitize_path_part(str(node.name or "quiz")) or "quiz"
     html_path = pathing.with_windows_extended_length_prefix(path / f"{safe_name}.html")
     pdf_path = pathing.with_windows_extended_length_prefix(path / f"{safe_name}.pdf")
@@ -908,7 +907,7 @@ def download_quiz(ctx: SyncContext, node: Any, log: logging.Logger = logger) -> 
         log.warning(
             "No Chromium-family browser found to render the quiz PDF for %s; "
             "keeping the HTML snapshot instead. Install Chrome, Chromium or "
-            "Edge, or set 'chromium_path' in your config.",
+            "Edge, or set 'browser' in the [paths] table of your config.",
             node.name,
         )
         pdf_ok = False

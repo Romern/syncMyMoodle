@@ -24,7 +24,7 @@ UPDATE_SNAPSHOTS = os.environ.get("SMM_UPDATE_SNAPSHOTS") not in (None, "", "0")
 
 
 DEFAULT_CONFIG = {
-    "paths.basedir": "./",
+    "paths.sync_directory": "./",
     "courses.selected": [],
     "courses.skip": [],
     "courses.semesters": [],
@@ -44,7 +44,7 @@ DEFAULT_CONFIG = {
     "filters.exclude_sections": [],
     "filters.exclude_modules": [],
     "downloads.update_files": False,
-    "downloads.update_files_conflict": "rename",
+    "downloads.conflict_handling": "rename",
 }
 
 
@@ -154,7 +154,7 @@ def make_context(config: dict[str, Any] | None = None) -> SyncContext:
 
 
 def node_path(ctx: SyncContext, node: Node) -> Path:
-    return get_sanitized_node_path(node, Path(ctx.config.basedir))
+    return get_sanitized_node_path(node, Path(ctx.config.sync_directory))
 
 
 def download_file(ctx: SyncContext, node: Node) -> bool:

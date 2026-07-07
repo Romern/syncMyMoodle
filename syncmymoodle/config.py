@@ -65,18 +65,29 @@ class CliOverride:
     arg_name: str
     value_kind: CliValueKind
     help: str
-    # Value a "flag" kind writes when given (--nolinks writes False into
-    # links.follow_links).
+    # Value a "flag" kind writes when given (--no-follow-links writes False
+    # into links.follow_links).
     flag_value: bool = True
     requires_keyring: bool = False
+    # Deprecated spellings that are still accepted but hidden from --help.
+    aliases: tuple[str, ...] = ()
+
+    @property
+    def dest(self) -> str:
+        """Argparse namespace attribute the option is stored under."""
+        return self.arg_name.replace("-", "_")
 
 
-def cli_arg(arg_name: str, help_text: str) -> CliOverride:
-    return CliOverride(arg_name, "scalar", help_text)
+def cli_arg(
+    arg_name: str, help_text: str, aliases: tuple[str, ...] = ()
+) -> CliOverride:
+    return CliOverride(arg_name, "scalar", help_text, aliases=aliases)
 
 
-def cli_csv(arg_name: str, help_text: str) -> CliOverride:
-    return CliOverride(arg_name, "csv", help_text)
+def cli_csv(
+    arg_name: str, help_text: str, aliases: tuple[str, ...] = ()
+) -> CliOverride:
+    return CliOverride(arg_name, "csv", help_text, aliases=aliases)
 
 
 def cli_flag(
@@ -84,8 +95,11 @@ def cli_flag(
     help_text: str,
     flag_value: bool = True,
     requires_keyring: bool = False,
+    aliases: tuple[str, ...] = (),
 ) -> CliOverride:
-    return CliOverride(arg_name, "flag", help_text, flag_value, requires_keyring)
+    return CliOverride(
+        arg_name, "flag", help_text, flag_value, requires_keyring, aliases
+    )
 
 
 def option(
@@ -139,62 +153,76 @@ class Config:
         group="auth",
         cli=cli_arg("password", "set your RWTH Single Sign-On password"),
     )
-    totp: str | None = option(
+    totp_serial: str | None = option(
         group="auth",
         cli=cli_arg(
-            "totp",
+            "totp-serial",
             "set your RWTH Single Sign-On TOTP provider's serial number "
             "(see https://idm.rwth-aachen.de/selfservice/MFATokenManager)",
+            aliases=("totp",),
         ),
     )
-    totpsecret: str | None = option(
+    totp_secret: str | None = option(
         group="auth",
         cli=cli_arg(
-            "totpsecret", "(optional) set your RWTH Single Sign-On TOTP provider Secret"
+            "totp-secret",
+            "(optional) set your RWTH Single Sign-On TOTP provider Secret",
+            aliases=("totpsecret",),
         ),
     )
-    use_secret_service: bool = option(
+    use_keyring: bool = option(
         False,
         group="auth",
         normalize=bool,
         cli=cli_flag(
-            "secretservice",
+            "use-keyring",
             "Use system's keyring for storing and retrieving account credentials",
             requires_keyring=True,
+            aliases=("secretservice",),
         ),
     )
-    secret_service_store_totp_secret: bool = option(
+    keyring_store_totp_secret: bool = option(
         False,
         group="auth",
         normalize=bool,
         cli=cli_flag(
-            "secretservicetotpsecret",
+            "keyring-store-totp-secret",
             "Save TOTP secret in keyring",
             requires_keyring=True,
+            aliases=("secretservicetotpsecret",),
         ),
     )
 
     # Local paths
-    basedir: str = option(
+    sync_directory: str = option(
         "./",
         group="paths",
         falsey_uses_default=True,
-        cli=cli_arg("basedir", "specify the directory where all files will be synced"),
+        cli=cli_arg(
+            "sync-directory",
+            "specify the directory where all files will be synced",
+            aliases=("basedir",),
+        ),
     )
     cookie_file: str = option(
         "./session",
         group="paths",
         falsey_uses_default=True,
-        cli=cli_arg("cookiefile", "set the location of a cookie file"),
+        cli=cli_arg(
+            "cookie-file",
+            "set the location of a cookie file",
+            aliases=("cookiefile",),
+        ),
     )
     # Explicit path to a Chromium-family browser used to render quiz PDFs. When
     # unset, the browser is auto-discovered (see quiz.find_chromium).
-    chromium_path: str | None = option(
+    browser: str | None = option(
         group="paths",
         falsey_uses_default=True,
         cli=cli_arg(
-            "chromiumpath",
+            "browser",
             "set the path to a Chrome/Chromium/Edge binary for quiz PDF rendering",
+            aliases=("chromiumpath",),
         ),
     )
 
@@ -217,8 +245,9 @@ class Config:
         factory=list,
         normalize=as_string_list,
         cli=cli_csv(
-            "skipcourses",
+            "skip-courses",
             "exclude specific courses using comma-separated links. Defaults to None.",
+            aliases=("skipcourses",),
         ),
     )
     only_sync_semester: list[str] = option(
@@ -227,10 +256,11 @@ class Config:
         factory=list,
         normalize=as_string_list,
         cli=cli_csv(
-            "semester",
+            "semesters",
             "specify semesters to be synced e.g. `22s`, comma-separated. "
             "Defaults to all semesters, if no additional restrictions e.g. "
             "courses are defined.",
+            aliases=("semester",),
         ),
     )
     course_prefix_handling: str = option(
@@ -240,9 +270,10 @@ class Config:
         falsey_uses_default=True,
         choices=COURSE_PREFIX_HANDLING_OPTIONS,
         cli=cli_arg(
-            "courseprefix",
+            "course-prefix-handling",
             "handle leading two-character course prefixes in local folder "
             "names: 'keep' (default), 'remove', or 'suffix'",
+            aliases=("courseprefix",),
         ),
     )
 
@@ -252,21 +283,23 @@ class Config:
         group="downloads",
         normalize=bool,
         cli=cli_flag(
-            "updatefiles",
+            "update-files",
             "define whether modified files with the same name/path should be "
             "redownloaded",
+            aliases=("updatefiles",),
         ),
     )
-    update_files_conflict: str = option(
+    conflict_handling: str = option(
         "rename",
         group="downloads",
         falsey_uses_default=True,
         choices=UPDATE_FILES_CONFLICT_OPTIONS,
         cli=cli_arg(
-            "updatefilesconflict",
+            "conflict-handling",
             "define how to handle locally modified files when updating: "
             "'rename' (default) moves the old file aside, 'keep' skips the "
             "update, 'overwrite' replaces the local file",
+            aliases=("updatefilesconflict",),
         ),
     )
 
@@ -276,9 +309,10 @@ class Config:
         factory=list,
         normalize=as_string_list,
         cli=cli_csv(
-            "excludefiletypes",
+            "exclude-filetypes",
             "specify whether specific file types should be excluded, "
             'comma-separated e.g. "mp4,mkv"',
+            aliases=("excludefiletypes",),
         ),
     )
     exclude_files: list[str] = option(
@@ -286,8 +320,9 @@ class Config:
         factory=list,
         normalize=as_string_list,
         cli=cli_csv(
-            "excludefiles",
+            "exclude-files",
             'exclude specific files using comma-separated patterns e.g. "*.bak,*.tmp"',
+            aliases=("excludefiles",),
         ),
     )
     exclude_links: PatternConfig = option(
@@ -295,8 +330,9 @@ class Config:
         factory=dict,
         normalize=normalize_pattern_config,
         cli=cli_csv(
-            "excludelinks",
+            "exclude-links",
             "exclude discovered links using comma-separated URL patterns",
+            aliases=("excludelinks",),
         ),
     )
     allowed_domains: PatternConfig = option(
@@ -304,8 +340,9 @@ class Config:
         factory=dict,
         normalize=normalize_pattern_config,
         cli=cli_csv(
-            "alloweddomains",
+            "allowed-domains",
             "only keep discovered links on these comma-separated domains",
+            aliases=("alloweddomains",),
         ),
     )
     exclude_sections: PatternConfig = option(
@@ -313,8 +350,9 @@ class Config:
         factory=dict,
         normalize=normalize_pattern_config,
         cli=cli_csv(
-            "excludesections",
+            "exclude-sections",
             "exclude Moodle sections by comma-separated names, ids or patterns",
+            aliases=("excludesections",),
         ),
     )
     exclude_modules: PatternConfig = option(
@@ -322,9 +360,10 @@ class Config:
         factory=dict,
         normalize=normalize_pattern_config,
         cli=cli_csv(
-            "excludemodules",
+            "exclude-modules",
             "exclude Moodle modules by comma-separated names, ids, types, "
             "URLs or patterns",
+            aliases=("excludemodules",),
         ),
     )
 
@@ -336,10 +375,11 @@ class Config:
         group="links",
         normalize=bool,
         cli=cli_flag(
-            "nolinks",
-            "define whether various links in moodle pages should also be "
-            "inspected e.g. youtube videos, wikipedia articles",
+            "no-follow-links",
+            "do not inspect links found in moodle pages, disabling all link "
+            "sources e.g. youtube and opencast videos",
             flag_value=False,
+            aliases=("nolinks",),
         ),
     )
     link_youtube: bool = option(True, group="links", key="youtube", normalize=bool)
@@ -560,20 +600,20 @@ FOLLOW_LINKS_KEY = "links.follow_links"
 LEGACY_KEY_MAP = {
     "user": "auth.user",
     "password": "auth.password",
-    "totp": "auth.totp",
-    "totpsecret": "auth.totpsecret",
-    "use_secret_service": "auth.use_secret_service",
-    "secret_service_store_totp_secret": "auth.secret_service_store_totp_secret",
-    "basedir": "paths.basedir",
+    "totp": "auth.totp_serial",
+    "totpsecret": "auth.totp_secret",
+    "use_secret_service": "auth.use_keyring",
+    "secret_service_store_totp_secret": "auth.keyring_store_totp_secret",
+    "basedir": "paths.sync_directory",
     "cookie_file": "paths.cookie_file",
-    "chromium_path": "paths.chromium_path",
+    "chromium_path": "paths.browser",
     "selected_courses": "courses.selected",
     "skip_courses": "courses.skip",
     "only_sync_semester": "courses.semesters",
     "course_prefix_handling": "courses.prefix_handling",
     "updatefiles": "downloads.update_files",
     "update_files": "downloads.update_files",
-    "update_files_conflict": "downloads.update_files_conflict",
+    "update_files_conflict": "downloads.conflict_handling",
     "exclude_filetypes": "filters.exclude_filetypes",
     "exclude_files": "filters.exclude_files",
     "exclude_links": "filters.exclude_links",

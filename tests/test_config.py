@@ -27,28 +27,48 @@ def test_config_options_record_cli_overrides():
     } == {
         "user": "auth.user",
         "password": "auth.password",
-        "totp": "auth.totp",
-        "totpsecret": "auth.totpsecret",
-        "secretservice": "auth.use_secret_service",
-        "secretservicetotpsecret": "auth.secret_service_store_totp_secret",
-        "basedir": "paths.basedir",
-        "cookiefile": "paths.cookie_file",
-        "chromiumpath": "paths.chromium_path",
+        "totp-serial": "auth.totp_serial",
+        "totp-secret": "auth.totp_secret",
+        "use-keyring": "auth.use_keyring",
+        "keyring-store-totp-secret": "auth.keyring_store_totp_secret",
+        "sync-directory": "paths.sync_directory",
+        "cookie-file": "paths.cookie_file",
+        "browser": "paths.browser",
         "courses": "courses.selected",
-        "skipcourses": "courses.skip",
-        "semester": "courses.semesters",
-        "courseprefix": "courses.prefix_handling",
-        "updatefiles": "downloads.update_files",
-        "updatefilesconflict": "downloads.update_files_conflict",
-        "excludefiletypes": "filters.exclude_filetypes",
-        "excludefiles": "filters.exclude_files",
-        "excludelinks": "filters.exclude_links",
-        "alloweddomains": "filters.allowed_domains",
-        "excludesections": "filters.exclude_sections",
-        "excludemodules": "filters.exclude_modules",
-        "nolinks": "links.follow_links",
+        "skip-courses": "courses.skip",
+        "semesters": "courses.semesters",
+        "course-prefix-handling": "courses.prefix_handling",
+        "update-files": "downloads.update_files",
+        "conflict-handling": "downloads.conflict_handling",
+        "exclude-filetypes": "filters.exclude_filetypes",
+        "exclude-files": "filters.exclude_files",
+        "exclude-links": "filters.exclude_links",
+        "allowed-domains": "filters.allowed_domains",
+        "exclude-sections": "filters.exclude_sections",
+        "exclude-modules": "filters.exclude_modules",
+        "no-follow-links": "links.follow_links",
         "quiz": "modules.quiz",
     }
+
+
+def test_deprecated_cli_flag_spellings_still_work():
+    parser = cli.build_parser()
+    args = parser.parse_args(
+        ["--skipcourses", "a,b", "--nolinks", "--updatefilesconflict", "keep"]
+    )
+    config: dict = {}
+
+    cli.apply_cli_overrides(config, args)
+
+    assert config == {
+        "courses.skip": ["a", "b"],
+        "links.follow_links": False,
+        "downloads.conflict_handling": "keep",
+    }
+    # The deprecated spellings are accepted but hidden from --help.
+    help_text = parser.format_help()
+    assert "--skip-courses" in help_text
+    assert "--skipcourses" not in help_text
 
 
 def test_converted_legacy_config_passes_validation():
@@ -81,7 +101,7 @@ def test_config_validation_accepts_grouped_toml_keys():
     validate_config(
         {
             "auth": {"user": "user", "password": "password"},
-            "paths": {"basedir": "/tmp/moodle"},
+            "paths": {"sync_directory": "/tmp/moodle"},
             "courses": {"prefix_handling": "suffix", "selected": ["a"]},
             "downloads": {"update_files": True},
             "filters": {
@@ -101,9 +121,9 @@ def test_config_validation_rejects_unknown_keys():
 
 def test_config_validation_suggests_similar_keys():
     with pytest.raises(ConfigValidationError) as exc_info:
-        validate_config({"paths": {"baseidr": "/tmp/moodle"}})
+        validate_config({"paths": {"sync_directoy": "/tmp/moodle"}})
 
-    assert "Did you mean 'paths.basedir'?" in str(exc_info.value)
+    assert "Did you mean 'paths.sync_directory'?" in str(exc_info.value)
 
 
 def test_config_validation_rejects_invalid_choices():
@@ -111,14 +131,14 @@ def test_config_validation_rejects_invalid_choices():
         validate_config(
             {
                 "courses": {"prefix_handling": "later"},
-                "downloads": {"update_files_conflict": "delete"},
+                "downloads": {"conflict_handling": "delete"},
                 "modules": {"quiz": "screenshots"},
             }
         )
 
     message = str(exc_info.value)
     assert "courses.prefix_handling must be one of" in message
-    assert "downloads.update_files_conflict must be one of" in message
+    assert "downloads.conflict_handling must be one of" in message
     assert "modules.quiz must be one of" in message
 
 
@@ -126,7 +146,7 @@ def test_config_validation_rejects_non_boolean_toggles():
     with pytest.raises(ConfigValidationError) as exc_info:
         validate_config(
             {
-                "auth": {"use_secret_service": "yes"},
+                "auth": {"use_keyring": "yes"},
                 "links": {"follow_links": "false", "youtube": "false"},
                 "modules": {"folder": "true"},
             }
@@ -134,7 +154,7 @@ def test_config_validation_rejects_non_boolean_toggles():
 
     message = str(exc_info.value)
     assert "links.follow_links must be true or false" in message
-    assert "auth.use_secret_service must be true or false" in message
+    assert "auth.use_keyring must be true or false" in message
     assert "modules.folder must be true or false" in message
     assert "links.youtube must be true or false" in message
 
@@ -192,10 +212,10 @@ def test_legacy_key_map_targets_canonical_keys():
 
 def test_defaults_applied_for_empty_config():
     cfg = Config.from_dict({})
-    assert cfg.basedir == "./"
+    assert cfg.sync_directory == "./"
     assert cfg.cookie_file == "./session"
     assert cfg.course_prefix_handling == "keep"
-    assert cfg.update_files_conflict == "rename"
+    assert cfg.conflict_handling == "rename"
     assert cfg.follow_links is True
     assert cfg.update_files is False
     assert cfg.selected_courses == []
@@ -326,14 +346,14 @@ def test_module_helpers_reflect_legacy_toggles():
 
 def test_from_dict_accepts_none():
     cfg = Config.from_dict(None)
-    assert cfg.basedir == "./"
+    assert cfg.sync_directory == "./"
 
 
 def test_toml_example_is_valid():
     raw = tomllib.loads(Path("config.toml.example").read_text(encoding="utf-8"))
     validate_config(raw)
     cfg = Config.from_dict(raw)
-    assert cfg.basedir == "./"
+    assert cfg.sync_directory == "./"
     assert cfg.course_prefix_handling == "suffix"
     assert cfg.update_files is True
     assert cfg.follow_links is True
@@ -386,8 +406,8 @@ def test_cli_loads_global_then_local_config(tmp_path, monkeypatch):
     assert cli.load_config(args, parser) == {
         "auth.user": "local-user",
         "auth.password": "global-password",
-        "auth.totp": "global-totp",
-        "paths.basedir": "/local",
+        "auth.totp_serial": "global-totp",
+        "paths.sync_directory": "/local",
     }
 
 
@@ -399,7 +419,7 @@ def test_cli_loads_toml_configs_before_legacy_json(tmp_path, monkeypatch):
         encoding="utf-8",
     )
     (xdg_config_dir / "config.toml").write_text(
-        '[auth]\nuser = "global-toml"\npassword = "toml-password"\ntotp = "global-totp"\n',
+        '[auth]\nuser = "global-toml"\npassword = "toml-password"\ntotp_serial = "global-totp"\n',
         encoding="utf-8",
     )
     (tmp_path / "config.json").write_text(
@@ -407,7 +427,7 @@ def test_cli_loads_toml_configs_before_legacy_json(tmp_path, monkeypatch):
         encoding="utf-8",
     )
     (tmp_path / "config.toml").write_text(
-        '[auth]\nuser = "local-toml"\n\n[paths]\nbasedir = "/toml"\n',
+        '[auth]\nuser = "local-toml"\n\n[paths]\nsync_directory = "/toml"\n',
         encoding="utf-8",
     )
     monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "xdg"))
@@ -419,8 +439,8 @@ def test_cli_loads_toml_configs_before_legacy_json(tmp_path, monkeypatch):
     assert cli.load_config(args, parser) == {
         "auth.user": "local-toml",
         "auth.password": "toml-password",
-        "auth.totp": "global-totp",
-        "paths.basedir": "/toml",
+        "auth.totp_serial": "global-totp",
+        "paths.sync_directory": "/toml",
     }
 
 
@@ -481,10 +501,10 @@ def test_cli_loads_grouped_toml_config(tmp_path):
 [auth]
 user = "toml-user"
 password = "toml-password"
-totp = "toml-totp"
+totp_serial = "toml-totp"
 
 [paths]
-basedir = "/tmp/moodle"
+sync_directory = "/tmp/moodle"
 
 [courses]
 prefix_handling = "suffix"
@@ -511,8 +531,8 @@ quiz = "pdf"
     assert cli.load_config(args, parser) == {
         "auth.user": "toml-user",
         "auth.password": "toml-password",
-        "auth.totp": "toml-totp",
-        "paths.basedir": "/tmp/moodle",
+        "auth.totp_serial": "toml-totp",
+        "paths.sync_directory": "/tmp/moodle",
         "courses.prefix_handling": "suffix",
         "downloads.update_files": True,
         "filters.allowed_domains": ["moodle.rwth-aachen.de"],
@@ -584,7 +604,7 @@ def test_cli_explicit_config_skips_discovery(tmp_path, monkeypatch):
     assert cli.load_config(args, parser) == {
         "auth.user": "explicit-user",
         "auth.password": "explicit-password",
-        "auth.totp": "explicit-totp",
+        "auth.totp_serial": "explicit-totp",
     }
 
 
@@ -660,7 +680,7 @@ def test_config_migrate_command_writes_toml(tmp_path, capsys):
         "auth": {
             "user": "json-user",
             "password": "json-password",
-            "totp": "json-totp",
+            "totp_serial": "json-totp",
         },
         "courses": {"selected": ["course-a", "course-b"]},
         "links": {
@@ -728,7 +748,7 @@ def test_config_check_command_reports_valid_config(tmp_path, capsys):
 [auth]
 user = "user"
 password = "password"
-totp = "totp"
+totp_serial = "totp"
 
 [courses]
 prefix_handling = "suffix"
@@ -759,7 +779,7 @@ def test_config_check_command_reports_validation_errors(tmp_path, capsys):
     config_path.write_text(
         """
 [paths]
-baseidr = "/tmp/moodle"
+sync_directoy = "/tmp/moodle"
 
 [courses]
 prefix_handling = "later"
@@ -774,8 +794,8 @@ prefix_handling = "later"
     assert exc_info.value.code == 1
     assert captured.out == ""
     assert f"Config is invalid: {config_path}" in captured.err
-    assert "- unknown config key 'paths.baseidr'." in captured.err
-    assert "Did you mean 'paths.basedir'?" in captured.err
+    assert "- unknown config key 'paths.sync_directoy'." in captured.err
+    assert "Did you mean 'paths.sync_directory'?" in captured.err
     assert "- courses.prefix_handling must be one of" in captured.err
 
 
@@ -786,7 +806,7 @@ def test_cli_rejects_invalid_config_before_sync(tmp_path, capsys):
 [auth]
 user = "user"
 password = "password"
-totp = "totp"
+totp_serial = "totp"
 
 [courses]
 prefix_handling = "later"
@@ -812,43 +832,43 @@ def test_cli_overrides_are_applied_after_config():
             "cli-user",
             "--password",
             "cli-password",
-            "--totp",
+            "--totp-serial",
             "cli-totp",
-            "--totpsecret",
+            "--totp-secret",
             "cli-totp-secret",
-            "--cookiefile",
+            "--cookie-file",
             "/tmp/session",
             "--courses",
             "course-a,course-b",
-            "--skipcourses",
+            "--skip-courses",
             "course-c,course-d",
-            "--semester",
+            "--semesters",
             "25ws,26ss",
-            "--basedir",
+            "--sync-directory",
             "/tmp/moodle",
-            "--chromiumpath",
+            "--browser",
             "/usr/bin/chromium",
-            "--courseprefix",
+            "--course-prefix-handling",
             "suffix",
-            "--secretservice",
-            "--secretservicetotpsecret",
-            "--nolinks",
-            "--excludefiletypes",
+            "--use-keyring",
+            "--keyring-store-totp-secret",
+            "--no-follow-links",
+            "--exclude-filetypes",
             "pdf,mp4",
-            "--excludefiles",
+            "--exclude-files",
             "*.bak,*.tmp",
-            "--excludelinks",
+            "--exclude-links",
             "*calendar*,*hinge*",
-            "--alloweddomains",
+            "--allowed-domains",
             "moodle.rwth-aachen.de,rwth-aachen.sciebo.de",
-            "--excludesections",
+            "--exclude-sections",
             "General,Week 1",
-            "--excludemodules",
+            "--exclude-modules",
             "Quiz*,resource",
             "--quiz",
             "pdf",
-            "--updatefiles",
-            "--updatefilesconflict",
+            "--update-files",
+            "--conflict-handling",
             "keep",
         ]
     )
@@ -857,7 +877,7 @@ def test_cli_overrides_are_applied_after_config():
             "auth": {
                 "user": "config-user",
                 "password": "config-password",
-                "totp": "config-totp",
+                "totp_serial": "config-totp",
             },
             "links": {"opencast": True},
             "modules": {"folder": False, "quiz": "off"},
@@ -869,18 +889,18 @@ def test_cli_overrides_are_applied_after_config():
 
     assert cfg.user == "cli-user"
     assert cfg.password == "cli-password"
-    assert cfg.totp == "cli-totp"
-    assert cfg.totpsecret == "cli-totp-secret"
+    assert cfg.totp_serial == "cli-totp"
+    assert cfg.totp_secret == "cli-totp-secret"
     assert cfg.cookie_file == "/tmp/session"
     assert cfg.selected_courses == ["course-a", "course-b"]
     assert cfg.skip_courses == ["course-c", "course-d"]
     assert cfg.only_sync_semester == ["25ws", "26ss"]
-    assert cfg.basedir == "/tmp/moodle"
-    assert cfg.chromium_path == "/usr/bin/chromium"
+    assert cfg.sync_directory == "/tmp/moodle"
+    assert cfg.browser == "/usr/bin/chromium"
     assert cfg.course_prefix_handling == "suffix"
-    assert cfg.use_secret_service is True
-    assert cfg.secret_service_store_totp_secret is True
-    assert cfg.follow_links is False  # --nolinks
+    assert cfg.use_keyring is True
+    assert cfg.keyring_store_totp_secret is True
+    assert cfg.follow_links is False  # --no-follow-links
     assert cfg.exclude_filetypes == ["pdf", "mp4"]
     assert cfg.exclude_files == ["*.bak", "*.tmp"]
     assert cfg.exclude_links == {"*": ["*calendar*", "*hinge*"]}
@@ -893,7 +913,7 @@ def test_cli_overrides_are_applied_after_config():
     assert cfg.link_opencast is True  # the rest of the config survives
     assert cfg.module_folder is False
     assert cfg.update_files is True
-    assert cfg.update_files_conflict == "keep"
+    assert cfg.conflict_handling == "keep"
 
 
 def test_quiz_cli_override_keeps_other_modules_enabled():
@@ -929,9 +949,9 @@ def test_cli_keyring_resolution_reads_password_and_totp_secret():
         {
             "auth": {
                 "user": "user",
-                "totp": "totp-provider",
-                "use_secret_service": True,
-                "secret_service_store_totp_secret": True,
+                "totp_serial": "totp-provider",
+                "use_keyring": True,
+                "keyring_store_totp_secret": True,
             }
         }
     )
@@ -939,7 +959,7 @@ def test_cli_keyring_resolution_reads_password_and_totp_secret():
     cli.resolve_keyring_credentials(config, {}, fake_keyring)
 
     assert config.password == "stored-password"
-    assert config.totpsecret == "stored-totp-secret"
+    assert config.totp_secret == "stored-totp-secret"
     assert calls == [
         ("syncmymoodle", "user"),
         ("syncmymoodle", "totp-provider"),
@@ -955,7 +975,7 @@ def test_cli_password_seeds_keyring_on_first_use():
         ),
     )
     config = Config.from_dict(
-        {"auth": {"user": "user", "totp": "totp", "use_secret_service": True}}
+        {"auth": {"user": "user", "totp_serial": "totp", "use_keyring": True}}
     )
     config.password = "cli-password"
 
@@ -968,7 +988,7 @@ def test_cli_password_seeds_keyring_on_first_use():
 def test_keyring_rejects_password_from_config_file(caplog):
     caplog.set_level(logging.CRITICAL, logger="syncmymoodle.cli")
     config = Config.from_dict(
-        {"auth": {"user": "user", "password": "secret", "use_secret_service": True}}
+        {"auth": {"user": "user", "password": "secret", "use_keyring": True}}
     )
     file_config = {"auth.password": "secret"}
 
@@ -979,10 +999,10 @@ def test_keyring_rejects_password_from_config_file(caplog):
     assert "remove your password" in caplog.text
 
 
-def test_use_secret_service_without_keyring_fails_clearly(tmp_path, caplog):
+def test_use_keyring_without_keyring_fails_clearly(tmp_path, caplog):
     config_path = tmp_path / "config.toml"
     config_path.write_text(
-        '[auth]\nuser = "u"\ntotp = "t"\nuse_secret_service = true\n',
+        '[auth]\nuser = "u"\ntotp_serial = "t"\nuse_keyring = true\n',
         encoding="utf-8",
     )
     caplog.set_level(logging.CRITICAL, logger="syncmymoodle.cli")

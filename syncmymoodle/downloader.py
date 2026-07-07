@@ -323,13 +323,13 @@ def conflict_action(
     if not decision.conflict:
         return ConflictAction.DOWNLOAD
 
-    conflict_mode = ctx.config.update_files_conflict
+    conflict_mode = ctx.config.conflict_handling
     if conflict_mode not in {"rename", "keep", "none", "overwrite"}:
         conflict_mode = "rename"
     if conflict_mode in {"keep", "none"}:
         log.info(
             "Detected local changes for %s, skipping Moodle update "
-            "due to update_files_conflict=%s",
+            "due to conflict_handling=%s",
             downloadpath,
             conflict_mode,
         )
@@ -497,7 +497,9 @@ def download_file(
     log: logging.Logger = logger,
 ) -> bool:
     """Download file with progress bar if it isn't already downloaded."""
-    downloadpath = pathing.get_sanitized_node_path(node, Path(ctx.config.basedir))
+    downloadpath = pathing.get_sanitized_node_path(
+        node, Path(ctx.config.sync_directory)
+    )
 
     if not node.url:
         return False
@@ -609,7 +611,7 @@ def scan_and_download_youtube(
     """Download Youtube-Videos using yt_dlp."""
     if node.parent is None or node.url is None:
         return False
-    path = pathing.get_sanitized_node_path(node.parent, Path(ctx.config.basedir))
+    path = pathing.get_sanitized_node_path(node.parent, Path(ctx.config.sync_directory))
     link = node.url
     if filters.should_skip_url(ctx.config, link, "YouTube link", log):
         return True

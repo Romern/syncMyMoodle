@@ -288,7 +288,7 @@ def login(ctx: SyncContext, log: logging.Logger = logger) -> None:
 
         print("Setting TOTP generator")
         totp_selection_data = {
-            "fudis_selected_token_ids_input": ctx.config.totp,
+            "fudis_selected_token_ids_input": ctx.config.totp_serial,
             "_eventId_proceed": "",
             "csrf_token": csrf_token,
         }
@@ -310,9 +310,9 @@ def login(ctx: SyncContext, log: logging.Logger = logger) -> None:
             sys.exit(1)
 
         csrf_token = _require_input_value(soup, "csrf_token", "TOTP entry form", log)
-        totp_secret = ctx.config.totpsecret
+        totp_secret = ctx.config.totp_secret
         if not totp_secret:
-            totp_input = input(f"Enter TOTP for generator {ctx.config.totp}:\n")
+            totp_input = input(f"Enter TOTP for generator {ctx.config.totp_serial}:\n")
         else:
             totp_input = generate_totp(totp_secret)
             print(f"Generated TOTP from provided secret: {totp_input}")

@@ -23,7 +23,7 @@ from .helpers import FakeSession, download_file, make_context, node_path
 
 
 def test_sanitized_node_path_stays_inside_basedir(tmp_path):
-    syncer = make_context({"paths.basedir": str(tmp_path)})
+    syncer = make_context({"paths.sync_directory": str(tmp_path)})
     root = Node("", -1, "Root", None)
     bad_node = root.add_child("%2e%2e", 1, "Section")
 
@@ -47,7 +47,7 @@ def test_sanitize_path_part_avoids_windows_reserved_names():
 
 
 def test_empty_child_node_name_materializes_as_placeholder(tmp_path):
-    syncer = make_context({"basedir": str(tmp_path)})
+    syncer = make_context({"paths.sync_directory": str(tmp_path)})
     root = Node("", -1, "Root", None)
     child = root.add_child("", 1, "Section")
 
@@ -238,7 +238,7 @@ def test_private_gzip_json_closes_temp_file_before_cleanup(tmp_path, monkeypatch
 
 
 def test_download_uses_course_cache_to_skip_unchanged_file(tmp_path):
-    config = {"paths.basedir": str(tmp_path), "downloads.update_files": True}
+    config = {"paths.sync_directory": str(tmp_path), "downloads.update_files": True}
     cached_syncer = make_context(config)
     cached_root = Node("", -1, "Root", None)
     semester = cached_root.add_child("26ss", None, "Semester")

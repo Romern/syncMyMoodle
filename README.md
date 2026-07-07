@@ -101,22 +101,25 @@ The following command line arguments are available:
 
 ```bash
 usage: python3 -m syncmymoodle [-h] [--config CONFIG] [--user USER]
-                               [--password PASSWORD] [--totp TOTP]
-                               [--totpsecret TOTPSECRET] [--secretservice]
-                               [--secretservicetotpsecret] [--basedir BASEDIR]
-                               [--cookiefile COOKIEFILE]
-                               [--chromiumpath CHROMIUMPATH]
-                               [--courses COURSES] [--skipcourses SKIPCOURSES]
-                               [--semester SEMESTER]
-                               [--courseprefix {keep,remove,suffix}]
-                               [--updatefiles]
-                               [--updatefilesconflict {rename,keep,overwrite}]
-                               [--excludefiletypes EXCLUDEFILETYPES]
-                               [--excludefiles EXCLUDEFILES]
-                               [--excludelinks EXCLUDELINKS]
-                               [--alloweddomains ALLOWEDDOMAINS]
-                               [--excludesections EXCLUDESECTIONS]
-                               [--excludemodules EXCLUDEMODULES] [--nolinks]
+                               [--password PASSWORD]
+                               [--totp-serial TOTP_SERIAL]
+                               [--totp-secret TOTP_SECRET] [--use-keyring]
+                               [--keyring-store-totp-secret]
+                               [--sync-directory SYNC_DIRECTORY]
+                               [--cookie-file COOKIE_FILE] [--browser BROWSER]
+                               [--courses COURSES]
+                               [--skip-courses SKIP_COURSES]
+                               [--semesters SEMESTERS]
+                               [--course-prefix-handling {keep,remove,suffix}]
+                               [--update-files]
+                               [--conflict-handling {rename,keep,overwrite}]
+                               [--exclude-filetypes EXCLUDE_FILETYPES]
+                               [--exclude-files EXCLUDE_FILES]
+                               [--exclude-links EXCLUDE_LINKS]
+                               [--allowed-domains ALLOWED_DOMAINS]
+                               [--exclude-sections EXCLUDE_SECTIONS]
+                               [--exclude-modules EXCLUDE_MODULES]
+                               [--no-follow-links]
                                [--quiz {off,html,pdf,both}] [-v]
                                {config} ...
 
@@ -132,62 +135,63 @@ options:
   --config CONFIG       set your configuration file
   --user USER           set your RWTH Single Sign-On username
   --password PASSWORD   set your RWTH Single Sign-On password
-  --totp TOTP           set your RWTH Single Sign-On TOTP provider's serial
+  --totp-serial TOTP_SERIAL
+                        set your RWTH Single Sign-On TOTP provider's serial
                         number (see https://idm.rwth-
                         aachen.de/selfservice/MFATokenManager)
-  --totpsecret TOTPSECRET
+  --totp-secret TOTP_SECRET
                         (optional) set your RWTH Single Sign-On TOTP provider
                         Secret
-  --secretservice       Use system's keyring for storing and retrieving
+  --use-keyring         Use system's keyring for storing and retrieving
                         account credentials
-  --secretservicetotpsecret
+  --keyring-store-totp-secret
                         Save TOTP secret in keyring
-  --basedir BASEDIR     specify the directory where all files will be synced
-  --cookiefile COOKIEFILE
+  --sync-directory SYNC_DIRECTORY
+                        specify the directory where all files will be synced
+  --cookie-file COOKIE_FILE
                         set the location of a cookie file
-  --chromiumpath CHROMIUMPATH
-                        set the path to a Chrome/Chromium/Edge binary for quiz
+  --browser BROWSER     set the path to a Chrome/Chromium/Edge binary for quiz
                         PDF rendering
   --courses COURSES     specify the courses that should be synced using comma-
                         separated links. Defaults to all courses, if no
                         additional restrictions e.g. semester are defined.
-  --skipcourses SKIPCOURSES
+  --skip-courses SKIP_COURSES
                         exclude specific courses using comma-separated links.
                         Defaults to None.
-  --semester SEMESTER   specify semesters to be synced e.g. `22s`, comma-
+  --semesters SEMESTERS
+                        specify semesters to be synced e.g. `22s`, comma-
                         separated. Defaults to all semesters, if no additional
                         restrictions e.g. courses are defined.
-  --courseprefix {keep,remove,suffix}
+  --course-prefix-handling {keep,remove,suffix}
                         handle leading two-character course prefixes in local
                         folder names: 'keep' (default), 'remove', or 'suffix'
-  --updatefiles         define whether modified files with the same name/path
+  --update-files        define whether modified files with the same name/path
                         should be redownloaded
-  --updatefilesconflict {rename,keep,overwrite}
+  --conflict-handling {rename,keep,overwrite}
                         define how to handle locally modified files when
                         updating: 'rename' (default) moves the old file aside,
                         'keep' skips the update, 'overwrite' replaces the
                         local file
-  --excludefiletypes EXCLUDEFILETYPES
+  --exclude-filetypes EXCLUDE_FILETYPES
                         specify whether specific file types should be
                         excluded, comma-separated e.g. "mp4,mkv"
-  --excludefiles EXCLUDEFILES
+  --exclude-files EXCLUDE_FILES
                         exclude specific files using comma-separated patterns
                         e.g. "*.bak,*.tmp"
-  --excludelinks EXCLUDELINKS
+  --exclude-links EXCLUDE_LINKS
                         exclude discovered links using comma-separated URL
                         patterns
-  --alloweddomains ALLOWEDDOMAINS
+  --allowed-domains ALLOWED_DOMAINS
                         only keep discovered links on these comma-separated
                         domains
-  --excludesections EXCLUDESECTIONS
+  --exclude-sections EXCLUDE_SECTIONS
                         exclude Moodle sections by comma-separated names, ids
                         or patterns
-  --excludemodules EXCLUDEMODULES
+  --exclude-modules EXCLUDE_MODULES
                         exclude Moodle modules by comma-separated names, ids,
                         types, URLs or patterns
-  --nolinks             define whether various links in moodle pages should
-                        also be inspected e.g. youtube videos, wikipedia
-                        articles
+  --no-follow-links     do not inspect links found in moodle pages, disabling
+                        all link sources e.g. youtube and opencast videos
   --quiz {off,html,pdf,both}
                         save quiz review attempts as 'off', 'html', 'pdf', or
                         'both'
@@ -217,17 +221,17 @@ what each configuration does:
 
 ```toml
 [auth]
-user = ""       # RWTH SSO username
-password = ""   # RWTH SSO password (consider the keyring integration instead, see below)
-totp = ""       # RWTH SSO TOTP "Serial Number", format: TOTP0000000A, see https://idm.rwth-aachen.de/selfservice/MFATokenManager
-totpsecret = "" # The TOTP secret for your TOTP generator (optional)
-use_secret_service = false               # Use the system keyring (see README) instead of a password
-secret_service_store_totp_secret = false # Store the TOTP secret in the system keyring
+user = ""        # RWTH SSO username
+password = ""    # RWTH SSO password (consider the keyring integration instead, see below)
+totp_serial = "" # RWTH SSO TOTP "Serial Number", format: TOTP0000000A, see https://idm.rwth-aachen.de/selfservice/MFATokenManager
+totp_secret = "" # The TOTP secret for your TOTP generator (optional)
+use_keyring = false               # Use the system keyring (see README) instead of a password
+keyring_store_totp_secret = false # Store the TOTP secret in the system keyring
 
 [paths]
-basedir = "./"            # The base directory where all your files will be synced to
+sync_directory = "./"     # The directory where all your files will be synced to
 cookie_file = "./session" # The location of the session/cookie file, which can be used instead of a password
-chromium_path = ""        # Optional path to a Chrome/Chromium/Edge binary for quiz PDF rendering. Leave empty to auto-detect.
+browser = ""              # Optional path to a Chrome/Chromium/Edge binary for quiz PDF rendering. Leave empty to auto-detect.
 
 [courses]
 selected = []  # Only the specified courses (e.g. ["https://moodle.rwth-aachen.de/course/view.php?id=XXXXX"]) will be synced
@@ -237,7 +241,7 @@ prefix_handling = "suffix" # How to handle local course folders starting with a 
 
 [downloads]
 update_files = true # If true, existing files are redownloaded only when Moodle/Sciebo report that they were modified (based on timemodified and checksums).
-update_files_conflict = "rename" # How to handle locally modified files when a newer version is available on Moodle/Sciebo: "rename" (default, move to <name>.syncconflict.<hash>), "keep" (skip update), or "overwrite" (!!DANGEROUS!! replaces the local file, you may lose any files you edited/changed!).
+conflict_handling = "rename" # How to handle locally modified files when a newer version is available on Moodle/Sciebo: "rename" (default, move to <name>.syncconflict.<hash>), "keep" (skip update), or "overwrite" (!!DANGEROUS!! replaces the local file, you may lose any files you edited/changed!).
 
 [filters]
 exclude_filetypes = [] # Exclude specific filetypes (e.g. ["mp4", "mkv"]) to disable downloading most videos
@@ -312,20 +316,21 @@ uses the browser's built-in headless PDF output, which avoids the old
 `pdfkit`/`wkhtmltopdf` renderer and its security issues, but syncMyMoodle does
 not launch a browser unless you explicitly choose one of the PDF modes. The
 browser is auto-detected on PATH and in the usual macOS/Windows install
-locations, or you can point `chromium_path` at a specific binary. When no
-browser is found, the HTML snapshot is kept as a fallback so nothing is lost.
+locations, or you can point `browser` in the `[paths]` table at a specific
+binary. When no browser is found, the HTML snapshot is kept as a fallback so
+nothing is lost.
 
 ### TOTP
 
 From the RWTH IDM service you will get a TOTP secret which will be used to
 generate OTP tokens. The serial number of the TOTP, which can be seen in the 
 [RWTH IDM Token Manager](https://idm.rwth-aachen.de/selfservice/MFATokenManager),
-has to be provided using the `--totp` option or the config entry of the same
-name. It usually has the format `TOTP12345678`.
+has to be provided using the `--totp-serial` option or the `totp_serial`
+config entry. It usually has the format `TOTP12345678`.
 
-The TOTP secret can be specified using the `--totpsecret` option or the config 
-entry of the same name. It can be found in the `otpauth://` link in the secret
-argument.
+The TOTP secret can be specified using the `--totp-secret` option or the
+`totp_secret` config entry. It can be found in the `otpauth://` link in the
+secret argument.
 
 ## Keyring Integration
 
@@ -346,13 +351,14 @@ pip3 install syncmymoodle[keyring]  # when installing from PyPi
 pip3 install .[keyring]  # when installing manually
 ```
 
-You will be asked for your password and TOTP secret when using 
-*syncMyMoodle* for the first time, which you can supply as a parameter or 
-in the configuration file.
+Enable it with `use_keyring = true` in the `[auth]` table (or the
+`--use-keyring` flag). You will be asked for your password and TOTP secret
+when using *syncMyMoodle* for the first time, which you can supply as a
+parameter or in the configuration file.
 
 If everything went alright, you won't need to enter your password again
 in the future, as it will be obtained automatically and securely from
-the Secret Service Integration.
+the system keyring.
 
 
 ## Maintenance
