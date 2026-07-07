@@ -17,12 +17,14 @@ in TOML configs, but validation points from them to the current names.
 from __future__ import annotations
 
 import difflib
+import os
 import re
 from collections.abc import Mapping
 from dataclasses import dataclass, field, fields
 from pathlib import Path
 from typing import Any, Callable, Literal, TypeAlias, cast
 
+from syncmymoodle import pathing
 from syncmymoodle.constants import COURSE_PREFIX_HANDLING_OPTIONS, QUIZ_MODES
 
 PatternConfig: TypeAlias = dict[str, list[str]]
@@ -95,6 +97,10 @@ def file_size_error(value: Any) -> str | None:
     except ValueError:
         return f"must be a size in bytes or with a K/M/G/T suffix (e.g. '500M'), got {value!r}"
     return None
+
+
+def default_cookie_file() -> str:
+    return os.fspath(pathing.user_config_dir() / "session")
 
 
 def format_choices(choices: tuple[str, ...]) -> str:
@@ -248,7 +254,7 @@ class Config:
         ),
     )
     cookie_file: str = option(
-        "./session",
+        factory=default_cookie_file,
         group="paths",
         falsey_uses_default=True,
         cli=cli_arg(

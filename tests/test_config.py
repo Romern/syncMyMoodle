@@ -285,10 +285,12 @@ def test_legacy_key_map_targets_canonical_keys():
     assert set(LEGACY_KEY_MAP.values()) <= canonical_keys
 
 
-def test_defaults_applied_for_empty_config():
+def test_defaults_applied_for_empty_config(tmp_path, monkeypatch):
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "xdg"))
+
     cfg = Config.from_dict({})
     assert cfg.sync_directory == "./"
-    assert cfg.cookie_file == "./session"
+    assert cfg.cookie_file == str(tmp_path / "xdg" / "syncmymoodle" / "session")
     assert cfg.course_prefix_handling == "keep"
     assert cfg.conflict_handling == "rename"
     assert cfg.follow_links is True

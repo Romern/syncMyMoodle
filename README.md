@@ -259,7 +259,7 @@ keyring_store_totp_secret = false # Store the TOTP secret in the system keyring
 
 [paths]
 sync_directory = "./"     # The directory where all your files will be synced to
-cookie_file = "./session" # The location of the session/cookie file, which can be used instead of a password
+cookie_file = ""          # Optional session/cookie file path. Defaults to the user config directory.
 browser = ""              # Optional path to a Chrome/Chromium/Edge binary for quiz PDF rendering. Leave empty to auto-detect.
 
 [courses]

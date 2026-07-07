@@ -3,7 +3,6 @@
 import getpass
 import json
 import logging
-import os
 import sys
 import tomllib
 from argparse import SUPPRESS, ArgumentParser, Namespace
@@ -15,7 +14,7 @@ from typing import Any
 
 import tomli_w
 
-from syncmymoodle import cleanup, course_cache, downloader, rwth, sync
+from syncmymoodle import cleanup, course_cache, downloader, pathing, rwth, sync
 from syncmymoodle import moodle as moodle_api
 from syncmymoodle.config import (
     CONFIG_OPTIONS,
@@ -213,8 +212,7 @@ def read_config_file(path: Path, warn_legacy_json: bool = True) -> ConfigDict:
 
 
 def global_config_dir() -> Path:
-    xdg_config_home = Path(os.environ.get("XDG_CONFIG_HOME", "~/.config")).expanduser()
-    return xdg_config_home / "syncmymoodle"
+    return pathing.user_config_dir()
 
 
 def discover_config_file(directory: Path) -> Path | None:

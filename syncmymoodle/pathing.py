@@ -4,6 +4,7 @@ import hashlib
 import ntpath
 import os
 import re
+import sys
 import urllib.parse
 from dataclasses import dataclass
 from pathlib import Path, PureWindowsPath
@@ -19,6 +20,20 @@ WINDOWS_EXTENDED_PATH_THRESHOLD = 240
 
 def is_windows() -> bool:
     return os.name == "nt"
+
+
+def user_config_dir() -> Path:
+    xdg_config_home = os.environ.get("XDG_CONFIG_HOME")
+    if xdg_config_home:
+        return Path(xdg_config_home).expanduser() / "syncmymoodle"
+    if is_windows():
+        root = os.environ.get("APPDATA")
+        if root:
+            return Path(root).expanduser() / "syncmymoodle"
+        return Path.home() / "AppData" / "Roaming" / "syncmymoodle"
+    if sys.platform == "darwin":
+        return Path.home() / "Library" / "Application Support" / "syncmymoodle"
+    return Path("~/.config").expanduser() / "syncmymoodle"
 
 
 def is_windows_reserved_path_part(path: str) -> bool:

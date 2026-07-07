@@ -6,7 +6,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from syncmymoodle import course_cache
+from syncmymoodle import course_cache, pathing
 from syncmymoodle.node import Node
 from syncmymoodle.pathing import (
     make_conflict_path,
@@ -68,6 +68,22 @@ def test_windows_extended_length_path_formats_drive_and_unc_paths():
         windows_extended_length_path(r"\\?\C:\Moodle\Course\file.pdf")
         == r"\\?\C:\Moodle\Course\file.pdf"
     )
+
+
+def test_user_config_dir_uses_xdg_override(tmp_path, monkeypatch):
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "xdg"))
+    monkeypatch.setenv("APPDATA", str(tmp_path / "appdata"))
+    monkeypatch.setattr(pathing, "is_windows", lambda: True)
+
+    assert pathing.user_config_dir() == tmp_path / "xdg" / "syncmymoodle"
+
+
+def test_user_config_dir_uses_windows_appdata(tmp_path, monkeypatch):
+    monkeypatch.delenv("XDG_CONFIG_HOME", raising=False)
+    monkeypatch.setenv("APPDATA", str(tmp_path / "appdata"))
+    monkeypatch.setattr(pathing, "is_windows", lambda: True)
+
+    assert pathing.user_config_dir() == tmp_path / "appdata" / "syncmymoodle"
 
 
 def test_conflict_path_applies_windows_prefix_after_suffix(tmp_path, monkeypatch):

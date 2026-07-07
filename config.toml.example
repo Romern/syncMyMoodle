@@ -8,7 +8,7 @@ keyring_store_totp_secret = false
 
 [paths]
 sync_directory = "./"
-cookie_file = "./session"
+cookie_file = "" # Defaults to the user config directory, e.g. ~/.config/syncmymoodle/session on Linux
 browser = ""
 
 [courses]
