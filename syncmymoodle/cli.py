@@ -7,7 +7,7 @@ import sys
 import tomllib
 from argparse import SUPPRESS, ArgumentParser, Namespace
 from collections.abc import Mapping, Sequence
-from importlib import metadata
+from importlib import metadata, resources
 from pathlib import Path
 from types import ModuleType
 from typing import Any
@@ -38,6 +38,7 @@ except ImportError:
 
 logger = logging.getLogger(__name__)
 CONFIG_FILENAMES = ("config.toml", "config.json")
+STARTER_CONFIG_RESOURCE = "config.toml.example"
 
 
 def package_version() -> str:
@@ -101,6 +102,19 @@ def build_parser(keyring_backend: Any = None) -> ArgumentParser:
     config_subparsers = config_parser.add_subparsers(
         dest="config_command",
         required=True,
+    )
+    generate_parser = config_subparsers.add_parser(
+        "generate",
+        help="write a starter config to the global config location",
+    )
+    generate_parser.add_argument(
+        "--force",
+        action="store_true",
+        help="overwrite an existing global config.toml",
+    )
+    config_subparsers.add_parser(
+        "path",
+        help="show the global config location",
     )
     migrate_parser = config_subparsers.add_parser(
         "migrate",
@@ -215,6 +229,10 @@ def global_config_dir() -> Path:
     return pathing.user_config_dir()
 
 
+def global_config_path() -> Path:
+    return global_config_dir() / "config.toml"
+
+
 def discover_config_file(directory: Path) -> Path | None:
     for filename in CONFIG_FILENAMES:
         path = directory / filename
@@ -233,6 +251,27 @@ def discover_json_migration_input() -> Path | None:
 def discover_config_files() -> list[Path]:
     config_file = discover_config_file(global_config_dir())
     return [] if config_file is None else [config_file]
+
+
+def starter_config_text() -> str:
+    return (
+        resources.files("syncmymoodle")
+        .joinpath(STARTER_CONFIG_RESOURCE)
+        .read_text(encoding="utf-8")
+    )
+
+
+def generate_global_config(force: bool = False) -> Path:
+    target_path = global_config_path()
+    existing_path = discover_config_file(global_config_dir())
+    if existing_path is not None and not force:
+        msg = f"global config already exists: {existing_path}; use --force to overwrite"
+        raise FileExistsError(msg)
+
+    target_path.parent.mkdir(parents=True, exist_ok=True)
+    target_path.write_text(starter_config_text(), encoding="utf-8")
+    target_path.chmod(0o600)
+    return target_path
 
 
 def load_config(args: Namespace, parser: ArgumentParser) -> ConfigDict:
@@ -307,6 +346,23 @@ def migrate_config_command(args: Namespace, parser: ArgumentParser) -> None:
     print(f"Wrote TOML config to {migrated_path}")
 
 
+def generate_config_command(args: Namespace, parser: ArgumentParser) -> None:
+    try:
+        config_path = generate_global_config(args.force)
+    except FileExistsError as error:
+        parser.error(str(error))
+    except OSError as error:
+        parser.error(f"could not write global config {global_config_path()}: {error}")
+    print(f"Wrote global config to {config_path}")
+
+
+def path_config_command() -> None:
+    discovered_path = discover_config_file(global_config_dir())
+    print(f"Global config directory: {global_config_dir()}")
+    print(f"Default TOML config: {global_config_path()}")
+    print(f"Discovered config: {discovered_path if discovered_path else '<none>'}")
+
+
 def check_config_command(args: Namespace, parser: ArgumentParser) -> None:
     config_paths = config_check_paths(args, parser)
     valid = True
@@ -346,6 +402,12 @@ def format_config_paths(paths: list[Path]) -> str:
 
 
 def run_config_command(args: Namespace, parser: ArgumentParser) -> None:
+    if args.config_command == "generate":
+        generate_config_command(args, parser)
+        return
+    if args.config_command == "path":
+        path_config_command()
+        return
     if args.config_command == "migrate":
         migrate_config_command(args, parser)
         return

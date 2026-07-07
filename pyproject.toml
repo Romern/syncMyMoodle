@@ -43,6 +43,9 @@ test = [
   "types-requests"
 ]
 
+[tool.setuptools.package-data]
+syncmymoodle = ["config.toml.example"]
+
 [tool.ruff]
 target-version = "py311"
 

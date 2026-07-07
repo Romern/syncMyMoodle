@@ -1,8 +1,9 @@
 import json
 import logging
+import os
 import sys
 import tomllib
-from pathlib import Path
+from importlib import resources
 from types import SimpleNamespace
 
 import pytest
@@ -427,7 +428,8 @@ def test_from_dict_accepts_none():
 
 
 def test_toml_example_is_valid():
-    raw = tomllib.loads(Path("config.toml.example").read_text(encoding="utf-8"))
+    example_text = cli.starter_config_text()
+    raw = tomllib.loads(example_text)
     validate_config(raw)
     cfg = Config.from_dict(raw)
     assert cfg.sync_directory == "./"
@@ -438,10 +440,13 @@ def test_toml_example_is_valid():
 
 
 def test_config_check_accepts_toml_example_suffix(capsys):
-    cli.main(["config", "check", "--config", "config.toml.example"])
+    with resources.as_file(
+        resources.files("syncmymoodle").joinpath(cli.STARTER_CONFIG_RESOURCE)
+    ) as example_path:
+        cli.main(["config", "check", "--config", str(example_path)])
 
     captured = capsys.readouterr()
-    assert "Config is valid: config.toml.example" in captured.out
+    assert f"Config is valid: {example_path}" in captured.out
     assert captured.err == ""
 
 
@@ -793,6 +798,60 @@ def test_config_migrate_drops_nulls_and_restricts_permissions(tmp_path):
     migrated = tomllib.loads(output_path.read_text(encoding="utf-8"))
     assert migrated == {"auth": {"user": "u"}}
     assert output_path.stat().st_mode & 0o777 == 0o600
+
+
+def test_config_generate_writes_global_config(tmp_path, monkeypatch, capsys):
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "xdg"))
+
+    cli.main(["config", "generate"])
+
+    config_path = tmp_path / "xdg" / "syncmymoodle" / "config.toml"
+    assert config_path.read_text(encoding="utf-8") == cli.starter_config_text()
+    validate_config(tomllib.loads(config_path.read_text(encoding="utf-8")))
+    if os.name != "nt":
+        assert config_path.stat().st_mode & 0o777 == 0o600
+    assert f"Wrote global config to {config_path}" in capsys.readouterr().out
+
+
+def test_config_generate_refuses_existing_global_config(tmp_path, monkeypatch, capsys):
+    xdg_config = tmp_path / "xdg" / "syncmymoodle" / "config.json"
+    xdg_config.parent.mkdir(parents=True)
+    xdg_config.write_text(json.dumps({"user": "existing"}), encoding="utf-8")
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "xdg"))
+
+    with pytest.raises(SystemExit) as exc_info:
+        cli.main(["config", "generate"])
+
+    assert exc_info.value.code == 2
+    assert "global config already exists" in capsys.readouterr().err
+    assert not (xdg_config.parent / "config.toml").exists()
+
+
+def test_config_generate_force_overwrites_global_toml(tmp_path, monkeypatch, capsys):
+    xdg_config = tmp_path / "xdg" / "syncmymoodle" / "config.toml"
+    xdg_config.parent.mkdir(parents=True)
+    xdg_config.write_text('[auth]\nuser = "old"\n', encoding="utf-8")
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "xdg"))
+
+    cli.main(["config", "generate", "--force"])
+
+    assert xdg_config.read_text(encoding="utf-8") == cli.starter_config_text()
+    assert f"Wrote global config to {xdg_config}" in capsys.readouterr().out
+
+
+def test_config_path_command_prints_global_config_paths(tmp_path, monkeypatch, capsys):
+    config_dir = tmp_path / "xdg" / "syncmymoodle"
+    config_dir.mkdir(parents=True)
+    config_path = config_dir / "config.toml"
+    config_path.write_text('[auth]\nuser = "u"\n', encoding="utf-8")
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "xdg"))
+
+    cli.main(["config", "path"])
+
+    output = capsys.readouterr().out
+    assert f"Global config directory: {config_dir}" in output
+    assert f"Default TOML config: {config_path}" in output
+    assert f"Discovered config: {config_path}" in output
 
 
 def test_config_migrate_default_input_ignores_cwd_config(tmp_path, monkeypatch, capsys):

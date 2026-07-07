@@ -226,20 +226,22 @@ modules:
 Configuration helpers are available as subcommands:
 
 ```bash
+syncmymoodle config path
+syncmymoodle config generate
 syncmymoodle config check --config config.toml
 syncmymoodle config migrate --input config.json
 ```
 
-`config check` validates a configuration file and reports invalid values or
-likely misspelled keys. `config migrate` converts a legacy JSON configuration
-file to TOML. Use `--output` to choose a target path and `--force` to overwrite
-an existing TOML file.
+`config path` shows the global config location. `config generate` writes a
+starter `config.toml` there. `config check` validates a configuration file and
+reports invalid values or likely misspelled keys. `config migrate` converts a
+legacy JSON configuration file to TOML. Use `--output` to choose a target path
+and `--force` to overwrite an existing TOML file.
 
 ### Configuration file
 
-Copy `config.toml.example` to `~/.config/syncmymoodle/config.toml` to configure
-`syncmymoodle` user-wide. To use a different config file for one run, pass it
-explicitly with `--config`.
+Run `syncmymoodle config generate` to create a starter global config. To use a
+different config file for one run, pass it explicitly with `--config`.
 
 By default `syncmymoodle` reads only the global config file in the user config
 directory. Config files in the current working directory are ignored unless you
