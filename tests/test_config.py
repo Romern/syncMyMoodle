@@ -50,6 +50,9 @@ def test_config_options_record_cli_overrides():
         "exclude-sections": "filters.exclude_sections",
         "exclude-modules": "filters.exclude_modules",
         "no-follow-links": "links.follow_links",
+        "no-youtube": "links.youtube",
+        "no-opencast": "links.opencast",
+        "no-sciebo": "links.sciebo",
         "quiz": "modules.quiz",
     }
 
@@ -72,6 +75,20 @@ def test_deprecated_cli_flag_spellings_still_work():
     help_text = parser.format_help()
     assert "--skip-courses" in help_text
     assert "--skipcourses" not in help_text
+
+
+def test_cli_help_groups_config_options():
+    help_text = cli.build_parser().format_help()
+
+    assert "\nauth:\n" in help_text
+    assert "\npaths:\n" in help_text
+    assert "\ncourses:\n" in help_text
+    assert "\ndownloads:\n" in help_text
+    assert "\nfilters:\n" in help_text
+    assert "\nlinks:\n" in help_text
+    assert "\nmodules:\n" in help_text
+    assert help_text.index("\nauth:\n") < help_text.index("  --user USER")
+    assert help_text.index("\nlinks:\n") < help_text.index("  --no-follow-links")
 
 
 def test_cli_version_flag(capsys):
@@ -911,6 +928,9 @@ def test_cli_overrides_are_applied_after_config():
             "--use-keyring",
             "--keyring-store-totp-secret",
             "--no-follow-links",
+            "--no-youtube",
+            "--no-opencast",
+            "--no-sciebo",
             "--exclude-filetypes",
             "pdf,mp4",
             "--exclude-files",
@@ -959,6 +979,9 @@ def test_cli_overrides_are_applied_after_config():
     assert cfg.use_keyring is True
     assert cfg.keyring_store_totp_secret is True
     assert cfg.follow_links is False  # --no-follow-links
+    assert cfg.link_youtube is False
+    assert cfg.link_opencast is False
+    assert cfg.link_sciebo is False
     assert cfg.exclude_filetypes == ["pdf", "mp4"]
     assert cfg.exclude_files == ["*.bak", "*.tmp"]
     assert cfg.exclude_links == {"*": ["*calendar*", "*hinge*"]}
@@ -968,7 +991,6 @@ def test_cli_overrides_are_applied_after_config():
     assert cfg.exclude_sections == {"*": ["General", "Week 1"]}
     assert cfg.exclude_modules == {"*": ["Quiz*", "resource"]}
     assert cfg.quiz_mode == "pdf"  # CLI beats the config's "off"
-    assert cfg.link_opencast is True  # the rest of the config survives
     assert cfg.module_folder is False
     assert cfg.update_files is True
     assert cfg.conflict_handling == "keep"

@@ -122,7 +122,8 @@ usage: python3 -m syncmymoodle [-h] [--config CONFIG] [--version]
                                [--exclude-modules EXCLUDE_MODULES]
                                [--max-file-size MAX_FILE_SIZE]
                                [--min-file-size MIN_FILE_SIZE]
-                               [--no-follow-links]
+                               [--no-follow-links] [--no-youtube]
+                               [--no-opencast] [--no-sciebo]
                                [--quiz {off,html,pdf,both}] [-v]
                                {config} ...
 
@@ -137,6 +138,9 @@ options:
   -h, --help            show this help message and exit
   --config CONFIG       set your configuration file
   --version             show program's version number and exit
+  -v, --verbose         show information useful for debugging
+
+auth:
   --user USER           set your RWTH Single Sign-On username
   --password PASSWORD   set your RWTH Single Sign-On password
   --totp-serial TOTP_SERIAL
@@ -150,12 +154,16 @@ options:
                         account credentials
   --keyring-store-totp-secret
                         Save TOTP secret in keyring
+
+paths:
   --sync-directory SYNC_DIRECTORY
                         specify the directory where all files will be synced
   --cookie-file COOKIE_FILE
                         set the location of a cookie file
   --browser BROWSER     set the path to a Chrome/Chromium/Edge binary for quiz
                         PDF rendering
+
+courses:
   --courses COURSES     specify the courses that should be synced using comma-
                         separated links. Defaults to all courses, if no
                         additional restrictions e.g. semester are defined.
@@ -169,6 +177,8 @@ options:
   --course-prefix-handling {keep,remove,suffix}
                         handle leading two-character course prefixes in local
                         folder names: 'keep' (default), 'remove', or 'suffix'
+
+downloads:
   --update-files        define whether modified files with the same name/path
                         should be redownloaded
   --conflict-handling {rename,keep,overwrite}
@@ -178,6 +188,8 @@ options:
                         local file
   --dry-run             only report what would be downloaded, without writing
                         any files
+
+filters:
   --exclude-filetypes EXCLUDE_FILETYPES
                         specify whether specific file types should be
                         excluded, comma-separated e.g. "mp4,mkv"
@@ -200,12 +212,18 @@ options:
                         skip files larger than this size, e.g. '500M' or '2G'
   --min-file-size MIN_FILE_SIZE
                         skip files smaller than this size, e.g. '10K'
+
+links:
   --no-follow-links     do not inspect links found in moodle pages, disabling
                         all link sources e.g. youtube and opencast videos
+  --no-youtube          do not include YouTube links and embeds
+  --no-opencast         do not include Opencast links and embeds
+  --no-sciebo           do not include Sciebo links
+
+modules:
   --quiz {off,html,pdf,both}
                         save quiz review attempts as 'off', 'html', 'pdf', or
                         'both'
-  -v, --verbose         show information useful for debugging
 ```
 
 Configuration helpers are available as subcommands:

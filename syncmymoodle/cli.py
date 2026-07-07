@@ -62,20 +62,25 @@ def build_parser(keyring_backend: Any = None) -> ArgumentParser:
         action="version",
         version=f"syncmymoodle {package_version()}",
     )
+    cli_groups = {
+        group: parser.add_argument_group(group)
+        for group in dict.fromkeys(option.group for option in CONFIG_OPTIONS)
+    }
     for option in CONFIG_OPTIONS:
         cli = option.cli
         if cli is None or (cli.requires_keyring and not keyring_backend):
             continue
+        argument_group = cli_groups[option.group]
         kwargs: dict[str, Any] = {}
         if cli.value_kind == "flag":
             kwargs["action"] = "store_true"
         elif option.choices:
             kwargs["choices"] = option.choices
-        parser.add_argument(f"--{cli.arg_name}", help=cli.help, **kwargs)
+        argument_group.add_argument(f"--{cli.arg_name}", help=cli.help, **kwargs)
         if cli.aliases:
             # Deprecated spellings: still accepted, hidden from --help. SUPPRESS
             # keeps an absent alias from clobbering the primary flag's default.
-            parser.add_argument(
+            argument_group.add_argument(
                 *(f"--{alias}" for alias in cli.aliases),
                 dest=cli.dest,
                 default=SUPPRESS,

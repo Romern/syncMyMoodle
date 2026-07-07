@@ -36,7 +36,8 @@ from syncmymoodle.context import SyncContext
 from syncmymoodle.http_utils import (
     HTML_CONTENT_TYPES,
     content_type_without_parameters,
-    parse_html, parse_xml,
+    parse_html,
+    parse_xml,
 )
 
 logger = logging.getLogger(__name__)
@@ -675,7 +676,7 @@ def _convert_quiz_latex_to_mathml(
         last_end = 0
         for match in TEX_MATH_RE.finditer(text):
             if match.start() > last_end:
-                pieces.append(soup.new_string(text[last_end: match.start()]))
+                pieces.append(soup.new_string(text[last_end : match.start()]))
             pieces.append(_latex_match_to_node(soup, match, log))
             last_end = match.end()
 

@@ -460,9 +460,39 @@ class Config:
             aliases=("nolinks",),
         ),
     )
-    link_youtube: bool = option(True, group="links", key="youtube", normalize=bool)
-    link_opencast: bool = option(True, group="links", key="opencast", normalize=bool)
-    link_sciebo: bool = option(True, group="links", key="sciebo", normalize=bool)
+    link_youtube: bool = option(
+        True,
+        group="links",
+        key="youtube",
+        normalize=bool,
+        cli=cli_flag(
+            "no-youtube",
+            "do not include YouTube links and embeds",
+            flag_value=False,
+        ),
+    )
+    link_opencast: bool = option(
+        True,
+        group="links",
+        key="opencast",
+        normalize=bool,
+        cli=cli_flag(
+            "no-opencast",
+            "do not include Opencast links and embeds",
+            flag_value=False,
+        ),
+    )
+    link_sciebo: bool = option(
+        True,
+        group="links",
+        key="sciebo",
+        normalize=bool,
+        cli=cli_flag(
+            "no-sciebo",
+            "do not include Sciebo links",
+            flag_value=False,
+        ),
+    )
 
     # Moodle activity types. Keys omitted from a [modules] table keep these
     # defaults; legacy used_modules trees instead disable omitted entries
