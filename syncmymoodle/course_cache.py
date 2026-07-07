@@ -2,6 +2,7 @@ import logging
 from pathlib import Path
 from typing import Any
 
+from syncmymoodle import links
 from syncmymoodle.constants import COURSE_CACHE_FILENAME
 from syncmymoodle.context import SyncContext
 from syncmymoodle.node import (
@@ -23,6 +24,13 @@ def match_old_cache_child(old_node: Node | None, child: Node) -> Node | None:
     """Find the previous cache node corresponding to ``child``, if any."""
     if old_node is None:
         return None
+
+    child_youtube_id = links.youtube_video_id_from_node(child)
+    if child_youtube_id is not None:
+        for candidate in old_node.children:
+            if links.youtube_video_id_from_node(candidate) == child_youtube_id:
+                return candidate
+
     candidates = [
         c for c in old_node.children if c.name == child.name and c.type == child.type
     ]

@@ -210,7 +210,7 @@ def node_rows(root: Node) -> list[str]:
                         str(child.timemodified or ""),
                         str(child.etag or ""),
                     ]
-                )
+                ).rstrip()
             )
             walk(child)
 

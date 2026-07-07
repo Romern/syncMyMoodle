@@ -2,10 +2,12 @@ import logging
 import urllib.parse
 from typing import Any, cast
 
+from yt_dlp.extractor.youtube import YoutubeIE  # type: ignore[import-untyped]
+
 from syncmymoodle import filters
 from syncmymoodle import opencast as opencast_api
 from syncmymoodle import sciebo as sciebo_api
-from syncmymoodle.constants import OPENCAST_LINK_RE, YOUTUBE_LINK_RE
+from syncmymoodle.constants import OPENCAST_LINK_RE, YOUTUBE_LINK_RE, YOUTUBE_WATCH_URL
 from syncmymoodle.context import SyncContext
 from syncmymoodle.http_utils import (
     HTML_CONTENT_TYPES,
@@ -17,6 +19,31 @@ from syncmymoodle.http_utils import (
 from syncmymoodle.node import Node, RemoteMarkerKind
 
 logger = logging.getLogger(__name__)
+
+
+def youtube_video_id(link: str) -> str | None:
+    try:
+        return cast(str, YoutubeIE.extract_id(link))
+    except Exception:
+        return None
+
+
+def canonical_youtube_url(video_id: str) -> str:
+    return YOUTUBE_WATCH_URL.format(video_id=video_id)
+
+
+def youtube_video_id_from_node(node: Node) -> str | None:
+    if node.type != "Youtube":
+        return None
+    node_id = str(node.id or "")
+    node_url = str(node.url or "")
+    if node_id and node_id != node_url:
+        if youtube_video_id(canonical_youtube_url(node_id)) == node_id:
+            return node_id
+    for value in (node_url, node_id):
+        if value and (video_id := youtube_video_id(value)):
+            return video_id
+    return None
 
 
 def scan_html_text_for_links(
@@ -122,8 +149,15 @@ def scan_for_links(
         for link in youtube_links:
             if filters.should_skip_url(ctx.config, link, "YouTube link", log):
                 continue
+            video_id = youtube_video_id(link)
+            if video_id is None:
+                continue
+            canonical_url = canonical_youtube_url(video_id)
             parent_node.add_child(
-                f"Youtube: {module_title or link}", link, "Youtube", url=link
+                f"Youtube: {module_title or canonical_url}",
+                video_id,
+                "Youtube",
+                url=canonical_url,
             )
 
     # OpenCast videos

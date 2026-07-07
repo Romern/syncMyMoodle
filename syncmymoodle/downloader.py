@@ -13,11 +13,10 @@ from typing import Any
 import yt_dlp
 from tqdm import tqdm
 
-from syncmymoodle import course_cache, filters, pathing, quiz
+from syncmymoodle import course_cache, filters, links, pathing, quiz
 from syncmymoodle.constants import (
     DEFAULT_BLOCK_SIZE,
     HASH_ALGOS_BY_LENGTH,
-    YOUTUBE_ID_LENGTH,
 )
 from syncmymoodle.context import SyncContext
 from syncmymoodle.http_utils import (
@@ -717,8 +716,9 @@ def scan_and_download_youtube(
     link = node.url
     if filters.should_skip_url(ctx.config, link, "YouTube link", log):
         return True
+    video_id = links.youtube_video_id_from_node(node)
     if path.exists():
-        if any(link[-YOUTUBE_ID_LENGTH:] in f.name for f in path.iterdir()):
+        if video_id and any(video_id in f.name for f in path.iterdir()):
             return False
     if ctx.config.dry_run and not size_limits_configured(ctx):
         print(f"Would download YouTube video {link} to {path} [Youtube]")

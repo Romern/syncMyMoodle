@@ -37,8 +37,8 @@ def test_selected_courses_override_semester_filter(monkeypatch):
 
     assert synced_course_ids == [202]
     assert node_rows(syncer.root_node) == [
-        "Semester | 25ws |  |  | ",
-        "Course | 25ws/Selected Old Semester |  |  | ",
+        "Semester | 25ws |  |  |",
+        "Course | 25ws/Selected Old Semester |  |  |",
     ]
 
 
@@ -57,8 +57,8 @@ def test_skip_courses_and_semester_filter_limit_synced_courses(monkeypatch):
 
     assert synced_course_ids == [201]
     assert node_rows(syncer.root_node) == [
-        "Semester | 26ss |  |  | ",
-        "Course | 26ss/Current Semester |  |  | ",
+        "Semester | 26ss |  |  |",
+        "Course | 26ss/Current Semester |  |  |",
     ]
 
 

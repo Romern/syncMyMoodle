@@ -2,8 +2,8 @@ import hashlib
 import logging
 import os
 
-from syncmymoodle import course_cache, downloader, pathing
-from syncmymoodle.constants import COURSE_CACHE_FILENAME
+from syncmymoodle import course_cache, downloader, links, pathing
+from syncmymoodle.constants import COURSE_CACHE_FILENAME, YOUTUBE_WATCH_URL
 from syncmymoodle.node import Node, RemoteMarkerKind
 from syncmymoodle.storage import write_private_gzip_json
 
@@ -174,11 +174,15 @@ def build_duplicate_section_file_tree():
 
 
 def build_youtube_tree(link):
+    video_id = links.youtube_video_id_from_node(
+        Node("Video", link, "Youtube", None, url=link)
+    )
+    url = YOUTUBE_WATCH_URL.format(video_id=video_id) if video_id is not None else link
     root = Node("", -1, "Root", None)
     semester = root.add_child("26ss", None, "Semester")
     course = semester.add_child("Video Course", 301, "Course")
     section = course.add_child("General", 401, "Section")
-    video = section.add_child("Video", link, "Youtube", url=link)
+    video = section.add_child("Video", video_id or link, "Youtube", url=url)
     return root, section, video
 
 
@@ -313,17 +317,22 @@ def test_max_file_size_skips_large_youtube_videos(tmp_path, monkeypatch):
 
 def test_cached_youtube_size_skips_without_yt_dlp(tmp_path, monkeypatch):
     config = {"paths.sync_directory": str(tmp_path), "filters.max_file_size": "1M"}
-    link = "https://youtu.be/abcdefghijk"
+    cached_link = "https://youtu.be/abcdefghijk"
+    current_link = "https://www.youtube.com/embed/abcdefghijk"
 
     cache_syncer = make_context(config)
-    cached_root, _, cached_video = build_youtube_tree(link)
+    cached_root, _, cached_video = build_youtube_tree(cached_link)
+    cached_video.name = f"Youtube: {cached_link}"
+    cached_video.id = cached_link
+    cached_video.name_clash_id = cached_link
+    cached_video.url = cached_link
     cached_video.remote_size = 5 * 1024**2
     cached_video.mark_handled()
     cache_syncer.root_node = cached_root
     course_cache.cache_root_node(cache_syncer)
 
     syncer = make_context(config)
-    _, section, video_node = build_youtube_tree(link)
+    _, section, video_node = build_youtube_tree(current_link)
 
     class FakeYoutubeDL:
         def __init__(self, opts):

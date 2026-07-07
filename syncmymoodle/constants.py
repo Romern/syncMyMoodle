@@ -10,7 +10,7 @@ DEFAULT_BLOCK_SIZE = 1024
 # Hidden per-course metadata cache filename.
 COURSE_CACHE_FILENAME = ".syncmymoodle_cache"
 
-YOUTUBE_ID_LENGTH = 11
+YOUTUBE_WATCH_URL = "https://www.youtube.com/watch?v={video_id}"
 HASH_ALGOS_BY_LENGTH = {32: "md5", 40: "sha1", 64: "sha256"}
 CHECKSUM_LENGTHS_BY_ALGO = {
     algo: length for length, algo in HASH_ALGOS_BY_LENGTH.items()

@@ -147,7 +147,7 @@ def test_sciebo_public_share_is_cached_per_sync_run():
         row.replace("First occurrence/", "") for row in node_rows(first_parent)
     ] == [row.replace("Second occurrence/", "") for row in node_rows(second_parent)]
     assert node_rows(first_parent) == [
-        "Sciebo Folder | First occurrence/sciebo-share-token-123 |  |  | ",
+        "Sciebo Folder | First occurrence/sciebo-share-token-123 |  |  |",
         "Sciebo File | First occurrence/sciebo-share-token-123/readme.pdf | "
         "https://rwth-aachen.sciebo.de/public.php/webdav/readme.pdf |  | "
         "1111111111111111111111111111111111111111",
@@ -211,7 +211,7 @@ def test_sciebo_share_without_token_input_uses_url_token():
 
     assert session.count("PROPFIND", public_root) == 1
     assert node_rows(parent) == [
-        "Sciebo Folder | Section/sciebo-share-token-123 |  |  | ",
+        "Sciebo Folder | Section/sciebo-share-token-123 |  |  |",
         "Sciebo File | Section/sciebo-share-token-123/readme.pdf | "
         "https://rwth-aachen.sciebo.de/public.php/webdav/readme.pdf |  | "
         "1111111111111111111111111111111111111111",
@@ -220,6 +220,27 @@ def test_sciebo_share_without_token_input_uses_url_token():
         "https://rwth-aachen.sciebo.de/public.php/webdav/slides/deck.pdf |  | "
         "2222222222222222222222222222222222222222",
     ]
+
+
+def test_youtube_links_use_canonical_video_identity():
+    syncer = make_context({"links.youtube": True})
+    root = Node("", -1, "Root", None)
+    parent = root.add_child("Section", 1, "Section")
+    links.scan_for_links(
+        syncer,
+        "https://youtu.be/abcdefghijk "
+        "https://www.youtube.com/watch?v=abcdefghijk&feature=share "
+        "https://www.youtube.com/embed/abcdefghijk",
+        parent,
+        101,
+    )
+
+    assert len(parent.children) == 1
+    child = parent.children[0]
+    assert child.id == "abcdefghijk"
+    assert child.url == "https://www.youtube.com/watch?v=abcdefghijk"
+    assert child.name == "Youtube: https://www.youtube.com/watch?v=abcdefghijk"
+    assert links.youtube_video_id(child.url) == "abcdefghijk"
 
 
 def test_mixed_course_sync_tree_covers_common_module_surfaces(monkeypatch):
