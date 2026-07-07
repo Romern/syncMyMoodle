@@ -22,6 +22,8 @@ update_files = true
 conflict_handling = "rename"
 
 [filters]
+max_file_size = ""
+min_file_size = ""
 exclude_filetypes = []
 exclude_files = []
 exclude_links = []

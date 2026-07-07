@@ -205,6 +205,178 @@ def test_download_is_skipped_for_excluded_filetypes(tmp_path):
     assert syncer.session.calls == []
 
 
+def test_download_is_skipped_when_max_file_size_is_exceeded(tmp_path):
+    config = {"paths.sync_directory": str(tmp_path), "filters.max_file_size": "1K"}
+    syncer, file_node = make_run_syncer(config, timemodified=1710000500)
+    download_path = node_path(syncer, file_node)
+    syncer.session.add(
+        "GET",
+        URL,
+        FakeResponse(
+            headers={"Content-Type": "application/pdf", "content-length": "2048"},
+            chunks=[b"x" * 2048],
+        ),
+    )
+
+    assert download_file(syncer, file_node) is True
+    assert not download_path.exists()
+
+
+def test_download_is_skipped_when_below_min_file_size(tmp_path):
+    config = {"paths.sync_directory": str(tmp_path), "filters.min_file_size": "1K"}
+    syncer, file_node = make_run_syncer(config, timemodified=1710000500)
+    download_path = node_path(syncer, file_node)
+    syncer.session.add(
+        "GET",
+        URL,
+        FakeResponse(
+            headers={"Content-Type": "application/pdf", "content-length": "10"},
+            chunks=[b"x" * 10],
+        ),
+    )
+
+    assert download_file(syncer, file_node) is True
+    assert not download_path.exists()
+
+
+def test_max_file_size_skips_large_youtube_videos(tmp_path, monkeypatch):
+    config = {"paths.sync_directory": str(tmp_path), "filters.max_file_size": "1M"}
+    syncer = make_context(config)
+    link = "https://youtu.be/abcdefghijk"
+    root = Node("", -1, "Root", None)
+    section = root.add_child("Section", 1, "Section")
+    video_node = section.add_child("Video", link, "Youtube", url=link)
+
+    class FakeYoutubeDL:
+        def __init__(self, opts):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        def extract_info(self, url, download):
+            assert download is False
+            return {"filesize_approx": 5 * 1024**2}
+
+        def download(self, urls):
+            raise AssertionError("oversized video must not be downloaded")
+
+    monkeypatch.setattr(downloader.yt_dlp, "YoutubeDL", FakeYoutubeDL)
+
+    assert downloader.scan_and_download_youtube(syncer, video_node) is True
+    assert not node_path(syncer, section).exists()
+
+
+def test_dry_run_honors_youtube_size_limits(tmp_path, monkeypatch, capsys):
+    config = {
+        "paths.sync_directory": str(tmp_path),
+        "downloads.dry_run": True,
+        "filters.max_file_size": "1M",
+    }
+    syncer = make_context(config)
+    link = "https://youtu.be/abcdefghijk"
+    root = Node("", -1, "Root", None)
+    section = root.add_child("Section", 1, "Section")
+    video_node = section.add_child("Video", link, "Youtube", url=link)
+
+    class FakeYoutubeDL:
+        def __init__(self, opts):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        def extract_info(self, url, download):
+            assert download is False
+            return {"filesize_approx": 5 * 1024**2}
+
+        def download(self, urls):
+            raise AssertionError("oversized dry-run video must not be downloaded")
+
+    monkeypatch.setattr(downloader.yt_dlp, "YoutubeDL", FakeYoutubeDL)
+
+    assert downloader.scan_and_download_youtube(syncer, video_node) is True
+    assert "Would download" not in capsys.readouterr().out
+    assert not node_path(syncer, section).exists()
+
+
+def test_youtube_estimated_size_sums_requested_formats():
+    assert downloader.youtube_estimated_size({"filesize": 100}) == 100
+    assert downloader.youtube_estimated_size({"filesize_approx": 200}) == 200
+    assert (
+        downloader.youtube_estimated_size(
+            {"requested_formats": [{"filesize": 100}, {"filesize_approx": 50}]}
+        )
+        == 150
+    )
+    # Unknown sizes must not trigger the limit.
+    assert downloader.youtube_estimated_size(None) is None
+    assert downloader.youtube_estimated_size({}) is None
+    assert (
+        downloader.youtube_estimated_size(
+            {"requested_formats": [{"filesize": 100}, {}]}
+        )
+        is None
+    )
+
+
+def test_download_within_max_file_size_proceeds(tmp_path):
+    config = {"paths.sync_directory": str(tmp_path), "filters.max_file_size": "1M"}
+    syncer, file_node = make_run_syncer(config, timemodified=1710000500)
+    syncer.session.add(
+        "GET",
+        URL,
+        FakeResponse(
+            headers={"Content-Type": "application/pdf", "content-length": "4"},
+            chunks=[b"data"],
+        ),
+    )
+
+    assert download_file(syncer, file_node) is True
+    assert node_path(syncer, file_node).read_bytes() == b"data"
+
+
+def test_dry_run_reports_downloads_without_writing(tmp_path, capsys):
+    config = {"paths.sync_directory": str(tmp_path), "downloads.dry_run": True}
+    syncer, file_node = make_run_syncer(config, timemodified=1710000500)
+    download_path = node_path(syncer, file_node)
+
+    # No GET route registered: any request would raise in the fake session.
+    assert download_file(syncer, file_node) is True
+    assert f"Would download {download_path}" in capsys.readouterr().out
+    assert not download_path.exists()
+    assert syncer.session.calls == []
+
+
+def test_dry_run_honors_direct_download_size_limits(tmp_path, capsys):
+    config = {
+        "paths.sync_directory": str(tmp_path),
+        "downloads.dry_run": True,
+        "filters.max_file_size": "1K",
+    }
+    syncer, file_node = make_run_syncer(config, timemodified=1710000500)
+    download_path = node_path(syncer, file_node)
+    syncer.session.add(
+        "GET",
+        URL,
+        FakeResponse(
+            headers={"Content-Type": "application/pdf", "content-length": "2048"},
+            chunks=[b"x" * 2048],
+        ),
+    )
+
+    assert download_file(syncer, file_node) is True
+    assert "Would download" not in capsys.readouterr().out
+    assert not download_path.exists()
+    assert syncer.session.count("GET", URL) == 1
+
+
 def test_download_path_is_deduplicated_within_a_run(tmp_path):
     # Two distinct nodes that resolve to the same on-disk path must download
     # only once, exercising the per-run downloaded path guard.
@@ -230,7 +402,7 @@ def test_download_path_is_deduplicated_within_a_run(tmp_path):
 
 
 # --------------------------------------------------------------------------
-# update_files_conflict handling (gap 1)
+# conflict_handling behavior
 # --------------------------------------------------------------------------
 
 
@@ -270,14 +442,6 @@ def test_conflict_keep_preserves_local_file_and_skips_download(tmp_path):
     assert syncer.session.calls == []
 
 
-def test_conflict_none_behaves_like_keep(tmp_path):
-    syncer, file_node, download_path, local_modified = _setup_conflict(tmp_path, "none")
-
-    assert download_file(syncer, file_node) is True
-    assert download_path.read_bytes() == local_modified
-    assert syncer.session.calls == []
-
-
 def test_conflict_overwrite_replaces_local_file(tmp_path):
     syncer, file_node, download_path, _ = _setup_conflict(tmp_path, "overwrite")
     new_body = _add_new_remote(syncer)
@@ -304,19 +468,6 @@ def test_conflict_rename_moves_local_file_aside_before_download(tmp_path):
     assert len(conflicts) == 1
     assert conflicts[0].read_bytes() == local_modified
     assert syncer.session.count("GET", URL) == 1
-
-
-def test_unknown_conflict_mode_defaults_to_rename(tmp_path):
-    syncer, file_node, download_path, local_modified = _setup_conflict(
-        tmp_path, "bogus-mode"
-    )
-    new_body = _add_new_remote(syncer)
-
-    assert download_file(syncer, file_node) is True
-    assert download_path.read_bytes() == new_body
-    conflicts = list(download_path.parent.glob("*.syncconflict.*"))
-    assert len(conflicts) == 1
-    assert conflicts[0].read_bytes() == local_modified
 
 
 def test_unchanged_timemodified_skips_download_despite_local_edit(tmp_path):

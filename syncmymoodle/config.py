@@ -17,6 +17,7 @@ in TOML configs, but validation points from them to the current names.
 from __future__ import annotations
 
 import difflib
+import re
 from collections.abc import Mapping
 from dataclasses import dataclass, field, fields
 from pathlib import Path
@@ -28,7 +29,7 @@ PatternConfig: TypeAlias = dict[str, list[str]]
 ConfigDict: TypeAlias = dict[str, Any]
 CliValueKind: TypeAlias = Literal["scalar", "csv", "flag"]
 
-UPDATE_FILES_CONFLICT_OPTIONS = ("rename", "keep", "overwrite")
+CONFLICT_HANDLING_OPTIONS = ("rename", "keep", "overwrite")
 
 
 def identity(value: Any) -> Any:
@@ -54,6 +55,46 @@ def normalize_pattern_config(value: Any) -> PatternConfig:
         }
     patterns = as_string_list(value)
     return {"*": patterns} if patterns else {}
+
+
+_FILE_SIZE_RE = re.compile(
+    r"^\s*(\d+(?:\.\d+)?)\s*([kmgt]?)(i?b)?\s*$",
+    re.IGNORECASE,
+)
+_FILE_SIZE_UNITS = {"": 1, "k": 1024, "m": 1024**2, "g": 1024**3, "t": 1024**4}
+
+
+def parse_file_size(value: Any) -> int:
+    """Parse a size given in bytes or with a K/M/G/T suffix (e.g. "500M")."""
+    if isinstance(value, bool):
+        raise ValueError(f"not a file size: {value!r}")
+    if isinstance(value, int):
+        size = int(value)
+    elif isinstance(value, float):
+        raise ValueError(f"not a file size: {value!r}")
+    else:
+        match = _FILE_SIZE_RE.match(str(value))
+        if match is None:
+            raise ValueError(f"not a file size: {value!r}")
+        number = match.group(1)
+        unit = match.group(2).lower()
+        suffix = (match.group(3) or "").lower()
+        if "." in number and not unit:
+            raise ValueError(f"not a file size: {value!r}")
+        if suffix.startswith("i") and not unit:
+            raise ValueError(f"not a file size: {value!r}")
+        size = int(float(number) * _FILE_SIZE_UNITS[unit])
+    if size < 0:
+        raise ValueError(f"not a file size: {value!r}")
+    return size
+
+
+def file_size_error(value: Any) -> str | None:
+    try:
+        parse_file_size(value)
+    except ValueError:
+        return f"must be a size in bytes or with a K/M/G/T suffix (e.g. '500M'), got {value!r}"
+    return None
 
 
 def format_choices(choices: tuple[str, ...]) -> str:
@@ -111,13 +152,15 @@ def option(
     normalize: Callable[[Any], Any] = identity,
     falsey_uses_default: bool = False,
     choices: tuple[str, ...] = (),
+    validate: Callable[[Any], str | None] | None = None,
     cli: CliOverride | None = None,
 ) -> Any:
     """Declare a :class:`Config` field together with its option schema.
 
     ``key`` is the spelling used inside the option's ``group`` table
     (defaults to the field name); the flat canonical spelling is
-    ``"group.key"``.
+    ``"group.key"``. ``validate`` returns an error fragment for values the
+    option's ``normalize`` cannot handle, or None when the value is fine.
     """
     metadata = {
         "config": {
@@ -126,6 +169,7 @@ def option(
             "normalize": normalize,
             "falsey_uses_default": falsey_uses_default,
             "choices": choices,
+            "validate": validate,
             "cli": cli,
         }
     }
@@ -293,13 +337,24 @@ class Config:
         "rename",
         group="downloads",
         falsey_uses_default=True,
-        choices=UPDATE_FILES_CONFLICT_OPTIONS,
+        choices=CONFLICT_HANDLING_OPTIONS,
         cli=cli_arg(
             "conflict-handling",
             "define how to handle locally modified files when updating: "
             "'rename' (default) moves the old file aside, 'keep' skips the "
             "update, 'overwrite' replaces the local file",
             aliases=("updatefilesconflict",),
+        ),
+    )
+    # Reporting-only mode: sync and list what would be downloaded but never
+    # write files or caches (see downloader/quiz dry_run checks).
+    dry_run: bool = option(
+        False,
+        group="downloads",
+        normalize=bool,
+        cli=cli_flag(
+            "dry-run",
+            "only report what would be downloaded, without writing any files",
         ),
     )
 
@@ -366,6 +421,29 @@ class Config:
             aliases=("excludemodules",),
         ),
     )
+    # Byte limits for downloads (None/0 = no limit). Applied where a size is
+    # known up front: direct downloads with a Content-Length and YouTube
+    # videos whose size yt-dlp can estimate before downloading.
+    max_file_size: int | None = option(
+        group="filters",
+        normalize=parse_file_size,
+        falsey_uses_default=True,
+        validate=file_size_error,
+        cli=cli_arg(
+            "max-file-size",
+            "skip files larger than this size, e.g. '500M' or '2G'",
+        ),
+    )
+    min_file_size: int | None = option(
+        group="filters",
+        normalize=parse_file_size,
+        falsey_uses_default=True,
+        validate=file_size_error,
+        cli=cli_arg(
+            "min-file-size",
+            "skip files smaller than this size, e.g. '10K'",
+        ),
+    )
 
     # Link inspection and link-based content sources. follow_links replaces
     # the legacy no_links/nolinks toggle with inverted meaning (see
@@ -409,6 +487,9 @@ class Config:
     @classmethod
     def from_dict(cls, raw: Mapping[str, Any] | None) -> "Config":
         canonical = canonicalize(raw)
+        errors = config_validation_errors(canonical)
+        if errors:
+            raise ConfigValidationError(None, errors)
         kwargs: dict[str, Any] = {}
         for opt in CONFIG_OPTIONS:
             if opt.canonical_key not in canonical:
@@ -450,6 +531,7 @@ class ConfigOption:
     normalize: Callable[[Any], Any]
     falsey_uses_default: bool
     choices: tuple[str, ...]
+    validate: Callable[[Any], str | None] | None
     cli: CliOverride | None
 
 
@@ -458,7 +540,7 @@ def _build_config_options() -> tuple[ConfigOption, ...]:
     for config_field in fields(Config):
         meta = cast(dict[str, Any], config_field.metadata["config"])
         group = cast(str, meta["group"])
-        key = cast(str, meta["key"] or config_field.name)
+        key = meta["key"] or config_field.name
         options.append(
             ConfigOption(
                 field_name=config_field.name,
@@ -468,6 +550,7 @@ def _build_config_options() -> tuple[ConfigOption, ...]:
                 normalize=meta["normalize"],
                 falsey_uses_default=meta["falsey_uses_default"],
                 choices=meta["choices"],
+                validate=meta["validate"],
                 cli=meta["cli"],
             )
         )
@@ -557,11 +640,14 @@ def option_value_errors(opt: ConfigOption, value: Any) -> list[str]:
         if isinstance(value, bool):
             return []
         return [f"{key} must be true or false, got {value!r}"]
-    if opt.choices and not (opt.falsey_uses_default and not value):
-        if value not in opt.choices:
-            return [
-                f"{key} must be one of {format_choices(opt.choices)}, got {value!r}"
-            ]
+    if opt.falsey_uses_default and not value:
+        return []
+    if opt.choices and value not in opt.choices:
+        return [f"{key} must be one of {format_choices(opt.choices)}, got {value!r}"]
+    if opt.validate is not None:
+        error = opt.validate(value)
+        if error:
+            return [f"{key} {error}"]
     return []
 
 

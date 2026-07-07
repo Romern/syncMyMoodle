@@ -4,14 +4,14 @@ Synchronization client for RWTH Moodle
 
 Downloads the following materials:
 
-* Assignment files, submissions and feedback
+* Assignment files, submissions, and feedback
 * Resource files
-* URLs: OpenCast, Youtube and Sciebo videos/files, and all other non HTML files
+* URLs: OpenCast, YouTube and Sciebo videos/files, and all other non-HTML files
 * Folders
 * Quizzes: Downloads offline HTML of quiz attempts, with opt-in PDF generation
-* Pages and Labels: Embedded Opencast and Youtube Videos
+* Pages and Labels: Embedded Opencast and YouTube Videos
 
-On subsequent runs, *syncMyMoodle* can also update existing files when the
+On later runs, *syncMyMoodle* can also update existing files when the
 content on Moodle or Sciebo (Nextcloud) changed, while optionally protecting
 local edits through configurable conflict handling.
 
@@ -30,7 +30,7 @@ Please consult
 [the guide from the Python website](https://packaging.python.org/guides/installing-using-pip-and-virtual-environments/#creating-a-virtual-environment)
 for more information.
 
-If you just want to get the job done, just use the following commands:
+If you just want to get the job done, use the following commands:
 
 ```bash
 python3 -m venv .venv
@@ -38,13 +38,13 @@ source .venv/bin/activate  # bash/zsh, for other shells view the docs
 pip3 install syncmymoodle
 ```
 
-After installation you can run the CLI directly as:
+After installation, you can run the CLI directly as:
 
 ```bash
 syncmymoodle
 ```
 
-You can also install it as an isolated tool, for example using
+You can also install it as an isolated tool, for example, using
 [pipx](https://pipx.pypa.io) or [uv](https://github.com/astral-sh/uv):
 
 ```bash
@@ -61,7 +61,7 @@ code directly and build everything by yourself.
 *syncMyMoodle*'s dependencies can be installed using `pip`
 or your distro's package manager (`apt`, `dnf`, `pacman`, etc.).
 
-To install the requirements using pip execute the following command from the repository root.
+To install the requirements using pip, execute the following command from the repository root.
 
 ```bash
 # It is best to run this in a virtual environment.
@@ -75,7 +75,7 @@ You can use *syncMyMoodle* with command line arguments or using a configuration
 file. Which one is the best? Well, the answer mostly depends on how and how
 often you are using it.
 
-If you use it often, it may be best to set up a configuration file so that you
+If you often use it, it may be best to set up a configuration file so that you
 won't have to keep entering the same settings options over and over again.
 If you are on Windows, want to automatically conduct backups, or use the tool
 irregularly, you may want to use the command line arguments for the sake
@@ -100,8 +100,8 @@ deactivate  # leave virtual environment
 The following command line arguments are available:
 
 ```bash
-usage: python3 -m syncmymoodle [-h] [--config CONFIG] [--user USER]
-                               [--password PASSWORD]
+usage: python3 -m syncmymoodle [-h] [--config CONFIG] [--version]
+                               [--user USER] [--password PASSWORD]
                                [--totp-serial TOTP_SERIAL]
                                [--totp-secret TOTP_SECRET] [--use-keyring]
                                [--keyring-store-totp-secret]
@@ -113,12 +113,15 @@ usage: python3 -m syncmymoodle [-h] [--config CONFIG] [--user USER]
                                [--course-prefix-handling {keep,remove,suffix}]
                                [--update-files]
                                [--conflict-handling {rename,keep,overwrite}]
+                               [--dry-run]
                                [--exclude-filetypes EXCLUDE_FILETYPES]
                                [--exclude-files EXCLUDE_FILES]
                                [--exclude-links EXCLUDE_LINKS]
                                [--allowed-domains ALLOWED_DOMAINS]
                                [--exclude-sections EXCLUDE_SECTIONS]
                                [--exclude-modules EXCLUDE_MODULES]
+                               [--max-file-size MAX_FILE_SIZE]
+                               [--min-file-size MIN_FILE_SIZE]
                                [--no-follow-links]
                                [--quiz {off,html,pdf,both}] [-v]
                                {config} ...
@@ -133,6 +136,7 @@ positional arguments:
 options:
   -h, --help            show this help message and exit
   --config CONFIG       set your configuration file
+  --version             show program's version number and exit
   --user USER           set your RWTH Single Sign-On username
   --password PASSWORD   set your RWTH Single Sign-On password
   --totp-serial TOTP_SERIAL
@@ -172,6 +176,8 @@ options:
                         updating: 'rename' (default) moves the old file aside,
                         'keep' skips the update, 'overwrite' replaces the
                         local file
+  --dry-run             only report what would be downloaded, without writing
+                        any files
   --exclude-filetypes EXCLUDE_FILETYPES
                         specify whether specific file types should be
                         excluded, comma-separated e.g. "mp4,mkv"
@@ -190,6 +196,10 @@ options:
   --exclude-modules EXCLUDE_MODULES
                         exclude Moodle modules by comma-separated names, ids,
                         types, URLs or patterns
+  --max-file-size MAX_FILE_SIZE
+                        skip files larger than this size, e.g. '500M' or '2G'
+  --min-file-size MIN_FILE_SIZE
+                        skip files smaller than this size, e.g. '10K'
   --no-follow-links     do not inspect links found in moodle pages, disabling
                         all link sources e.g. youtube and opencast videos
   --quiz {off,html,pdf,both}
@@ -244,6 +254,8 @@ update_files = true # If true, existing files are redownloaded only when Moodle/
 conflict_handling = "rename" # How to handle locally modified files when a newer version is available on Moodle/Sciebo: "rename" (default, move to <name>.syncconflict.<hash>), "keep" (skip update), or "overwrite" (!!DANGEROUS!! replaces the local file, you may lose any files you edited/changed!).
 
 [filters]
+max_file_size = ""     # Skip files larger than this size (e.g. "500M" or "2G"). Empty means no limit. Applies where the size is known up front, including YouTube videos with a size estimate.
+min_file_size = ""     # Skip files smaller than this size (e.g. "10K"). Empty means no limit.
 exclude_filetypes = [] # Exclude specific filetypes (e.g. ["mp4", "mkv"]) to disable downloading most videos
 exclude_files = []     # Exclude specific files using UNIX filename pattern matching (e.g. "Lecture{video,zoom}*.{mp4,mkv}")
 exclude_links = []     # Exclude specific links using UNIX pattern matching (e.g. ["*tooltask.igm.rwth-aachen.de/hinge*"])
@@ -283,14 +295,14 @@ is `keep` for backwards compatibility, however `suffix` is recommended.
 the same title; syncMyMoodle resolves those by adding a stable suffix to the
 conflicting folders.
 
-`exclude_sections` skips complete Moodle course sections, i.e. top-level
+`exclude_sections` skips complete Moodle course sections, i.e., top-level
 topic/week blocks such as `General`, `Week 1` or `Exercise Sheets`. Matching a
-section skips all modules, files and links inside it.
+section skips all modules, files, and links inside it.
 
 `exclude_modules` skips individual Moodle activities/resources inside a
-section, such as one file resource, folder, assignment, URL, page, quiz or
+section, such as one file resource, folder, assignment, URL, page, quiz, or
 Opencast/LTI item. It can match the module name, Moodle type (`resource`,
-`folder`, `assign`, `url`, `page`, `lti`, ...), id or Moodle module URL.
+`folder`, `assign`, `url`, `page`, `lti`, ...), id, or Moodle module URL.
 
 `exclude_sections` and `exclude_modules` can be either a global list or an
 object keyed by Moodle course id. In per-course objects, `*` can be used for
@@ -299,6 +311,9 @@ rules that apply to every course.
 Command line arguments have a higher priority than configuration files.
 You can override any of the options that you have configured in the file
 using command line arguments.
+
+Use `--dry-run` to log in, sync the file tree and list what would be
+downloaded without writing any files or caches.
 
 syncMyMoodle stores per-course metadata in a hidden `.syncmymoodle_cache` file
 inside each synced course directory. Delete that file to force a fresh metadata
@@ -311,7 +326,7 @@ and does not contact Moodle when opened later. Set `quiz` to `"off"` to disable
 quiz snapshots.
 
 PDF rendering is separate and opt-in: set `quiz` to `"pdf"` or `"both"` to
-render snapshots with a locally installed Chrome, Chromium or Edge browser. This
+render snapshots with a locally installed Chrome, Chromium, or Edge browser. This
 uses the browser's built-in headless PDF output, which avoids the old
 `pdfkit`/`wkhtmltopdf` renderer and its security issues, but syncMyMoodle does
 not launch a browser unless you explicitly choose one of the PDF modes. The
@@ -323,7 +338,7 @@ nothing is lost.
 ### TOTP
 
 From the RWTH IDM service you will get a TOTP secret which will be used to
-generate OTP tokens. The serial number of the TOTP, which can be seen in the 
+generate OTP tokens. The serial number of the TOTP, which can be seen in the
 [RWTH IDM Token Manager](https://idm.rwth-aachen.de/selfservice/MFATokenManager),
 has to be provided using the `--totp-serial` option or the `totp_serial`
 config entry. It usually has the format `TOTP12345678`.
@@ -335,11 +350,11 @@ secret argument.
 ## Keyring Integration
 
 You are advised to install and use the optional Keyring integration
-to store your password securely if your system supports it, see the 
+to store your password securely if your system supports it, see the
 [projects page](https://github.com/jaraco/keyring) for all supported systems.
 
-If you have a compatible keyring installed, you can store your RWTH SSO 
-credentials in it and use it with *syncMyMoodle*, which can be particularly 
+If you have a compatible keyring installed, you can store your RWTH SSO
+credentials in it and use it with *syncMyMoodle*, which can be particularly
 useful if you do not like storing your passwords in plain text files.
 
 To do that, you will have to install *syncMyMoodle* with an extra `keyring`

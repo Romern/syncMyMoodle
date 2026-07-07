@@ -8,6 +8,7 @@ import sys
 import tomllib
 from argparse import SUPPRESS, ArgumentParser, Namespace
 from collections.abc import Mapping, Sequence
+from importlib import metadata
 from pathlib import Path
 from types import ModuleType
 from typing import Any
@@ -40,6 +41,13 @@ logger = logging.getLogger(__name__)
 CONFIG_FILENAMES = ("config.toml", "config.json")
 
 
+def package_version() -> str:
+    try:
+        return metadata.version("syncmymoodle")
+    except metadata.PackageNotFoundError:
+        return "unknown"
+
+
 def build_parser(keyring_backend: Any = None) -> ArgumentParser:
     parser = ArgumentParser(
         prog="python3 -m syncmymoodle",
@@ -49,6 +57,11 @@ def build_parser(keyring_backend: Any = None) -> ArgumentParser:
         ),
     )
     parser.add_argument("--config", default=None, help="set your configuration file")
+    parser.add_argument(
+        "--version",
+        action="version",
+        version=f"syncmymoodle {package_version()}",
+    )
     for option in CONFIG_OPTIONS:
         cli = option.cli
         if cli is None or (cli.requires_keyring and not keyring_backend):
@@ -432,10 +445,14 @@ def run(ctx: SyncContext) -> None:
     )
     print("Syncing file tree...")
     sync.sync(ctx)
-    print("Downloading files...")
+    if ctx.config.dry_run:
+        print("Dry run: listing files that would be downloaded...")
+    else:
+        print("Downloading files...")
     downloader.download_all_files(ctx, logger)
-    print("Saving root node as cache...")
-    course_cache.cache_root_node(ctx, logger)
+    if not ctx.config.dry_run:
+        print("Saving root node as cache...")
+        course_cache.cache_root_node(ctx, logger)
 
     # If we saw multiple Opencast backend errors send a reminder
     # to check the RWTH ITC status page before filing a bug.

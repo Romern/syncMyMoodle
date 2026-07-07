@@ -324,9 +324,7 @@ def conflict_action(
         return ConflictAction.DOWNLOAD
 
     conflict_mode = ctx.config.conflict_handling
-    if conflict_mode not in {"rename", "keep", "none", "overwrite"}:
-        conflict_mode = "rename"
-    if conflict_mode in {"keep", "none"}:
+    if conflict_mode == "keep":
         log.info(
             "Detected local changes for %s, skipping Moodle update "
             "due to conflict_handling=%s",
@@ -337,6 +335,53 @@ def conflict_action(
     if conflict_mode == "rename":
         return ConflictAction.RENAME_LOCAL
     return ConflictAction.DOWNLOAD
+
+
+def size_limits_configured(ctx: SyncContext) -> bool:
+    return bool(ctx.config.max_file_size or ctx.config.min_file_size)
+
+
+def size_limit_violation(ctx: SyncContext, size: int) -> str | None:
+    """Which of filters.max_file_size/min_file_size ``size`` violates, if any."""
+    max_size = ctx.config.max_file_size
+    if max_size and size > max_size:
+        return f"exceeds max_file_size ({max_size} bytes)"
+    min_size = ctx.config.min_file_size
+    if min_size and size < min_size:
+        return f"is below min_file_size ({min_size} bytes)"
+    return None
+
+
+def download_violates_size_limits(
+    ctx: SyncContext,
+    response: Any,
+    resume_size: int,
+    downloadpath: Path,
+    log: logging.Logger = logger,
+) -> bool:
+    """Whether the response reports a size outside the configured size limits.
+
+    Best-effort: responses without a Content-Length header are not limited.
+    """
+    if not size_limits_configured(ctx):
+        return False
+    content_length = response.headers.get("content-length")
+    if not content_length:
+        return False
+    try:
+        total_size = int(content_length) + max(resume_size, 0)
+    except ValueError:
+        return False
+    violation = size_limit_violation(ctx, total_size)
+    if violation is None:
+        return False
+    log.warning(
+        "Skipping download of %s because its size (%d bytes) %s",
+        downloadpath,
+        total_size,
+        violation,
+    )
+    return True
 
 
 def prepare_transfer_plan(node: Node, downloadpath: Path) -> TransferPlan:
@@ -515,17 +560,37 @@ def download_file(
     if action == ConflictAction.SKIP:
         return True
 
-    transfer = prepare_transfer_plan(node, downloadpath)
+    if ctx.config.dry_run and not size_limits_configured(ctx):
+        print(f"Would download {downloadpath} [{node.type}]")
+        return True
+
+    transfer = None if ctx.config.dry_run else prepare_transfer_plan(node, downloadpath)
+    headers = (
+        dict(node.download_headers)
+        if transfer is None and node.download_headers
+        else transfer.headers
+        if transfer is not None
+        else {}
+    )
     with closing(
-        ctx.require_session().get(node.url, headers=transfer.headers, stream=True)
+        ctx.require_session().get(node.url, headers=headers, stream=True)
     ) as response:
         etag_header = response.headers.get("ETag")
 
-        if not validate_resume_response(response, transfer):
-            return False
-        if not download_response_is_usable(node, response, downloadpath, log):
+        if transfer is not None and not validate_resume_response(response, transfer):
             return False
 
+        resume_size = transfer.resume_size if transfer is not None else 0
+        if not download_response_is_usable(node, response, downloadpath, log):
+            return True if ctx.config.dry_run else False
+        if download_violates_size_limits(ctx, response, resume_size, downloadpath, log):
+            return True
+
+        if ctx.config.dry_run:
+            print(f"Would download {downloadpath} [{node.type}]")
+            return True
+
+        assert transfer is not None
         content = response.iter_content(DEFAULT_BLOCK_SIZE)
         first_chunk = next((chunk for chunk in content if chunk), b"")
         if not response_body_is_usable(node, first_chunk, downloadpath, log):
@@ -571,7 +636,8 @@ def download_node_tree(
                 except Exception:
                     log.exception(f"Failed to download the module {cur_node}")
                     log.error(
-                        "This could be caused by an out of date yt-dlp version. Try upgrading yt-dlp through pip or your package manager."
+                        "This could be caused by an out of date yt-dlp version. Try upgrading yt-dlp through pip or "
+                        "your package manager."
                     )
             elif cur_node.type == "Opencast":
                 try:
@@ -618,6 +684,9 @@ def scan_and_download_youtube(
     if path.exists():
         if any(link[-YOUTUBE_ID_LENGTH:] in f.name for f in path.iterdir()):
             return False
+    if ctx.config.dry_run and not size_limits_configured(ctx):
+        print(f"Would download YouTube video {link} to {path} [Youtube]")
+        return True
     outtmpl = pathing.with_windows_extended_length_prefix(
         path / "%(title)s-%(id)s.%(ext)s",
         force=True,
@@ -629,7 +698,59 @@ def scan_and_download_youtube(
         "retries": 15,
         "match_filter": yt_dlp.match_filter_func("!is_live"),
     }
-    path.mkdir(parents=True, exist_ok=True)
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+        if youtube_violates_size_limits(ctx, ydl, link, log):
+            return True
+        if ctx.config.dry_run:
+            print(f"Would download YouTube video {link} to {path} [Youtube]")
+            return True
+        path.mkdir(parents=True, exist_ok=True)
         ydl.download([link])
     return True
+
+
+def youtube_violates_size_limits(
+    ctx: SyncContext,
+    ydl: Any,
+    link: str,
+    log: logging.Logger = logger,
+) -> bool:
+    """Whether yt-dlp's pre-download size estimate falls outside the size limits.
+
+    Best-effort: videos without a reported size are not limited.
+    """
+    if not size_limits_configured(ctx):
+        return False
+    try:
+        info: dict[str, int] = ydl.extract_info(link, download=False)
+    except Exception:
+        return False
+    total_size = youtube_estimated_size(info)
+    if total_size is None:
+        return False
+    violation = size_limit_violation(ctx, total_size)
+    if violation is None:
+        return False
+    log.warning(
+        "Skipping YouTube video %s because its estimated size (%d bytes) %s",
+        link,
+        total_size,
+        violation,
+    )
+    return True
+
+
+def youtube_estimated_size(info: Any) -> int | None:
+    """Extract yt-dlp's size estimate from an info dict, if it reports one."""
+    if not isinstance(info, dict):
+        return None
+    total_size = info.get("filesize") or info.get("filesize_approx")
+    if total_size:
+        return int(total_size)
+    # Merged downloads (separate video+audio) carry sizes per requested format.
+    formats = info.get("requested_formats")
+    if formats:
+        sizes = [f.get("filesize") or f.get("filesize_approx") for f in formats]
+        if all(sizes):
+            return int(sum(sizes))
+    return None

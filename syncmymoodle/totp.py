@@ -18,7 +18,7 @@ def hotp(key: str, counter: int, digits: int = 6, digest: str = "sha1") -> str:
     counter_bytes = struct.pack(">Q", counter)
     mac = hmac.new(key_bytes, counter_bytes, digest).digest()
     offset = mac[-1] & 0x0F
-    binary = struct.unpack(">L", mac[offset : offset + 4])[0] & 0x7FFFFFFF
+    binary = struct.unpack(">L", mac[offset: offset + 4])[0] & 0x7FFFFFFF
     return str(binary)[-digits:].zfill(digits)
 
 

@@ -1,10 +1,8 @@
 """Quiz review capture: offline HTML snapshots and optional Chromium PDF rendering.
 
-The snapshot pipeline strips active content, inlines same-origin assets as
-data URIs within size budgets, converts LaTeX to MathML, removes network-
-bearing attributes, and pins a restrictive Content-Security-Policy, so the
-saved page renders offline without executing or fetching anything.
-"""
+The snapshot pipeline strips active content, inlines same-origin assets as data URIs within size budgets,
+converts LaTeX to MathML, removes network-bearing attributes, and pins a restrictive Content-Security-Policy,
+so the saved page renders offline without executing or fetching anything."""
 
 import base64
 import logging
@@ -20,7 +18,6 @@ from pathlib import Path
 from typing import Any
 
 import latex2mathml.converter
-from bs4 import BeautifulSoup as bs
 
 from syncmymoodle import pathing
 from syncmymoodle.config import Config
@@ -39,7 +36,7 @@ from syncmymoodle.context import SyncContext
 from syncmymoodle.http_utils import (
     HTML_CONTENT_TYPES,
     content_type_without_parameters,
-    parse_html,
+    parse_html, parse_xml,
 )
 
 logger = logging.getLogger(__name__)
@@ -47,9 +44,9 @@ logger = logging.getLogger(__name__)
 CSS_IMPORT_RE = re.compile(r"@import\s+(?:url\()?[^;]+;", re.IGNORECASE)
 CSS_URL_RE = re.compile(r"url\(\s*(['\"]?)(.*?)\1\s*\)", re.IGNORECASE)
 CSS_FONT_FACE_RE = re.compile(
-    r"@font-face\s*\{(?P<body>.*?)\}", re.IGNORECASE | re.DOTALL
+    r"@font-face\s*\{(?P<body>.*?)}", re.IGNORECASE | re.DOTALL
 )
-CSS_RULE_RE = re.compile(r"(?P<selectors>[^{}@][^{}]*)\{(?P<body>[^{}]*)\}", re.DOTALL)
+CSS_RULE_RE = re.compile(r"(?P<selectors>[^{}@][^{}]*)\{(?P<body>[^{}]*)}", re.DOTALL)
 CSS_FONT_FAMILY_RE = re.compile(r"font-family\s*:\s*(?P<value>[^;{}]+)", re.IGNORECASE)
 CSS_PSEUDO_ELEMENT_RE = re.compile(
     r"::?(?:after|backdrop|before|cue|cue-region|first-letter|first-line|"
@@ -57,7 +54,7 @@ CSS_PSEUDO_ELEMENT_RE = re.compile(
     r"selection|slotted\([^)]*\)|spelling-error|target-text)"
 )
 TEX_MATH_RE = re.compile(
-    r"\\\((?P<inline>.+?)\\\)|\\\[(?P<block>.+?)\\\]|\$\$(?P<dollar_block>.+?)\$\$",
+    r"\\\((?P<inline>.+?)\\\)|\\\[(?P<block>.+?)\\]|\$\$(?P<dollar_block>.+?)\$\$",
     re.DOTALL,
 )
 ICON_FONT_FAMILY_MARKERS = ("font awesome", "fontawesome")
@@ -656,7 +653,7 @@ def _latex_match_to_node(soup: Any, match: re.Match[str], log: logging.Logger) -
 
     try:
         mathml = latex2mathml.converter.convert(latex.strip(), display=display)
-        math_tag = bs(mathml, features="xml").find("math")
+        math_tag = parse_xml(mathml).find("math")
     except Exception:
         log.info("Could not convert quiz LaTeX expression to MathML: %s", latex)
         math_tag = None
@@ -678,7 +675,7 @@ def _convert_quiz_latex_to_mathml(
         last_end = 0
         for match in TEX_MATH_RE.finditer(text):
             if match.start() > last_end:
-                pieces.append(soup.new_string(text[last_end : match.start()]))
+                pieces.append(soup.new_string(text[last_end: match.start()]))
             pieces.append(_latex_match_to_node(soup, match, log))
             last_end = match.end()
 
@@ -872,6 +869,10 @@ def download_quiz(ctx: SyncContext, node: Any, log: logging.Logger = logger) -> 
     html_done = html_path.exists() if want_html else True
     pdf_done = pdf_path.exists() if want_pdf else True
     if html_done and pdf_done:
+        return True
+
+    if ctx.config.dry_run:
+        print(f"Would download {html_path if want_html else pdf_path} [Quiz]")
         return True
 
     # Only (re)build the snapshot when it is not already on disk. When just the

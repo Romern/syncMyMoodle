@@ -18,6 +18,11 @@ def parse_html(markup: str) -> BeautifulSoup:
     return BeautifulSoup(markup, features="lxml")
 
 
+def parse_xml(markup: str) -> BeautifulSoup:
+    """Parse XML with the project's canonical parser."""
+    return BeautifulSoup(markup, features="xml")
+
+
 def media_type_without_parameters(value: Any) -> str:
     """Strip parameters like charset from a media type string."""
     return str(value or "").split(";", 1)[0].strip().lower()

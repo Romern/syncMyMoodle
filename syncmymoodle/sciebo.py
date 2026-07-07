@@ -2,12 +2,10 @@ import base64
 import logging
 from typing import Any, cast
 
-from bs4 import BeautifulSoup as bs
-
 from syncmymoodle import filters
 from syncmymoodle.constants import SCIEBO_LINK_RE
 from syncmymoodle.context import SyncContext
-from syncmymoodle.http_utils import get_input_value, parse_html
+from syncmymoodle.http_utils import get_input_value, parse_html, parse_xml
 from syncmymoodle.node import Node, RemoteMarkerKind
 
 logger = logging.getLogger(__name__)
@@ -114,7 +112,7 @@ def _add_sciebo_files(
     ctx: SyncContext,
     href: str,
     parent_node: Node,
-    sharingToken: str,
+    sharing_token: str,
     auth_header: dict[str, str],
     log: logging.Logger = logger,
 ) -> None:
@@ -139,7 +137,7 @@ def _add_sciebo_files(
         log.exception(
             "Sciebo PROPFIND failed for href %s (share %s)",
             href,
-            sharingToken,
+            sharing_token,
         )
         return
 
@@ -148,12 +146,12 @@ def _add_sciebo_files(
             "Sciebo PROPFIND returned status %s for href %s (share %s)",
             propfind_response.status_code,
             href,
-            sharingToken,
+            sharing_token,
         )
         return
 
     # parse the response
-    soup_xml = bs(propfind_response.text, features="xml")
+    soup_xml = parse_xml(propfind_response.text)
 
     for resp in soup_xml.find_all("d:response"):
         # get the href of the response
@@ -181,7 +179,7 @@ def _add_sciebo_files(
             else new_href.split("/")[-1]
         )
         displayname = (
-            f"sciebo-{sharingToken}" if displayname == "webdav" else displayname
+            f"sciebo-{sharing_token}" if displayname == "webdav" else displayname
         )
 
         # check if the response is a folder
@@ -198,7 +196,7 @@ def _add_sciebo_files(
                 continue
             # recursive call to get all files in the folder
             _add_sciebo_files(
-                ctx, new_href, folder_node, sharingToken, auth_header, log
+                ctx, new_href, folder_node, sharing_token, auth_header, log
             )
         else:
             # create a new node for the file

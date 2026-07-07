@@ -40,7 +40,10 @@ def test_config_options_record_cli_overrides():
         "course-prefix-handling": "courses.prefix_handling",
         "update-files": "downloads.update_files",
         "conflict-handling": "downloads.conflict_handling",
+        "dry-run": "downloads.dry_run",
         "exclude-filetypes": "filters.exclude_filetypes",
+        "max-file-size": "filters.max_file_size",
+        "min-file-size": "filters.min_file_size",
         "exclude-files": "filters.exclude_files",
         "exclude-links": "filters.exclude_links",
         "allowed-domains": "filters.allowed_domains",
@@ -69,6 +72,52 @@ def test_deprecated_cli_flag_spellings_still_work():
     help_text = parser.format_help()
     assert "--skip-courses" in help_text
     assert "--skipcourses" not in help_text
+
+
+def test_cli_version_flag(capsys):
+    with pytest.raises(SystemExit) as exc_info:
+        cli.main(["--version"])
+
+    assert exc_info.value.code == 0
+    assert "syncmymoodle" in capsys.readouterr().out
+
+
+def test_max_file_size_parses_sizes():
+    assert (
+        Config.from_dict({"filters": {"max_file_size": "500M"}}).max_file_size
+        == 500 * 1024**2
+    )
+    assert Config.from_dict(
+        {"filters": {"max_file_size": "1.5g"}}
+    ).max_file_size == int(1.5 * 1024**3)
+    assert Config.from_dict({"filters": {"max_file_size": 2048}}).max_file_size == 2048
+    # Falsey values mean "no limit".
+    assert Config.from_dict({}).max_file_size is None
+    assert Config.from_dict({"filters": {"max_file_size": 0}}).max_file_size is None
+    assert (
+        Config.from_dict({"filters": {"min_file_size": "10K"}}).min_file_size
+        == 10 * 1024
+    )
+    with pytest.raises(
+        ConfigValidationError, match="filters.max_file_size must be a size"
+    ):
+        validate_config({"filters": {"max_file_size": "huge"}})
+    with pytest.raises(
+        ConfigValidationError, match="filters.min_file_size must be a size"
+    ):
+        validate_config({"filters": {"min_file_size": "tiny"}})
+    with pytest.raises(
+        ConfigValidationError, match="filters.max_file_size must be a size"
+    ):
+        validate_config({"filters": {"max_file_size": "1iB"}})
+    with pytest.raises(
+        ConfigValidationError, match="filters.max_file_size must be a size"
+    ):
+        validate_config({"filters": {"max_file_size": 0.5}})
+    with pytest.raises(
+        ConfigValidationError, match="filters.max_file_size must be a size"
+    ):
+        validate_config({"filters": {"max_file_size": "0.5"}})
 
 
 def test_converted_legacy_config_passes_validation():
@@ -157,6 +206,15 @@ def test_config_validation_rejects_non_boolean_toggles():
     assert "auth.use_keyring must be true or false" in message
     assert "modules.folder must be true or false" in message
     assert "links.youtube must be true or false" in message
+
+
+def test_config_from_dict_rejects_invalid_values():
+    with pytest.raises(ConfigValidationError, match="links.follow_links"):
+        Config.from_dict({"links": {"follow_links": "false"}})
+    with pytest.raises(ConfigValidationError, match="modules.quiz"):
+        Config.from_dict({"modules": {"quiz": "HTML"}})
+    with pytest.raises(ConfigValidationError, match="filters.max_file_size"):
+        Config.from_dict({"filters": {"max_file_size": "huge"}})
 
 
 def test_config_validation_rejects_unknown_legacy_module_keys():

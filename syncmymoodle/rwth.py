@@ -229,7 +229,8 @@ def login(ctx: SyncContext, log: logging.Logger = logger) -> None:
     if resp.url.startswith(f"{MOODLE_URL}my/"):
         soup = parse_html(resp.text)
         ctx.session_key = _get_session_key(soup, log)
-        save_session_cookies(cookie_file, session.cookies)
+        if not ctx.config.dry_run:
+            save_session_cookies(cookie_file, session.cookies)
         return
 
     # Create a separate soup for maintenance detection
@@ -347,4 +348,5 @@ def login(ctx: SyncContext, log: logging.Logger = logger) -> None:
     resp = session.post(f"{MOODLE_URL}Shibboleth.sso/SAML2/POST", data=data)
     soup = parse_html(resp.text)
     ctx.session_key = _get_session_key(soup, log)
-    save_session_cookies(cookie_file, session.cookies)
+    if not ctx.config.dry_run:
+        save_session_cookies(cookie_file, session.cookies)

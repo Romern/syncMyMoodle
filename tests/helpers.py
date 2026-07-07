@@ -230,7 +230,7 @@ def build_single_file_tree(
     section: str = "General",
     section_id: int = 401,
     file_type: str = "Linked file [application/pdf]",
-) -> tuple[Node, Node]:
+) -> tuple[Node, Node | None]:
     """Build a Root/Semester/Course/Section/<file> tree.
 
     Returns the root node and the leaf file node so tests can drive

@@ -187,7 +187,7 @@ def get_old_node_for(
         return None
 
     rel_nodes: list[Node] = []
-    cur = node
+    cur: Node = node
     while cur is not course_node:
         rel_nodes.insert(0, cur)
         if cur.parent is None:

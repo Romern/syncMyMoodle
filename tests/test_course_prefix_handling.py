@@ -40,8 +40,10 @@ def test_non_matching_names_are_preserved():
 
 
 def test_invalid_mode_preserves_course_name(caplog):
+    config = Config.from_dict({})
+    config.course_prefix_handling = "invalid"
     with caplog.at_level(logging.WARNING, logger="syncmymoodle.filters"):
-        assert format_course_name("invalid", "(VO) Analysis") == "(VO) Analysis"
+        assert format_course_name_impl("(VO) Analysis", config) == "(VO) Analysis"
     assert any(record.levelno == logging.WARNING for record in caplog.records)
 
 
