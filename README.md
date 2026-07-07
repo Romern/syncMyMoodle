@@ -237,9 +237,13 @@ an existing TOML file.
 
 ### Configuration file
 
-Copy `config.toml.example` to `config.toml` in your current directory or to
-`~/.config/syncmymoodle/config.toml` if you wish to configure `syncmymoodle`
-user-wide.
+Copy `config.toml.example` to `~/.config/syncmymoodle/config.toml` to configure
+`syncmymoodle` user-wide. To use a different config file for one run, pass it
+explicitly with `--config`.
+
+By default `syncmymoodle` reads only the global config file in the user config
+directory. Config files in the current working directory are ignored unless you
+select them explicitly with `--config`.
 
 Here's an overview of the available options with some additional remarks as to
 what each configuration does:

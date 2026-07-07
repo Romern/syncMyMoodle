@@ -110,7 +110,7 @@ def build_parser(keyring_backend: Any = None) -> ArgumentParser:
     migrate_parser.add_argument(
         "--input",
         default=None,
-        help="legacy JSON config to migrate; defaults to local config.json, then the XDG config",
+        help="legacy JSON config to migrate; defaults to the global config.json",
     )
     migrate_parser.add_argument(
         "--output",
@@ -131,7 +131,7 @@ def build_parser(keyring_backend: Any = None) -> ArgumentParser:
     check_parser.add_argument(
         "--config",
         default=SUPPRESS,
-        help="config file to validate; defaults to discovered config.toml/config.json",
+        help="config file to validate; defaults to the global config.toml/config.json",
     )
     clean_parser = subparsers.add_parser("clean", help="clean local sync artifacts")
     clean_subparsers = clean_parser.add_subparsers(
@@ -226,9 +226,6 @@ def discover_config_file(directory: Path) -> Path | None:
 
 
 def discover_json_migration_input() -> Path | None:
-    local_config = Path("config.json")
-    if local_config.is_file():
-        return local_config
     global_config = global_config_dir() / "config.json"
     if global_config.is_file():
         return global_config
@@ -236,18 +233,12 @@ def discover_json_migration_input() -> Path | None:
 
 
 def discover_config_files() -> list[Path]:
-    return [
-        config_file
-        for config_file in (
-            discover_config_file(global_config_dir()),
-            discover_config_file(Path(".")),
-        )
-        if config_file is not None
-    ]
+    config_file = discover_config_file(global_config_dir())
+    return [] if config_file is None else [config_file]
 
 
 def load_config(args: Namespace, parser: ArgumentParser) -> ConfigDict:
-    """Read and merge all config files into one canonical dict (local wins)."""
+    """Read the explicit config or the global config, if present."""
     if args.config:
         explicit_config = Path(args.config)
         if not explicit_config.is_file():
@@ -347,7 +338,7 @@ def config_check_paths(args: Namespace, parser: ArgumentParser) -> list[Path]:
     config_paths = discover_config_files()
     if not config_paths:
         parser.error(
-            "no config.toml or config.json found; pass --config to choose a file"
+            "no global config.toml or config.json found; pass --config to choose a file"
         )
     return config_paths
 

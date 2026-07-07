@@ -473,40 +473,21 @@ def test_filter_values_are_normalized():
     assert cfg.exclude_modules == {"42": ["Quiz*"]}
 
 
-def test_cli_loads_global_then_local_config(tmp_path, monkeypatch):
-    xdg_config = tmp_path / "xdg" / "syncmymoodle" / "config.json"
-    xdg_config.parent.mkdir(parents=True)
-    xdg_config.write_text(
-        json.dumps(
-            {
-                "user": "global-user",
-                "password": "global-password",
-                "totp": "global-totp",
-                "basedir": "/global",
-            }
-        ),
-        encoding="utf-8",
-    )
-    local_config = tmp_path / "config.json"
-    local_config.write_text(
+def test_cli_ignores_cwd_config_by_default(tmp_path, monkeypatch):
+    (tmp_path / "config.json").write_text(
         json.dumps({"user": "local-user", "basedir": "/local"}),
         encoding="utf-8",
     )
-    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "xdg"))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "empty-xdg"))
     monkeypatch.chdir(tmp_path)
 
     parser = cli.build_parser()
     args = parser.parse_args([])
 
-    assert cli.load_config(args, parser) == {
-        "auth.user": "local-user",
-        "auth.password": "global-password",
-        "auth.totp_serial": "global-totp",
-        "paths.sync_directory": "/local",
-    }
+    assert cli.load_config(args, parser) == {}
 
 
-def test_cli_loads_toml_configs_before_legacy_json(tmp_path, monkeypatch):
+def test_cli_prefers_global_toml_config_over_global_legacy_json(tmp_path, monkeypatch):
     xdg_config_dir = tmp_path / "xdg" / "syncmymoodle"
     xdg_config_dir.mkdir(parents=True)
     (xdg_config_dir / "config.json").write_text(
@@ -532,16 +513,13 @@ def test_cli_loads_toml_configs_before_legacy_json(tmp_path, monkeypatch):
     args = parser.parse_args([])
 
     assert cli.load_config(args, parser) == {
-        "auth.user": "local-toml",
+        "auth.user": "global-toml",
         "auth.password": "toml-password",
         "auth.totp_serial": "global-totp",
-        "paths.sync_directory": "/toml",
     }
 
 
-def test_local_config_overrides_global_across_key_spellings(tmp_path, monkeypatch):
-    # Regression test: a global legacy JSON must not shadow a local TOML that
-    # spells the same option differently (both resolve to one canonical key).
+def test_explicit_config_can_read_cwd_config(tmp_path, monkeypatch):
     xdg_config = tmp_path / "xdg" / "syncmymoodle" / "config.json"
     xdg_config.parent.mkdir(parents=True)
     xdg_config.write_text(
@@ -556,7 +534,7 @@ def test_local_config_overrides_global_across_key_spellings(tmp_path, monkeypatc
     monkeypatch.chdir(tmp_path)
 
     parser = cli.build_parser()
-    args = parser.parse_args([])
+    args = parser.parse_args(["--config", "config.toml"])
     cfg = Config.from_dict(cli.load_config(args, parser))
 
     assert cfg.update_files is True
@@ -656,7 +634,9 @@ def test_cli_still_loads_explicit_extensionless_json_config(tmp_path, caplog):
 
 
 def test_cli_warns_when_loading_legacy_json_config(tmp_path, monkeypatch, caplog):
-    (tmp_path / "config.json").write_text(
+    xdg_config = tmp_path / "xdg" / "syncmymoodle" / "config.json"
+    xdg_config.parent.mkdir(parents=True)
+    xdg_config.write_text(
         json.dumps({"user": "json-user"}),
         encoding="utf-8",
     )
@@ -706,8 +686,10 @@ def test_cli_explicit_config_skips_discovery(tmp_path, monkeypatch):
 def test_malformed_discovered_config_reports_clean_error(tmp_path, monkeypatch, capsys):
     # Regression test: a broken auto-discovered config must fail with a
     # parser error naming the file, not an unhandled traceback.
-    (tmp_path / "config.toml").write_text('user = "u\n', encoding="utf-8")
-    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "nope"))
+    xdg_config = tmp_path / "xdg" / "syncmymoodle" / "config.toml"
+    xdg_config.parent.mkdir(parents=True)
+    xdg_config.write_text('user = "u\n', encoding="utf-8")
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "xdg"))
     monkeypatch.chdir(tmp_path)
 
     parser = cli.build_parser()
@@ -723,10 +705,10 @@ def test_malformed_discovered_config_reports_clean_error(tmp_path, monkeypatch, 
 
 
 def test_invalid_discovered_config_reports_file_path(tmp_path, monkeypatch, capsys):
-    (tmp_path / "config.toml").write_text(
-        '[courses]\nprefix_handling = "later"\n', encoding="utf-8"
-    )
-    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "nope"))
+    xdg_config = tmp_path / "xdg" / "syncmymoodle" / "config.toml"
+    xdg_config.parent.mkdir(parents=True)
+    xdg_config.write_text('[courses]\nprefix_handling = "later"\n', encoding="utf-8")
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "xdg"))
     monkeypatch.chdir(tmp_path)
 
     parser = cli.build_parser()
@@ -809,6 +791,20 @@ def test_config_migrate_drops_nulls_and_restricts_permissions(tmp_path):
     migrated = tomllib.loads(output_path.read_text(encoding="utf-8"))
     assert migrated == {"auth": {"user": "u"}}
     assert output_path.stat().st_mode & 0o777 == 0o600
+
+
+def test_config_migrate_default_input_ignores_cwd_config(tmp_path, monkeypatch, capsys):
+    (tmp_path / "config.json").write_text(
+        json.dumps({"user": "local"}), encoding="utf-8"
+    )
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "empty-xdg"))
+    monkeypatch.chdir(tmp_path)
+
+    with pytest.raises(SystemExit) as exc_info:
+        cli.main(["config", "migrate"])
+
+    assert exc_info.value.code == 2
+    assert "no legacy config.json found" in capsys.readouterr().err
 
 
 def test_config_migrate_rejects_invalid_config(tmp_path, capsys):
