@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import copy
+import difflib
 import logging
 from collections.abc import Mapping
 from dataclasses import dataclass, field
@@ -13,6 +14,44 @@ CliValueKind: TypeAlias = Literal["scalar", "csv", "flag"]
 
 logger = logging.getLogger(__name__)
 UPDATE_FILES_CONFLICT_OPTIONS = ("rename", "keep", "overwrite")
+KEYRING_CONFIG_KEYS = ("use_secret_service", "secret_service_store_totp_secret")
+CONFIG_GROUPS = {
+    "auth": (
+        "user",
+        "password",
+        "totp",
+        "totpsecret",
+        "use_secret_service",
+        "secret_service_store_totp_secret",
+    ),
+    "paths": ("basedir", "cookie_file", "chromium_path"),
+    "courses": (
+        "selected_courses",
+        "skip_courses",
+        "only_sync_semester",
+        "course_prefix_handling",
+    ),
+    "downloads": (
+        "exclude_filetypes",
+        "exclude_files",
+        "update_files",
+        "updatefiles",
+        "update_files_conflict",
+    ),
+    "links": ("no_links", "nolinks", "exclude_links", "allowed_domains"),
+    "skip_rules": (
+        "exclude_sections",
+        "skip_sections",
+        "exclude_modules",
+        "skip_modules",
+    ),
+}
+MODULES_CONFIG_GROUP = "modules"
+TOP_LEVEL_MODULE_KEYS = ("assign", "resource", "url", "folder")
+URL_MODULE_KEYS = ("youtube", "opencast", "sciebo", "quiz")
+BOOLEAN_MODULE_KEYS = ("assign", "resource", "folder")
+BOOLEAN_URL_MODULE_KEYS = ("youtube", "opencast", "sciebo")
+LEGACY_QUIZ_MODE_STRINGS = ("true", "yes", "false", "no", "none")
 
 # Default module toggle tree used when the config file does not define one.
 DEFAULT_USED_MODULES: dict[str, Any] = {
@@ -166,6 +205,7 @@ CONFIG_OPTIONS = (
         ("chromium_path",),
         None,
         falsey_uses_default=True,
+        cli=CliOverride("chromiumpath", "scalar"),
     ),
     ConfigOption(
         "nolinks",
@@ -217,26 +257,31 @@ CONFIG_OPTIONS = (
         "exclude_files",
         ("exclude_files",),
         normalize=as_string_list,
+        cli=CliOverride("excludefiles", "csv"),
     ),
     ConfigOption(
         "exclude_links",
         ("exclude_links",),
         normalize=normalize_pattern_config,
+        cli=CliOverride("excludelinks", "csv"),
     ),
     ConfigOption(
         "allowed_domains",
         ("allowed_domains",),
         normalize=normalize_pattern_config,
+        cli=CliOverride("alloweddomains", "csv"),
     ),
     ConfigOption(
         "exclude_sections",
         ("exclude_sections", "skip_sections"),
         normalize=normalize_pattern_config,
+        cli=CliOverride("excludesections", "csv"),
     ),
     ConfigOption(
         "exclude_modules",
         ("exclude_modules", "skip_modules"),
         normalize=normalize_pattern_config,
+        cli=CliOverride("excludemodules", "csv"),
     ),
     ConfigOption(
         "used_modules",
@@ -247,6 +292,194 @@ CONFIG_OPTIONS = (
     ),
 )
 CONFIG_OPTIONS_BY_FIELD = {option.field_name: option for option in CONFIG_OPTIONS}
+KNOWN_CONFIG_KEYS = frozenset(
+    key for option in CONFIG_OPTIONS for key in option.config_keys
+) | frozenset(KEYRING_CONFIG_KEYS)
+GROUPED_CONFIG_KEYS = frozenset(key for keys in CONFIG_GROUPS.values() for key in keys)
+KNOWN_DISPLAY_CONFIG_KEYS = frozenset(KNOWN_CONFIG_KEYS) | frozenset(
+    list(CONFIG_GROUPS)
+    + [MODULES_CONFIG_GROUP]
+    + [
+        f"{group_name}.{key}"
+        for group_name, keys in CONFIG_GROUPS.items()
+        for key in keys
+    ]
+    + [f"{MODULES_CONFIG_GROUP}.{key}" for key in TOP_LEVEL_MODULE_KEYS if key != "url"]
+    + [f"{MODULES_CONFIG_GROUP}.url.{key}" for key in URL_MODULE_KEYS]
+)
+
+
+class ConfigValidationError(ValueError):
+    pass
+
+
+def validate_config(raw: Mapping[str, Any]) -> None:
+    errors = config_validation_errors(expand_config_groups(raw))
+    if errors:
+        raise ConfigValidationError(
+            "invalid config:\n" + "\n".join(f"- {error}" for error in errors)
+        )
+
+
+def expand_config_groups(raw: Mapping[str, Any]) -> dict[str, Any]:
+    expanded: dict[str, Any] = {}
+    for key, value in raw.items():
+        if key in CONFIG_GROUPS:
+            if isinstance(value, Mapping):
+                for child_key, child_value in value.items():
+                    if child_key in CONFIG_GROUPS[key]:
+                        expanded[str(child_key)] = child_value
+                    else:
+                        expanded[f"{key}.{child_key}"] = child_value
+            else:
+                expanded[key] = value
+        elif key == MODULES_CONFIG_GROUP:
+            expanded["used_modules"] = value
+        else:
+            expanded[key] = value
+    return expanded
+
+
+def group_config_for_toml(raw: Mapping[str, Any]) -> dict[str, Any]:
+    flat = expand_config_groups(raw)
+    grouped: dict[str, Any] = {}
+
+    for group_name, keys in CONFIG_GROUPS.items():
+        group_values = {
+            key: flat[key] for key in keys if key in flat and key in GROUPED_CONFIG_KEYS
+        }
+        if group_values:
+            grouped[group_name] = group_values
+
+    if "used_modules" in flat:
+        grouped[MODULES_CONFIG_GROUP] = flat["used_modules"]
+
+    grouped_keys = set().union(*CONFIG_GROUPS.values())
+    for key, value in flat.items():
+        if key not in grouped_keys and key != "used_modules":
+            grouped[key] = value
+    return grouped
+
+
+def config_validation_errors(raw: Mapping[str, Any]) -> list[str]:
+    errors: list[str] = []
+    unknown_keys = sorted(set(raw) - KNOWN_CONFIG_KEYS)
+    errors.extend(unknown_config_key_error(key) for key in unknown_keys)
+
+    errors.extend(choice_validation_errors(raw))
+    errors.extend(boolean_validation_errors(raw))
+    errors.extend(used_modules_validation_errors(raw.get("used_modules")))
+    return errors
+
+
+def choice_validation_errors(raw: Mapping[str, Any]) -> list[str]:
+    errors: list[str] = []
+    for option in CONFIG_OPTIONS:
+        if not option.choices:
+            continue
+        for key in option.config_keys:
+            if key not in raw:
+                continue
+            value = raw[key]
+            if option.falsey_uses_default and not value:
+                break
+            if value not in option.choices:
+                errors.append(
+                    f"{key} must be one of {format_choices(option.choices)}, "
+                    f"got {value!r}"
+                )
+            break
+    return errors
+
+
+def unknown_config_key_error(key: str) -> str:
+    suggestions = difflib.get_close_matches(
+        key,
+        KNOWN_DISPLAY_CONFIG_KEYS,
+        n=1,
+        cutoff=0.72,
+    )
+    if suggestions:
+        return f"unknown config key {key!r}. Did you mean {suggestions[0]!r}?"
+    return f"unknown config key {key!r}"
+
+
+def boolean_validation_errors(raw: Mapping[str, Any]) -> list[str]:
+    errors: list[str] = []
+    for option in CONFIG_OPTIONS:
+        if option.normalize is bool:
+            for key in option.config_keys:
+                if key in raw:
+                    errors.extend(validate_boolean_value(key, raw[key]))
+    for key in KEYRING_CONFIG_KEYS:
+        if key in raw:
+            errors.extend(validate_boolean_value(key, raw[key]))
+    return errors
+
+
+def validate_boolean_value(key: str, value: Any) -> list[str]:
+    if isinstance(value, bool):
+        return []
+    return [f"{key} must be true or false, got {value!r}"]
+
+
+def used_modules_validation_errors(value: Any) -> list[str]:
+    if not value:
+        return []
+    if not isinstance(value, Mapping):
+        return [f"used_modules must be a table/object, got {type(value).__name__}"]
+
+    errors: list[str] = []
+    unknown_modules = sorted(set(value) - set(TOP_LEVEL_MODULE_KEYS))
+    if unknown_modules:
+        errors.append(
+            f"used_modules contains unknown key(s): {', '.join(unknown_modules)}"
+        )
+
+    for key in BOOLEAN_MODULE_KEYS:
+        if key in value:
+            errors.extend(validate_boolean_value(f"used_modules.{key}", value[key]))
+
+    if "url" in value:
+        errors.extend(url_modules_validation_errors(value["url"]))
+    return errors
+
+
+def url_modules_validation_errors(value: Any) -> list[str]:
+    if not isinstance(value, Mapping):
+        return [f"used_modules.url must be a table/object, got {type(value).__name__}"]
+
+    errors: list[str] = []
+    unknown_modules = sorted(set(value) - set(URL_MODULE_KEYS))
+    if unknown_modules:
+        errors.append(
+            f"used_modules.url contains unknown key(s): {', '.join(unknown_modules)}"
+        )
+
+    for key in BOOLEAN_URL_MODULE_KEYS:
+        if key in value:
+            errors.extend(validate_boolean_value(f"used_modules.url.{key}", value[key]))
+
+    if "quiz" in value:
+        errors.extend(validate_quiz_value(value["quiz"]))
+    return errors
+
+
+def validate_quiz_value(value: Any) -> list[str]:
+    if isinstance(value, bool):
+        return []
+    if isinstance(value, str):
+        mode = value.strip().lower()
+        if mode in QUIZ_MODES or mode in LEGACY_QUIZ_MODE_STRINGS:
+            return []
+    return [
+        "used_modules.url.quiz must be one of "
+        f"{format_choices(QUIZ_MODES)} or a legacy boolean, got {value!r}"
+    ]
+
+
+def format_choices(choices: tuple[str, ...]) -> str:
+    return ", ".join(repr(choice) for choice in choices)
 
 
 @dataclass
@@ -295,7 +528,7 @@ class Config:
 
     @classmethod
     def from_dict(cls, raw: Mapping[str, Any] | None) -> "Config":
-        raw = dict(raw or {})
+        raw = expand_config_groups(raw or {})
         return cls(
             **{option.field_name: option.value_from(raw) for option in CONFIG_OPTIONS}
         )

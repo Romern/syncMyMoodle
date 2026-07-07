@@ -30,7 +30,8 @@ dependencies = [
   "tqdm>=4.0.0",
   "lxml>=5.0.0",
   "latex2mathml>=3.77.0",
-  "pywin32>=306; platform_system == 'Windows'"
+  "pywin32>=306; platform_system == 'Windows'",
+  "tomli-w>=1.0.0"
 ]
 
 [project.optional-dependencies]

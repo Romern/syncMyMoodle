@@ -1,20 +1,33 @@
 #!/usr/bin/env python3
 
+import copy
 import getpass
 import json
 import logging
 import os
 import sys
+import tomllib
 from argparse import ArgumentParser, Namespace
 from collections.abc import Sequence
 from pathlib import Path
 from types import ModuleType
 from typing import Any, cast
 
+import tomli_w
+
 from syncmymoodle import course_cache, downloader, rwth, sync
 from syncmymoodle import moodle as moodle_api
-from syncmymoodle.config import CONFIG_OPTIONS, CONFIG_OPTIONS_BY_FIELD, Config
-from syncmymoodle.constants import RWTH_MOODLE_STATUS_URL
+from syncmymoodle.config import (
+    CONFIG_OPTIONS,
+    CONFIG_OPTIONS_BY_FIELD,
+    Config,
+    ConfigValidationError,
+    config_validation_errors,
+    expand_config_groups,
+    group_config_for_toml,
+    validate_config,
+)
+from syncmymoodle.constants import QUIZ_MODES, RWTH_MOODLE_STATUS_URL
 from syncmymoodle.context import SyncContext
 
 try:
@@ -26,12 +39,16 @@ except ImportError:
 
 logger = logging.getLogger(__name__)
 ConfigDict = dict[str, Any]
+CONFIG_FILENAMES = ("config.toml", "config.json")
 
 
 def build_parser(keyring_backend: Any = None) -> ArgumentParser:
     parser = ArgumentParser(
         prog="python3 -m syncmymoodle",
-        description="Synchronization client for RWTH Moodle. All optional arguments override those in config.json.",
+        description=(
+            "Synchronization client for RWTH Moodle. All optional arguments "
+            "override those in config.toml/config.json."
+        ),
     )
 
     if keyring_backend:
@@ -87,6 +104,11 @@ def build_parser(keyring_backend: Any = None) -> ArgumentParser:
         help="specify the directory where all files will be synced",
     )
     parser.add_argument(
+        "--chromiumpath",
+        default=None,
+        help="set the path to a Chrome/Chromium/Edge binary for quiz PDF rendering",
+    )
+    parser.add_argument(
         "--courseprefix",
         choices=CONFIG_OPTIONS_BY_FIELD["course_prefix_handling"].choices,
         default=None,
@@ -104,6 +126,37 @@ def build_parser(keyring_backend: Any = None) -> ArgumentParser:
         "--excludefiletypes",
         default=None,
         help='specify whether specific file types should be excluded, comma-separated e.g. "mp4,mkv"',
+    )
+    parser.add_argument(
+        "--excludefiles",
+        default=None,
+        help='exclude specific files using comma-separated patterns e.g. "*.bak,*.tmp"',
+    )
+    parser.add_argument(
+        "--excludelinks",
+        default=None,
+        help="exclude discovered links using comma-separated URL patterns",
+    )
+    parser.add_argument(
+        "--alloweddomains",
+        default=None,
+        help="only keep discovered links on these comma-separated domains",
+    )
+    parser.add_argument(
+        "--excludesections",
+        default=None,
+        help="exclude Moodle sections by comma-separated names, ids or patterns",
+    )
+    parser.add_argument(
+        "--excludemodules",
+        default=None,
+        help="exclude Moodle modules by comma-separated names, ids, types, URLs or patterns",
+    )
+    parser.add_argument(
+        "--quiz",
+        choices=QUIZ_MODES,
+        default=None,
+        help="save quiz review attempts as 'off', 'html', 'pdf', or 'both'",
     )
     parser.add_argument(
         "--updatefiles",
@@ -129,6 +182,41 @@ def build_parser(keyring_backend: Any = None) -> ArgumentParser:
         default=logging.WARNING,
         help="show information useful for debugging",
     )
+
+    subparsers = parser.add_subparsers(dest="command")
+    config_parser = subparsers.add_parser("config", help="manage configuration files")
+    config_subparsers = config_parser.add_subparsers(
+        dest="config_command",
+        required=True,
+    )
+    migrate_parser = config_subparsers.add_parser(
+        "migrate",
+        help="convert a legacy JSON config file to TOML",
+    )
+    migrate_parser.add_argument(
+        "--input",
+        default=None,
+        help="legacy JSON config to migrate; defaults to local config.json, then the XDG config",
+    )
+    migrate_parser.add_argument(
+        "--output",
+        default=None,
+        help="TOML output path; defaults to the input path with a .toml suffix",
+    )
+    migrate_parser.add_argument(
+        "--force",
+        action="store_true",
+        help="overwrite the TOML output file if it already exists",
+    )
+    check_parser = config_subparsers.add_parser(
+        "check",
+        help="validate a configuration file",
+    )
+    check_parser.add_argument(
+        "--config",
+        default=None,
+        help="config file to validate; defaults to discovered config.toml/config.json",
+    )
     return parser
 
 
@@ -137,9 +225,60 @@ def read_json_config(path: Path) -> ConfigDict:
         return cast(ConfigDict, json.load(f))
 
 
-def global_config_path() -> Path:
+def read_toml_config(path: Path) -> ConfigDict:
+    with path.open("rb") as f:
+        return tomllib.load(f)
+
+
+def warn_legacy_json_config(path: Path) -> None:
+    logger.warning(
+        "Loading legacy JSON config %s. TOML config is preferred; run "
+        "`syncmymoodle config migrate --input %s` to convert it.",
+        path,
+        path,
+    )
+
+
+def read_config(path: Path, warn_legacy_json: bool = True) -> ConfigDict:
+    if path.suffix == ".toml":
+        return expand_config_groups(read_toml_config(path))
+    if warn_legacy_json:
+        warn_legacy_json_config(path)
+    return expand_config_groups(read_json_config(path))
+
+
+def global_config_dir() -> Path:
     xdg_config_home = Path(os.environ.get("XDG_CONFIG_HOME", "~/.config")).expanduser()
-    return xdg_config_home / "syncmymoodle" / "config.json"
+    return xdg_config_home / "syncmymoodle"
+
+
+def discover_config_file(directory: Path) -> Path | None:
+    for filename in CONFIG_FILENAMES:
+        path = directory / filename
+        if path.is_file():
+            return path
+    return None
+
+
+def discover_json_migration_input() -> Path | None:
+    local_config = Path("config.json")
+    if local_config.is_file():
+        return local_config
+    global_config = global_config_dir() / "config.json"
+    if global_config.is_file():
+        return global_config
+    return None
+
+
+def discover_config_files() -> list[Path]:
+    return [
+        config_file
+        for config_file in (
+            discover_config_file(global_config_dir()),
+            discover_config_file(Path(".")),
+        )
+        if config_file is not None
+    ]
 
 
 def load_config(args: Namespace, parser: ArgumentParser) -> ConfigDict:
@@ -149,18 +288,104 @@ def load_config(args: Namespace, parser: ArgumentParser) -> ConfigDict:
             # Silently continuing without the explicitly requested file would
             # sync with unintended settings (or crash later); fail fast instead.
             parser.error(f"config file not found: {args.config}")
-        return read_json_config(overwrite_config)
+        try:
+            return read_config(overwrite_config)
+        except ValueError as error:
+            parser.error(str(error))
 
     config: ConfigDict = {}
-    global_config = global_config_path()
-    if global_config.is_file():
-        config.update(read_json_config(global_config))
-
-    local_config = Path("config.json")
-    if local_config.is_file():
-        config.update(read_json_config(local_config))
+    for config_file in discover_config_files():
+        config.update(read_config(config_file))
 
     return config
+
+
+def migrate_json_config(
+    input_path: Path,
+    output_path: Path,
+    force: bool = False,
+) -> Path:
+    if not input_path.is_file():
+        msg = f"config file not found: {input_path}"
+        raise FileNotFoundError(msg)
+    if input_path.suffix != ".json":
+        msg = f"migration input must be a JSON config file: {input_path}"
+        raise ValueError(msg)
+    if output_path.exists() and not force:
+        msg = f"TOML config already exists: {output_path}; use --force to overwrite"
+        raise FileExistsError(msg)
+
+    config = group_config_for_toml(read_config(input_path, warn_legacy_json=False))
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path.write_text(tomli_w.dumps(config), encoding="utf-8")
+    return output_path
+
+
+def migrate_config_command(args: Namespace, parser: ArgumentParser) -> None:
+    input_path = Path(args.input) if args.input else discover_json_migration_input()
+    if input_path is None:
+        parser.error(
+            "no legacy config.json found; pass --input to choose a file explicitly"
+        )
+
+    output_path = Path(args.output) if args.output else input_path.with_suffix(".toml")
+    try:
+        migrated_path = migrate_json_config(input_path, output_path, args.force)
+    except (FileNotFoundError, FileExistsError, ValueError) as error:
+        parser.error(str(error))
+    print(f"Wrote TOML config to {migrated_path}")
+
+
+def check_config_command(args: Namespace, parser: ArgumentParser) -> None:
+    config_paths = config_check_paths(args, parser)
+    try:
+        config: ConfigDict = {}
+        for config_path in config_paths:
+            config.update(read_config(config_path))
+    except OSError as error:
+        parser.error(str(error))
+    except ValueError as error:
+        parser.error(f"could not parse config: {error}")
+
+    errors = config_validation_errors(config)
+    if errors:
+        print(
+            f"Config is invalid: {format_config_paths(config_paths)}", file=sys.stderr
+        )
+        for validation_error in errors:
+            print(f"- {validation_error}", file=sys.stderr)
+        raise SystemExit(1)
+
+    print(f"Config is valid: {format_config_paths(config_paths)}")
+
+
+def config_check_paths(args: Namespace, parser: ArgumentParser) -> list[Path]:
+    if args.config:
+        config_path = Path(args.config)
+        if not config_path.is_file():
+            parser.error(f"config file not found: {args.config}")
+        return [config_path]
+
+    config_paths = discover_config_files()
+    if not config_paths:
+        parser.error(
+            "no config.toml or config.json found; pass --config to choose a file"
+        )
+    return config_paths
+
+
+def format_config_paths(paths: list[Path]) -> str:
+    return ", ".join(str(path) for path in paths)
+
+
+def run_config_command(args: Namespace, parser: ArgumentParser) -> None:
+    if args.config_command == "migrate":
+        migrate_config_command(args, parser)
+        return
+    if args.config_command == "check":
+        check_config_command(args, parser)
+        return
+    parser.error(f"unknown config command: {args.config_command}")
 
 
 def apply_cli_overrides(
@@ -185,6 +410,28 @@ def apply_cli_overrides(
         config["use_secret_service"] = True
     if keyring_backend and getattr(args, "secretservicetotpsecret", False):
         config["secret_service_store_totp_secret"] = True
+    apply_quiz_cli_override(config, args)
+
+
+def apply_quiz_cli_override(config: ConfigDict, args: Namespace) -> None:
+    if args.quiz is None:
+        return
+
+    used_modules = config.get("used_modules")
+    if isinstance(used_modules, dict):
+        used_modules = copy.deepcopy(used_modules)
+    else:
+        used_modules = {}
+
+    url_modules = used_modules.get("url")
+    if isinstance(url_modules, dict):
+        url_modules = copy.deepcopy(url_modules)
+    else:
+        url_modules = {}
+
+    url_modules["quiz"] = args.quiz
+    used_modules["url"] = url_modules
+    config["used_modules"] = used_modules
 
 
 def validate_keyring_config(config: ConfigDict, args: Namespace) -> None:
@@ -264,6 +511,13 @@ def validate_required_credentials(config: ConfigDict) -> None:
         sys.exit(1)
 
 
+def validate_config_or_error(config: ConfigDict, parser: ArgumentParser) -> None:
+    try:
+        validate_config(config)
+    except ConfigValidationError as error:
+        parser.error(str(error))
+
+
 def config_from_args(
     args: Namespace,
     parser: ArgumentParser,
@@ -271,6 +525,7 @@ def config_from_args(
 ) -> Config:
     config = load_config(args, parser)
     apply_cli_overrides(config, args, keyring_backend)
+    validate_config_or_error(config, parser)
     resolve_keyring_credentials(config, args, keyring_backend)
     validate_required_credentials(config)
     return Config.from_dict(config)
@@ -280,6 +535,9 @@ def main(argv: Sequence[str] | None = None) -> None:
     parser = build_parser(keyring)
     args = parser.parse_args(argv)
     logging.basicConfig(level=args.loglevel)
+    if args.command == "config":
+        run_config_command(args, parser)
+        return
     run(SyncContext(config=config_from_args(args, parser, keyring)))
 
 

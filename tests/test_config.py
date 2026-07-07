@@ -1,10 +1,20 @@
 import json
+import logging
 import sys
+import tomllib
 from dataclasses import fields
+from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
+
 import syncmymoodle.cli as cli
-from syncmymoodle.config import CONFIG_OPTIONS, Config
+from syncmymoodle.config import (
+    CONFIG_OPTIONS,
+    Config,
+    ConfigValidationError,
+    validate_config,
+)
 
 
 def test_config_options_cover_typed_config_fields():
@@ -25,6 +35,7 @@ def test_config_options_record_existing_cli_overrides():
         "totpsecret": "totpsecret",
         "cookiefile": "cookie_file",
         "basedir": "basedir",
+        "chromiumpath": "chromium_path",
         "courseprefix": "course_prefix_handling",
         "nolinks": "nolinks",
         "updatefiles": "updatefiles",
@@ -33,7 +44,114 @@ def test_config_options_record_existing_cli_overrides():
         "skipcourses": "skip_courses",
         "semester": "only_sync_semester",
         "excludefiletypes": "exclude_filetypes",
+        "excludefiles": "exclude_files",
+        "excludelinks": "exclude_links",
+        "alloweddomains": "allowed_domains",
+        "excludesections": "exclude_sections",
+        "excludemodules": "exclude_modules",
     }
+
+
+def test_config_validation_accepts_current_and_legacy_keys():
+    validate_config(
+        {
+            "no_links": True,
+            "update_files": True,
+            "skip_sections": ["Hidden*"],
+            "skip_modules": ["Skip Module"],
+            "use_secret_service": False,
+            "secret_service_store_totp_secret": False,
+            "used_modules": {
+                "assign": True,
+                "resource": False,
+                "folder": True,
+                "url": {
+                    "youtube": True,
+                    "opencast": False,
+                    "sciebo": True,
+                    "quiz": "html",
+                },
+            },
+        }
+    )
+
+
+def test_config_validation_accepts_grouped_toml_keys():
+    validate_config(
+        {
+            "auth": {"user": "user", "password": "password"},
+            "paths": {"basedir": "/tmp/moodle"},
+            "courses": {"course_prefix_handling": "suffix"},
+            "downloads": {"update_files": True},
+            "links": {"no_links": False, "allowed_domains": ["moodle.rwth-aachen.de"]},
+            "skip_rules": {"exclude_sections": ["General"]},
+            "modules": {"folder": True, "url": {"quiz": "html"}},
+        }
+    )
+
+
+def test_config_validation_rejects_unknown_keys():
+    with pytest.raises(ConfigValidationError, match="unknown config key"):
+        validate_config({"baseddir": "/tmp/moodle"})
+
+
+def test_config_validation_suggests_similar_keys():
+    with pytest.raises(ConfigValidationError) as exc_info:
+        validate_config({"paths": {"baseidr": "/tmp/moodle"}})
+
+    assert "Did you mean 'paths.basedir'?" in str(exc_info.value)
+
+
+def test_config_validation_rejects_invalid_choices():
+    with pytest.raises(ConfigValidationError) as exc_info:
+        validate_config(
+            {
+                "course_prefix_handling": "later",
+                "update_files_conflict": "delete",
+                "used_modules": {"url": {"quiz": "screenshots"}},
+            }
+        )
+
+    message = str(exc_info.value)
+    assert "course_prefix_handling must be one of" in message
+    assert "update_files_conflict must be one of" in message
+    assert "used_modules.url.quiz must be one of" in message
+
+
+def test_config_validation_rejects_non_boolean_toggles():
+    with pytest.raises(ConfigValidationError) as exc_info:
+        validate_config(
+            {
+                "no_links": "false",
+                "use_secret_service": "yes",
+                "used_modules": {
+                    "folder": "true",
+                    "url": {"youtube": "false"},
+                },
+            }
+        )
+
+    message = str(exc_info.value)
+    assert "no_links must be true or false" in message
+    assert "use_secret_service must be true or false" in message
+    assert "used_modules.folder must be true or false" in message
+    assert "used_modules.url.youtube must be true or false" in message
+
+
+def test_config_validation_rejects_unknown_module_keys():
+    with pytest.raises(ConfigValidationError) as exc_info:
+        validate_config(
+            {
+                "used_modules": {
+                    "page": True,
+                    "url": {"vimeo": True},
+                }
+            }
+        )
+
+    message = str(exc_info.value)
+    assert "used_modules contains unknown key(s): page" in message
+    assert "used_modules.url contains unknown key(s): vimeo" in message
 
 
 def test_defaults_applied_for_empty_config():
@@ -141,6 +259,16 @@ def test_from_dict_accepts_none():
     assert cfg.basedir == "./"
 
 
+def test_toml_example_is_valid():
+    raw = tomllib.loads(Path("config.toml.example").read_text(encoding="utf-8"))
+    validate_config(raw)
+    cfg = Config.from_dict(raw)
+    assert cfg.basedir == "./"
+    assert cfg.course_prefix_handling == "suffix"
+    assert cfg.updatefiles is True
+    assert cfg.quiz_mode == "html"
+
+
 def test_filter_values_are_normalized():
     cfg = Config.from_dict(
         {
@@ -192,6 +320,147 @@ def test_cli_loads_global_then_local_config(tmp_path, monkeypatch):
     assert config["basedir"] == "/local"
 
 
+def test_cli_loads_toml_configs_before_legacy_json(tmp_path, monkeypatch):
+    xdg_config_dir = tmp_path / "xdg" / "syncmymoodle"
+    xdg_config_dir.mkdir(parents=True)
+    (xdg_config_dir / "config.json").write_text(
+        json.dumps({"user": "global-json", "password": "json-password"}),
+        encoding="utf-8",
+    )
+    (xdg_config_dir / "config.toml").write_text(
+        'user = "global-toml"\npassword = "toml-password"\ntotp = "global-totp"\n',
+        encoding="utf-8",
+    )
+    (tmp_path / "config.json").write_text(
+        json.dumps({"user": "local-json", "basedir": "/json"}),
+        encoding="utf-8",
+    )
+    (tmp_path / "config.toml").write_text(
+        'user = "local-toml"\nbasedir = "/toml"\n',
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "xdg"))
+    monkeypatch.chdir(tmp_path)
+
+    parser = cli.build_parser()
+    args = parser.parse_args([])
+
+    config = cli.load_config(args, parser)
+
+    assert config == {
+        "user": "local-toml",
+        "password": "toml-password",
+        "totp": "global-totp",
+        "basedir": "/toml",
+    }
+
+
+def test_cli_loads_explicit_toml_config(tmp_path):
+    config_path = tmp_path / "sync.toml"
+    config_path.write_text(
+        """
+user = "toml-user"
+password = "toml-password"
+totp = "toml-totp"
+
+[used_modules.url]
+quiz = "pdf"
+""",
+        encoding="utf-8",
+    )
+
+    parser = cli.build_parser()
+    args = parser.parse_args(["--config", str(config_path)])
+
+    assert cli.load_config(args, parser) == {
+        "user": "toml-user",
+        "password": "toml-password",
+        "totp": "toml-totp",
+        "used_modules": {"url": {"quiz": "pdf"}},
+    }
+
+
+def test_cli_loads_grouped_toml_config(tmp_path):
+    config_path = tmp_path / "sync.toml"
+    config_path.write_text(
+        """
+[auth]
+user = "toml-user"
+password = "toml-password"
+totp = "toml-totp"
+
+[paths]
+basedir = "/tmp/moodle"
+
+[courses]
+course_prefix_handling = "suffix"
+
+[downloads]
+update_files = true
+
+[links]
+allowed_domains = ["moodle.rwth-aachen.de"]
+
+[skip_rules]
+exclude_sections = ["General"]
+
+[modules.url]
+quiz = "pdf"
+""",
+        encoding="utf-8",
+    )
+
+    parser = cli.build_parser()
+    args = parser.parse_args(["--config", str(config_path)])
+
+    assert cli.load_config(args, parser) == {
+        "user": "toml-user",
+        "password": "toml-password",
+        "totp": "toml-totp",
+        "basedir": "/tmp/moodle",
+        "course_prefix_handling": "suffix",
+        "update_files": True,
+        "allowed_domains": ["moodle.rwth-aachen.de"],
+        "exclude_sections": ["General"],
+        "used_modules": {"url": {"quiz": "pdf"}},
+    }
+
+
+def test_cli_still_loads_explicit_extensionless_json_config(tmp_path, caplog):
+    config_path = tmp_path / "syncmymoodle-config"
+    config_path.write_text(
+        json.dumps({"user": "json-user", "password": "json-password"}),
+        encoding="utf-8",
+    )
+    caplog.set_level(logging.WARNING, logger="syncmymoodle.cli")
+
+    parser = cli.build_parser()
+    args = parser.parse_args(["--config", str(config_path)])
+
+    assert cli.load_config(args, parser) == {
+        "user": "json-user",
+        "password": "json-password",
+    }
+    assert "legacy JSON config" in caplog.text
+
+
+def test_cli_warns_when_loading_legacy_json_config(tmp_path, monkeypatch, caplog):
+    (tmp_path / "config.json").write_text(
+        json.dumps({"user": "json-user"}),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "xdg"))
+    monkeypatch.chdir(tmp_path)
+    caplog.set_level(logging.WARNING, logger="syncmymoodle.cli")
+
+    parser = cli.build_parser()
+    args = parser.parse_args([])
+
+    assert cli.load_config(args, parser) == {"user": "json-user"}
+    assert "legacy JSON config" in caplog.text
+    assert "syncmymoodle config migrate" in caplog.text
+
+
 def test_cli_explicit_config_skips_discovery(tmp_path, monkeypatch):
     xdg_config = tmp_path / "xdg" / "syncmymoodle" / "config.json"
     xdg_config.parent.mkdir(parents=True)
@@ -223,6 +492,114 @@ def test_cli_explicit_config_skips_discovery(tmp_path, monkeypatch):
     }
 
 
+def test_config_migrate_command_writes_toml(tmp_path, capsys):
+    input_path = tmp_path / "config.json"
+    output_path = tmp_path / "config.toml"
+    input_path.write_text(
+        json.dumps(
+            {
+                "user": "json-user",
+                "password": "json-password",
+                "totp": "json-totp",
+                "selected_courses": ["course-a", "course-b"],
+                "used_modules": {"url": {"quiz": "html"}},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    cli.main(
+        [
+            "config",
+            "migrate",
+            "--input",
+            str(input_path),
+            "--output",
+            str(output_path),
+        ]
+    )
+
+    migrated = tomllib.loads(output_path.read_text(encoding="utf-8"))
+    assert migrated == {
+        "auth": {
+            "user": "json-user",
+            "password": "json-password",
+            "totp": "json-totp",
+        },
+        "courses": {"selected_courses": ["course-a", "course-b"]},
+        "modules": {"url": {"quiz": "html"}},
+    }
+    assert str(output_path) in capsys.readouterr().out
+
+
+def test_config_check_command_reports_valid_config(tmp_path, capsys):
+    config_path = tmp_path / "config.toml"
+    config_path.write_text(
+        """
+[auth]
+user = "user"
+password = "password"
+totp = "totp"
+
+[courses]
+course_prefix_handling = "suffix"
+""",
+        encoding="utf-8",
+    )
+
+    cli.main(["config", "check", "--config", str(config_path)])
+
+    captured = capsys.readouterr()
+    assert f"Config is valid: {config_path}" in captured.out
+    assert captured.err == ""
+
+
+def test_config_check_command_reports_validation_errors(tmp_path, capsys):
+    config_path = tmp_path / "config.toml"
+    config_path.write_text(
+        """
+[paths]
+baseidr = "/tmp/moodle"
+
+[courses]
+course_prefix_handling = "later"
+""",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(SystemExit) as exc_info:
+        cli.main(["config", "check", "--config", str(config_path)])
+
+    captured = capsys.readouterr()
+    assert exc_info.value.code == 1
+    assert captured.out == ""
+    assert f"Config is invalid: {config_path}" in captured.err
+    assert "- unknown config key 'paths.baseidr'." in captured.err
+    assert "Did you mean 'paths.basedir'?" in captured.err
+    assert "- course_prefix_handling must be one of" in captured.err
+
+
+def test_cli_rejects_invalid_config_before_sync(tmp_path, capsys):
+    config_path = tmp_path / "config.toml"
+    config_path.write_text(
+        """
+user = "user"
+password = "password"
+totp = "totp"
+course_prefix_handling = "later"
+""",
+        encoding="utf-8",
+    )
+    parser = cli.build_parser()
+    args = parser.parse_args(["--config", str(config_path)])
+
+    with pytest.raises(SystemExit) as exc_info:
+        cli.config_from_args(args, parser)
+
+    assert exc_info.value.code == 2
+    assert "course_prefix_handling must be one of" in capsys.readouterr().err
+
+
 def test_cli_overrides_are_applied_after_config():
     fake_keyring = object()
     parser = cli.build_parser(fake_keyring)
@@ -246,6 +623,8 @@ def test_cli_overrides_are_applied_after_config():
             "25ws,26ss",
             "--basedir",
             "/tmp/moodle",
+            "--chromiumpath",
+            "/usr/bin/chromium",
             "--courseprefix",
             "suffix",
             "--secretservice",
@@ -253,6 +632,18 @@ def test_cli_overrides_are_applied_after_config():
             "--nolinks",
             "--excludefiletypes",
             "pdf,mp4",
+            "--excludefiles",
+            "*.bak,*.tmp",
+            "--excludelinks",
+            "*calendar*,*hinge*",
+            "--alloweddomains",
+            "moodle.rwth-aachen.de,rwth-aachen.sciebo.de",
+            "--excludesections",
+            "General,Week 1",
+            "--excludemodules",
+            "Quiz*,resource",
+            "--quiz",
+            "pdf",
             "--updatefiles",
             "--updatefilesconflict",
             "keep",
@@ -262,6 +653,10 @@ def test_cli_overrides_are_applied_after_config():
         "user": "config-user",
         "password": "config-password",
         "totp": "config-totp",
+        "used_modules": {
+            "folder": False,
+            "url": {"opencast": True, "quiz": "off"},
+        },
     }
 
     cli.apply_cli_overrides(config, args, fake_keyring)
@@ -276,11 +671,21 @@ def test_cli_overrides_are_applied_after_config():
         "skip_courses": ["course-c", "course-d"],
         "only_sync_semester": ["25ws", "26ss"],
         "basedir": "/tmp/moodle",
+        "chromium_path": "/usr/bin/chromium",
         "course_prefix_handling": "suffix",
         "use_secret_service": True,
         "secret_service_store_totp_secret": True,
         "nolinks": True,
         "exclude_filetypes": ["pdf", "mp4"],
+        "exclude_files": ["*.bak", "*.tmp"],
+        "exclude_links": ["*calendar*", "*hinge*"],
+        "allowed_domains": ["moodle.rwth-aachen.de", "rwth-aachen.sciebo.de"],
+        "exclude_sections": ["General", "Week 1"],
+        "exclude_modules": ["Quiz*", "resource"],
+        "used_modules": {
+            "folder": False,
+            "url": {"opencast": True, "quiz": "pdf"},
+        },
         "updatefiles": True,
         "update_files_conflict": "keep",
     }

@@ -106,14 +106,25 @@ usage: python3 -m syncmymoodle [-h] [--secretservice] [--secretservicetotpsecret
                                [--config CONFIG] [--cookiefile COOKIEFILE]
                                [--courses COURSES] [--skipcourses SKIPCOURSES]
                                [--semester SEMESTER] [--basedir BASEDIR]
+                               [--chromiumpath CHROMIUMPATH]
                                [--courseprefix {keep,remove,suffix}] [--nolinks]
                                [--excludefiletypes EXCLUDEFILETYPES]
-                               [--updatefiles]
+                               [--excludefiles EXCLUDEFILES]
+                               [--excludelinks EXCLUDELINKS]
+                               [--alloweddomains ALLOWEDDOMAINS]
+                               [--excludesections EXCLUDESECTIONS]
+                               [--excludemodules EXCLUDEMODULES]
+                               [--quiz {off,html,pdf,both}] [--updatefiles]
                                [--updatefilesconflict {rename,keep,overwrite}]
                                [-v]
+                               {config} ...
 
 Synchronization client for RWTH Moodle. All optional arguments override those
-in config.json.
+in config.toml/config.json.
+
+positional arguments:
+  {config}
+    config              manage configuration files
 
 options:
   -h, --help            show this help message and exit
@@ -141,6 +152,9 @@ options:
                         separated. Defaults to all semesters, if no additional
                         restrictions e.g. courses are defined.
   --basedir BASEDIR     specify the directory where all files will be synced
+  --chromiumpath CHROMIUMPATH
+                        set the path to a Chrome/Chromium/Edge binary for quiz
+                        PDF rendering
   --courseprefix {keep,remove,suffix}
                         handle leading two-character course prefixes in local
                         folder names: 'keep' (default), 'remove', or 'suffix'
@@ -150,6 +164,24 @@ options:
   --excludefiletypes EXCLUDEFILETYPES
                         specify whether specific file types should be
                         excluded, comma-separated e.g. "mp4,mkv"
+  --excludefiles EXCLUDEFILES
+                        exclude specific files using comma-separated patterns
+                        e.g. "*.bak,*.tmp"
+  --excludelinks EXCLUDELINKS
+                        exclude discovered links using comma-separated URL
+                        patterns
+  --alloweddomains ALLOWEDDOMAINS
+                        only keep discovered links on these comma-separated
+                        domains
+  --excludesections EXCLUDESECTIONS
+                        exclude Moodle sections by comma-separated names, ids
+                        or patterns
+  --excludemodules EXCLUDEMODULES
+                        exclude Moodle modules by comma-separated names, ids,
+                        types, URLs or patterns
+  --quiz {off,html,pdf,both}
+                        save quiz review attempts as 'off', 'html', 'pdf', or
+                        'both'
   --updatefiles         define whether modified files with the same name/path
                         should be redownloaded
   --updatefilesconflict {rename,keep,overwrite}
@@ -160,13 +192,32 @@ options:
   -v, --verbose         show information useful for debugging
 ```
 
+Configuration helpers are available as subcommands:
+
+```bash
+syncmymoodle config check --config config.toml
+syncmymoodle config migrate --input config.json
+```
+
+`config check` validates a configuration file and reports invalid values or
+likely misspelled keys. `config migrate` converts a legacy JSON configuration
+file to TOML. Use `--output` to choose a target path and `--force` to overwrite
+an existing TOML file.
+
 ### Configuration file
 
-Copy `config.json.example` or the following text (minus the comments) to `config.json` in your current directory
-or to `~/.config/syncmymoodle/config.json` if you wish to configure `syncmymoodle` user-wide.
+Copy `config.toml.example` to `config.toml` in your current directory or to
+`~/.config/syncmymoodle/config.toml` if you wish to configure `syncmymoodle`
+user-wide. The TOML example groups related settings into tables such as
+`[auth]`, `[paths]`, `[courses]`, `[downloads]`, `[links]`, `[skip_rules]` and
+`[modules]`.
 
-Here's an overview of the file with some additional remarks as to what each
-configuration does:
+Legacy `config.json` files are still supported, but `syncmymoodle` will warn
+when loading one and point to `syncmymoodle config migrate`.
+
+Here's an overview of the available options with some additional remarks as to
+what each configuration does. The JSON-like shape below mirrors the same
+individual keys accepted in TOML tables and legacy JSON configs:
 
 ```js
 {

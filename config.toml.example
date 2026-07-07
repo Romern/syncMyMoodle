@@ -1,0 +1,44 @@
+[auth]
+user = ""
+password = ""
+totp = ""
+totpsecret = ""
+use_secret_service = false
+secret_service_store_totp_secret = false
+
+[paths]
+basedir = "./"
+cookie_file = "./session"
+chromium_path = ""
+
+[courses]
+selected_courses = []
+skip_courses = []
+only_sync_semester = []
+course_prefix_handling = "suffix"
+
+[downloads]
+update_files = true
+update_files_conflict = "rename"
+exclude_filetypes = []
+exclude_files = []
+
+[links]
+no_links = false
+exclude_links = []
+allowed_domains = []
+
+[skip_rules]
+exclude_sections = []
+exclude_modules = []
+
+[modules]
+assign = true
+resource = true
+folder = true
+
+[modules.url]
+youtube = true
+opencast = true
+sciebo = true
+quiz = "html"
