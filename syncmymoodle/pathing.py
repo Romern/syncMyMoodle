@@ -1,36 +1,76 @@
+from __future__ import annotations
+
 import hashlib
+import ntpath
+import os
 import urllib.parse
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
+from typing import TYPE_CHECKING
 
 from syncmymoodle.constants import INVALID_CHARS
-from syncmymoodle.node import Node
+
+if TYPE_CHECKING:
+    from syncmymoodle.node import Node
+
+WINDOWS_EXTENDED_PATH_THRESHOLD = 240
+
+
+def is_windows() -> bool:
+    return os.name == "nt"
+
+
+def is_windows_reserved_path_part(path: str) -> bool:
+    isreserved = getattr(ntpath, "isreserved", None)
+    if isreserved is not None:
+        return bool(isreserved(path))
+    return PureWindowsPath(path).is_reserved()
 
 
 def sanitize_path_part(path: str) -> str:
     path = urllib.parse.unquote(path)
-    path = "".join([s for s in path if s not in INVALID_CHARS])
-    while path and path[-1] == " ":
-        path = path[:-1]
-    while path and path[0] == " ":
-        path = path[1:]
+    path = "".join(
+        character
+        for character in path
+        if character not in INVALID_CHARS and ord(character) >= 32
+    )
+    path = path.lstrip(" ").rstrip(" .")
 
     # Folders downloaded from Moodle display amp; in places where an
     # ampersand should be displayed instead. In the web UI, however, the
     # ampersand is shown correctly, and we're trying to emulate that here.
     path = path.replace("amp;", "&")
+    if path in {"", ".", ".."}:
+        path = "_"
+    if is_windows_reserved_path_part(path):
+        path = f"_{path}"
 
     return path
+
+
+def windows_extended_length_path(path: str) -> str:
+    if path.startswith("\\\\?\\"):
+        return path
+    if path.startswith("\\\\"):
+        return "\\\\?\\UNC\\" + path[2:]
+    return "\\\\?\\" + path
+
+
+def with_windows_extended_length_prefix(path: Path, *, force: bool = False) -> Path:
+    if not is_windows():
+        return path
+    absolute_path = os.path.abspath(os.fspath(path))
+    if not force and len(absolute_path) < WINDOWS_EXTENDED_PATH_THRESHOLD:
+        return path
+    return Path(windows_extended_length_path(absolute_path))
 
 
 def get_sanitized_node_path(node: Node, basedir: Path) -> Path:
     basedir = basedir.expanduser()
     path_segments = []
-    for part in node.get_path():
-        if part == "":
+    for index, part in enumerate(node.get_path()):
+        if index == 0 and part == "":
             continue
         sanitized = sanitize_path_part(part)
-        if sanitized in {"", ".", ".."}:
-            sanitized = "_"
         path_segments.append(sanitized)
 
     target_path = basedir.joinpath(*path_segments)
@@ -38,7 +78,7 @@ def get_sanitized_node_path(node: Node, basedir: Path) -> Path:
     resolved_target = target_path.resolve(strict=False)
     if not resolved_target.is_relative_to(resolved_basedir):
         raise ValueError(f"Refusing to write outside basedir: {target_path}")
-    return target_path
+    return with_windows_extended_length_prefix(target_path)
 
 
 def make_conflict_path(path: Path) -> Path:
@@ -63,4 +103,4 @@ def make_conflict_path(path: Path) -> Path:
             f"{stem}.syncconflict.{hash_str}.{index}{suffix}"
         )
         index += 1
-    return conflict_path
+    return with_windows_extended_length_prefix(conflict_path)

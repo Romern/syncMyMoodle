@@ -6,6 +6,8 @@ from enum import StrEnum
 from pathlib import Path
 from typing import Any
 
+from syncmymoodle.pathing import sanitize_path_part
+
 NAME_CLASH_ID_UNSET = object()
 
 
@@ -200,8 +202,12 @@ class Node:
         return f"{Path(self.name).name}_{str(self.url).split('/')[-1]}"
 
     @staticmethod
-    def _general_name_clash(left: Node, right: Node) -> bool:
-        if left.name != right.name:
+    def _filesystem_name_key(node: Node) -> str:
+        return sanitize_path_part(node.name).casefold()
+
+    @classmethod
+    def _general_name_clash(cls, left: Node, right: Node) -> bool:
+        if cls._filesystem_name_key(left) != cls._filesystem_name_key(right):
             return False
         if left.url != right.url:
             return True
@@ -211,8 +217,8 @@ class Node:
             and left.name_clash_id != right.name_clash_id
         )
 
-    @staticmethod
-    def _apply_opencast_name_clashes(children: list[Node]) -> list[Node]:
+    @classmethod
+    def _apply_opencast_name_clashes(cls, children: list[Node]) -> list[Node]:
         remaining = children.copy()
         renamed: list[Node] = []
 
@@ -225,7 +231,8 @@ class Node:
             siblings = [
                 sibling
                 for sibling in remaining
-                if sibling.name == child.name and sibling.url != child.url
+                if cls._filesystem_name_key(sibling) == cls._filesystem_name_key(child)
+                and sibling.url != child.url
             ]
             if not siblings:
                 continue

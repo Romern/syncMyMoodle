@@ -29,7 +29,8 @@ dependencies = [
   "yt-dlp>=2021.12.27",
   "tqdm>=4.0.0",
   "lxml>=5.0.0",
-  "latex2mathml>=3.77.0"
+  "latex2mathml>=3.77.0",
+  "pywin32>=306; platform_system == 'Windows'"
 ]
 
 [project.optional-dependencies]

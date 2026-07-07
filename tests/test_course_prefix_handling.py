@@ -3,6 +3,7 @@ import logging
 from syncmymoodle.config import Config
 from syncmymoodle.filters import format_course_name as format_course_name_impl
 from syncmymoodle.node import Node
+from syncmymoodle.pathing import sanitize_path_part
 
 
 def format_course_name(handling, name):
@@ -148,6 +149,58 @@ def test_clashing_files_without_name_clash_id_use_url_for_distinct_names():
     assert "slides.pdf" not in names
 
 
+def test_names_that_sanitize_to_same_windows_path_get_distinct_suffixes():
+    root = Node("", -1, "Root", None)
+    section = root.add_child("General", None, "Section")
+    section.add_child(
+        "CON.pdf",
+        None,
+        "Linked file [application/pdf]",
+        url="https://a.example/con.pdf",
+        name_clash_id=None,
+    )
+    section.add_child(
+        "_CON.pdf",
+        None,
+        "Linked file [application/pdf]",
+        url="https://b.example/con.pdf",
+        name_clash_id=None,
+    )
+
+    root.remove_children_nameclashes()
+
+    materialized_names = [
+        sanitize_path_part(child.name).casefold() for child in section.children
+    ]
+    assert len(set(materialized_names)) == 2
+
+
+def test_case_only_file_name_clashes_get_distinct_suffixes():
+    root = Node("", -1, "Root", None)
+    section = root.add_child("General", None, "Section")
+    section.add_child(
+        "Notes.pdf",
+        None,
+        "Linked file [application/pdf]",
+        url="https://a.example/notes.pdf",
+        name_clash_id=None,
+    )
+    section.add_child(
+        "notes.pdf",
+        None,
+        "Linked file [application/pdf]",
+        url="https://b.example/notes.pdf",
+        name_clash_id=None,
+    )
+
+    root.remove_children_nameclashes()
+
+    materialized_names = [
+        sanitize_path_part(child.name).casefold() for child in section.children
+    ]
+    assert len(set(materialized_names)) == 2
+
+
 def test_opencast_name_clashes_use_uploaded_filename_suffix():
     root = Node("", -1, "Root", None)
     section = root.add_child("General", None, "Section")
@@ -170,3 +223,27 @@ def test_opencast_name_clashes_use_uploaded_filename_suffix():
         "Recording_high.mp4",
         "Recording_low.mp4",
     ]
+
+
+def test_case_only_opencast_name_clashes_use_uploaded_filename_suffix():
+    root = Node("", -1, "Root", None)
+    section = root.add_child("General", None, "Section")
+    section.add_child(
+        "Recording",
+        "episode-a",
+        "Opencast",
+        url="https://video.example.test/opencast/high.mp4",
+    )
+    section.add_child(
+        "recording",
+        "episode-b",
+        "Opencast",
+        url="https://video.example.test/opencast/low.mp4",
+    )
+
+    root.remove_children_nameclashes()
+
+    materialized_names = [
+        sanitize_path_part(child.name).casefold() for child in section.children
+    ]
+    assert len(set(materialized_names)) == 2

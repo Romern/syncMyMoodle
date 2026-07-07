@@ -1,7 +1,7 @@
 import hashlib
 import os
 
-from syncmymoodle import course_cache, downloader
+from syncmymoodle import course_cache, downloader, pathing
 from syncmymoodle.node import Node, RemoteMarkerKind
 from syncmymoodle.storage import write_private_gzip_json
 
@@ -51,6 +51,61 @@ def test_classify_local_file_is_tristate(tmp_path):
     assert classify_local_file(f, None) is FileMatch.UNKNOWN
     assert classify_local_file(f, "") is FileMatch.UNKNOWN
     assert classify_local_file(tmp_path / "nope", sha1(b"x")) is FileMatch.UNKNOWN
+
+
+def test_transfer_plan_applies_windows_prefix_to_appended_temp_paths(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setattr(pathing, "is_windows", lambda: True)
+    monkeypatch.setattr(pathing, "WINDOWS_EXTENDED_PATH_THRESHOLD", 1)
+
+    plan = downloader.prepare_transfer_plan(
+        Node("file.pdf", "id", "Linked file [application/pdf]", None),
+        tmp_path / "file.pdf",
+    )
+
+    assert os.fspath(plan.tmp_path).startswith("\\\\?\\")
+    assert os.fspath(plan.etag_sidecar).startswith("\\\\?\\")
+
+
+def test_youtube_outtmpl_applies_windows_prefix_after_template_suffix(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setattr(pathing, "is_windows", lambda: True)
+    monkeypatch.setattr(pathing, "WINDOWS_EXTENDED_PATH_THRESHOLD", 100_000)
+    captured = {}
+
+    class FakeYoutubeDL:
+        def __init__(self, opts):
+            captured["opts"] = opts
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def download(self, links):
+            captured["links"] = links
+
+    monkeypatch.setattr(downloader.yt_dlp, "YoutubeDL", FakeYoutubeDL)
+    ctx = make_context({"basedir": str(tmp_path)})
+    root = Node("", -1, "Root", None)
+    section = root.add_child("Section", 1, "Section")
+    assert section is not None
+    node = section.add_child(
+        "Video",
+        "video-id",
+        "Youtube",
+        url="https://youtu.be/abcdefghijk",
+    )
+    assert node is not None
+
+    assert downloader.scan_and_download_youtube(ctx, node)
+
+    assert captured["opts"]["outtmpl"].startswith("\\\\?\\")
+    assert "%(title)s-%(id)s.%(ext)s" in captured["opts"]["outtmpl"]
+    assert captured["links"] == ["https://youtu.be/abcdefghijk"]
 
 
 def seed_course_cache(config, *, timemodified, etag, is_downloaded=True):

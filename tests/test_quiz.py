@@ -366,3 +366,24 @@ def test_render_pdf_with_chromium_failure(tmp_path, monkeypatch):
     )
     assert quiz.render_pdf_with_chromium("/fake/chrome", html_path, pdf_path) is False
     assert not pdf_path.exists()
+
+
+def test_download_quiz_applies_long_path_check_after_file_extension(
+    tmp_path, monkeypatch
+):
+    ctx = quiz_context(tmp_path, "html")
+    node = quiz_node()
+    checked_paths = []
+
+    def record_path(path):
+        checked_paths.append(path)
+        return path
+
+    monkeypatch.setattr(
+        quiz.pathing, "with_windows_extended_length_prefix", record_path
+    )
+
+    assert quiz.download_quiz(ctx, node)
+
+    assert any(str(path).endswith("My Quiz, Versuch 1.html") for path in checked_paths)
+    assert any(str(path).endswith("My Quiz, Versuch 1.pdf") for path in checked_paths)

@@ -862,8 +862,8 @@ def download_quiz(ctx: SyncContext, node: Any, log: logging.Logger = logger) -> 
 
     path = pathing.get_sanitized_node_path(node.parent, Path(ctx.config.basedir))
     safe_name = pathing.sanitize_path_part(str(node.name or "quiz")) or "quiz"
-    html_path = path / f"{safe_name}.html"
-    pdf_path = path / f"{safe_name}.pdf"
+    html_path = pathing.with_windows_extended_length_prefix(path / f"{safe_name}.html")
+    pdf_path = pathing.with_windows_extended_length_prefix(path / f"{safe_name}.pdf")
 
     # Idempotency: skip when every wanted artifact is already on disk.
     html_done = html_path.exists() if want_html else True

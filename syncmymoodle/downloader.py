@@ -340,8 +340,12 @@ def conflict_action(
 
 
 def prepare_transfer_plan(node: Node, downloadpath: Path) -> TransferPlan:
-    tmp_path = downloadpath.parent / f".{downloadpath.name}.smmpart"
-    etag_sidecar = tmp_path.with_name(tmp_path.name + ".etag")
+    tmp_path = pathing.with_windows_extended_length_prefix(
+        downloadpath.parent / f".{downloadpath.name}.smmpart"
+    )
+    etag_sidecar = pathing.with_windows_extended_length_prefix(
+        tmp_path.with_name(tmp_path.name + ".etag")
+    )
     plan = TransferPlan(tmp_path=tmp_path, etag_sidecar=etag_sidecar, headers={})
 
     if tmp_path.exists():
@@ -612,8 +616,12 @@ def scan_and_download_youtube(
     if path.exists():
         if any(link[-YOUTUBE_ID_LENGTH:] in f.name for f in path.iterdir()):
             return False
+    outtmpl = pathing.with_windows_extended_length_prefix(
+        path / "%(title)s-%(id)s.%(ext)s",
+        force=True,
+    )
     ydl_opts = {
-        "outtmpl": "{}/%(title)s-%(id)s.%(ext)s".format(path),
+        "outtmpl": os.fspath(outtmpl),
         "ignoreerrors": True,
         "nooverwrites": True,
         "retries": 15,

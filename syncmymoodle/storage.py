@@ -1,4 +1,5 @@
 import gzip
+import importlib
 import json
 import logging
 import os
@@ -11,19 +12,70 @@ import requests
 logger = logging.getLogger(__name__)
 
 
+def is_windows() -> bool:
+    return os.name == "nt"
+
+
+def restrict_private_file_windows(path: Path) -> None:
+    win32api: Any = importlib.import_module("win32api")
+    win32con: Any = importlib.import_module("win32con")
+    win32security: Any = importlib.import_module("win32security")
+    ntsecuritycon: Any = importlib.import_module("ntsecuritycon")
+
+    process = win32api.GetCurrentProcess()
+    token = win32security.OpenProcessToken(process, win32con.TOKEN_QUERY)
+    try:
+        user_sid = win32security.GetTokenInformation(token, win32security.TokenUser)[0]
+        access_mask = (
+            ntsecuritycon.FILE_GENERIC_READ
+            | ntsecuritycon.FILE_GENERIC_WRITE
+            | ntsecuritycon.DELETE
+        )
+
+        dacl = win32security.ACL()
+        dacl.AddAccessAllowedAce(win32security.ACL_REVISION, access_mask, user_sid)
+        win32security.SetNamedSecurityInfo(
+            os.path.abspath(path),
+            win32security.SE_FILE_OBJECT,
+            win32security.DACL_SECURITY_INFORMATION
+            | win32security.PROTECTED_DACL_SECURITY_INFORMATION,
+            None,
+            None,
+            dacl,
+            None,
+        )
+    finally:
+        win32api.CloseHandle(token)
+
+
 def harden_private_file(path: Path, description: str) -> bool:
     if not path.exists():
         return True
     if path.is_symlink():
         logger.warning("Refusing to use symlinked %s file: %s", description, path)
         return False
+    chmod_private_best_effort(path, description)
+    return True
+
+
+def chmod_private_best_effort(path: Path, description: str) -> None:
+    if is_windows():
+        try:
+            restrict_private_file_windows(path)
+        except Exception as error:
+            logger.warning(
+                "Could not restrict permissions for %s file on Windows: %s: %s",
+                description,
+                path,
+                error,
+            )
+        return
     try:
         path.chmod(0o600)
     except OSError:
         logger.warning(
             "Could not restrict permissions for %s file: %s", description, path
         )
-    return True
 
 
 def write_private_gzip_json(path: Path, payload: Any) -> None:
@@ -36,14 +88,28 @@ def write_private_gzip_json(path: Path, payload: Any) -> None:
     fd, tmp_name = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
     tmp_path = Path(tmp_name)
     try:
-        os.fchmod(fd, 0o600)
+        if is_windows():
+            chmod_private_best_effort(tmp_path, "temporary private data")
+        elif (fchmod := getattr(os, "fchmod", None)) is not None:
+            try:
+                fchmod(fd, 0o600)
+            except OSError:
+                logger.warning(
+                    "Could not restrict permissions for temporary private file: %s",
+                    tmp_path,
+                )
         with os.fdopen(fd, "wb") as f:
+            fd = -1
             f.write(data)
         os.replace(tmp_path, path)
-        path.chmod(0o600)
+        chmod_private_best_effort(path, "private data")
     finally:
-        if tmp_path.exists():
-            tmp_path.unlink()
+        if fd >= 0:
+            os.close(fd)
+        try:
+            tmp_path.unlink(missing_ok=True)
+        except OSError:
+            logger.warning("Could not remove temporary private file: %s", tmp_path)
 
 
 def read_private_gzip_json(path: Path, description: str) -> Any:
