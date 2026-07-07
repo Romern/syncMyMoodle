@@ -99,7 +99,7 @@ def test_private_gzip_json_roundtrip_uses_private_permissions(tmp_path):
 def test_private_chmod_warns_on_windows(tmp_path, monkeypatch, caplog):
     target = tmp_path / "session"
     target.write_bytes(b"data")
-    monkeypatch.setattr("syncmymoodle.storage.is_windows", lambda: True)
+    monkeypatch.setattr("syncmymoodle.pathing.is_windows", lambda: True)
 
     def missing_pywin32(name):
         raise ImportError(name)
@@ -117,7 +117,7 @@ def test_private_chmod_warns_on_windows(tmp_path, monkeypatch, caplog):
 def test_private_chmod_uses_windows_acl(tmp_path, monkeypatch):
     target = tmp_path / "session"
     target.write_bytes(b"data")
-    monkeypatch.setattr("syncmymoodle.storage.is_windows", lambda: True)
+    monkeypatch.setattr("syncmymoodle.pathing.is_windows", lambda: True)
     calls = {}
 
     class FakeACL:
@@ -183,7 +183,7 @@ def test_private_gzip_json_restricts_temp_file_before_writing_on_windows(
     target = tmp_path / "session"
     restricted_paths = []
 
-    monkeypatch.setattr("syncmymoodle.storage.is_windows", lambda: True)
+    monkeypatch.setattr("syncmymoodle.pathing.is_windows", lambda: True)
     monkeypatch.setattr(
         "syncmymoodle.storage.restrict_private_file_windows",
         lambda path: restricted_paths.append(path),

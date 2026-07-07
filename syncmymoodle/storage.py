@@ -9,11 +9,9 @@ from typing import Any
 
 import requests
 
+from syncmymoodle import pathing
+
 logger = logging.getLogger(__name__)
-
-
-def is_windows() -> bool:
-    return os.name == "nt"
 
 
 def restrict_private_file_windows(path: Path) -> None:
@@ -59,7 +57,7 @@ def harden_private_file(path: Path, description: str) -> bool:
 
 
 def chmod_private_best_effort(path: Path, description: str) -> None:
-    if is_windows():
+    if pathing.is_windows():
         try:
             restrict_private_file_windows(path)
         except Exception as error:
@@ -88,7 +86,7 @@ def write_private_gzip_json(path: Path, payload: Any) -> None:
     fd, tmp_name = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
     tmp_path = Path(tmp_name)
     try:
-        if is_windows():
+        if pathing.is_windows():
             chmod_private_best_effort(tmp_path, "temporary private data")
         elif (fchmod := getattr(os, "fchmod", None)) is not None:
             try:
