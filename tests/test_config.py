@@ -435,6 +435,26 @@ def test_toml_example_is_valid():
     assert cfg.quiz_mode == "html"
 
 
+def test_config_check_accepts_toml_example_suffix(capsys):
+    cli.main(["config", "check", "--config", "config.toml.example"])
+
+    captured = capsys.readouterr()
+    assert "Config is valid: config.toml.example" in captured.out
+    assert captured.err == ""
+
+
+def test_config_parser_uses_content_not_filename(tmp_path):
+    json_named_toml = tmp_path / "config.json"
+    json_named_toml.write_text('[auth]\nuser = "toml-user"\n', encoding="utf-8")
+    toml_named_json = tmp_path / "config.toml"
+    toml_named_json.write_text('{"user": "json-user"}', encoding="utf-8")
+
+    assert cli.read_config_file(json_named_toml) == {"auth.user": "toml-user"}
+    assert cli.read_config_file(toml_named_json, warn_legacy_json=False) == {
+        "auth.user": "json-user"
+    }
+
+
 def test_filter_values_are_normalized():
     cfg = Config.from_dict(
         {
@@ -813,6 +833,28 @@ def test_config_migrate_rejects_invalid_config(tmp_path, capsys):
 
     assert exc_info.value.code == 2
     assert "unknown config key" in capsys.readouterr().err
+    assert not output_path.exists()
+
+
+def test_config_migrate_rejects_toml_input_by_content(tmp_path, capsys):
+    input_path = tmp_path / "config.json"
+    output_path = tmp_path / "config.toml"
+    input_path.write_text('[auth]\nuser = "toml-user"\n', encoding="utf-8")
+
+    with pytest.raises(SystemExit) as exc_info:
+        cli.main(
+            [
+                "config",
+                "migrate",
+                "--input",
+                str(input_path),
+                "--output",
+                str(output_path),
+            ]
+        )
+
+    assert exc_info.value.code == 2
+    assert "legacy JSON config file" in capsys.readouterr().err
     assert not output_path.exists()
 
 

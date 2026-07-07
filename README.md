@@ -113,26 +113,26 @@ usage: python3 -m syncmymoodle [-h] [--config CONFIG] [--version]
                                [--course-prefix-handling {keep,remove,suffix}]
                                [--update-files]
                                [--conflict-handling {rename,keep,overwrite}]
-                               [--dry-run]
+                               [--dry-run] [--allowed-domains ALLOWED_DOMAINS]
+                               [--max-file-size MAX_FILE_SIZE]
+                               [--min-file-size MIN_FILE_SIZE]
                                [--exclude-filetypes EXCLUDE_FILETYPES]
                                [--exclude-files EXCLUDE_FILES]
                                [--exclude-links EXCLUDE_LINKS]
-                               [--allowed-domains ALLOWED_DOMAINS]
                                [--exclude-sections EXCLUDE_SECTIONS]
                                [--exclude-modules EXCLUDE_MODULES]
-                               [--max-file-size MAX_FILE_SIZE]
-                               [--min-file-size MIN_FILE_SIZE]
                                [--no-follow-links] [--no-youtube]
                                [--no-opencast] [--no-sciebo]
                                [--quiz {off,html,pdf,both}] [-v]
                                {config,clean} ...
 
 Synchronization client for RWTH Moodle. All optional arguments override those
-in config.toml/config.json.
+set in a config file.
 
 positional arguments:
-  {config}
+  {config,clean}
     config              manage configuration files
+    clean               clean local sync artifacts
 
 options:
   -h, --help            show this help message and exit
@@ -144,14 +144,11 @@ auth:
   --user USER           set your RWTH Single Sign-On username
   --password PASSWORD   set your RWTH Single Sign-On password
   --totp-serial TOTP_SERIAL
-                        set your RWTH Single Sign-On TOTP provider's serial
-                        number (see https://idm.rwth-
-                        aachen.de/selfservice/MFATokenManager)
+                        set your RWTH Single Sign-On TOTP provider's serial number
+                        (see https://idm.rwth-aachen.de/selfservice/MFATokenManager)
   --totp-secret TOTP_SECRET
-                        (optional) set your RWTH Single Sign-On TOTP provider
-                        Secret
-  --use-keyring         Use system's keyring for storing and retrieving
-                        account credentials
+                        (optional) set your RWTH Single Sign-On TOTP provider Secret
+  --use-keyring         Use system's keyring for storing and retrieving account credentials
   --keyring-store-totp-secret
                         Save TOTP secret in keyring
 
@@ -190,6 +187,13 @@ downloads:
                         any files
 
 filters:
+  --allowed-domains ALLOWED_DOMAINS
+                        only keep discovered links on these comma-separated
+                        domains
+  --max-file-size MAX_FILE_SIZE
+                        skip files larger than this size, e.g. '500M' or '2G'
+  --min-file-size MIN_FILE_SIZE
+                        skip files smaller than this size, e.g. '10K'
   --exclude-filetypes EXCLUDE_FILETYPES
                         specify whether specific file types should be
                         excluded, comma-separated e.g. "mp4,mkv"
@@ -199,19 +203,12 @@ filters:
   --exclude-links EXCLUDE_LINKS
                         exclude discovered links using comma-separated URL
                         patterns
-  --allowed-domains ALLOWED_DOMAINS
-                        only keep discovered links on these comma-separated
-                        domains
   --exclude-sections EXCLUDE_SECTIONS
                         exclude Moodle sections by comma-separated names, ids
                         or patterns
   --exclude-modules EXCLUDE_MODULES
                         exclude Moodle modules by comma-separated names, ids,
                         types, URLs or patterns
-  --max-file-size MAX_FILE_SIZE
-                        skip files larger than this size, e.g. '500M' or '2G'
-  --min-file-size MIN_FILE_SIZE
-                        skip files smaller than this size, e.g. '10K'
 
 links:
   --no-follow-links     do not inspect links found in moodle pages, disabling
@@ -294,15 +291,8 @@ folder = true   # Folders
 quiz = "html"   # Save quiz review attempts: "off", "html" (self-contained snapshot, default), "pdf" (browser-rendered PDF), or "both"
 ```
 
-Legacy `config.json` files are still supported, but `syncmymoodle` will warn
-when loading one and point to `syncmymoodle config migrate`. When a JSON
-config is loaded, its old flat key spellings (e.g. `selected_courses`,
-`updatefiles`, `nolinks`/`no_links`) are converted onto the options above;
-`nolinks = true` becomes `follow_links = false`, and a `used_modules` tree
-keeps its historical semantics (entries omitted from the tree stay disabled,
-while keys omitted from the `[modules]`/`[links]` tables keep their
-defaults). TOML configs must use the current names — a legacy spelling in a
-TOML file is rejected with a hint pointing at the current option.
+Legacy JSON configs are still supported, but `syncmymoodle` will warn when
+loading one, you should use `syncmymoodle config migrate` to convert to TOML.
 
 `prefix_handling` controls local course folder names that start with a
 prefix of exactly two characters in parentheses, followed by a space. For
@@ -345,11 +335,11 @@ syncmymoodle clean conflicts
 syncmymoodle clean caches
 ```
 
-`clean conflicts` removes redundant `.syncconflict.*` files only when their
+`clean conflicts` safely removes duplicate `.syncconflict.*` files when their
 content is identical to the current file or another conflict file. `clean
-caches` is a recovery/debug command, not routine cleanup: it removes
-`.syncmymoodle_cache` metadata files so the next sync has to rebuild them. Most
-users should not need it unless cache metadata appears broken or stale.
+caches` is a recovery/debug command, it removes `.syncmymoodle_cache` metadata
+files so the next sync has to rebuild them. You should not need it unless cache
+metadata appears broken or stale.
 
 Quiz review attempts are saved as self-contained HTML snapshots by default
 (`quiz = "html"` in the `[modules]` table). The snapshot inlines same-origin
@@ -358,14 +348,13 @@ and does not contact Moodle when opened later. Set `quiz` to `"off"` to disable
 quiz snapshots.
 
 PDF rendering is separate and opt-in: set `quiz` to `"pdf"` or `"both"` to
-render snapshots with a locally installed Chrome, Chromium, or Edge browser. This
-uses the browser's built-in headless PDF output, which avoids the old
-`pdfkit`/`wkhtmltopdf` renderer and its security issues, but syncMyMoodle does
-not launch a browser unless you explicitly choose one of the PDF modes. The
-browser is auto-detected on PATH and in the usual macOS/Windows install
-locations, or you can point `browser` in the `[paths]` table at a specific
-binary. When no browser is found, the HTML snapshot is kept as a fallback so
-nothing is lost.
+render snapshots with a locally installed Chrome, Chromium, or Edge browser.
+This uses the browser's built-in headless PDF printing, on the HTML snapshots.
+Snapshots and the browser are configured to prevent data leakage or possible
+security issues. The browser is auto-detected on PATH and in the usual
+macOS/Windows install locations, or you can point `browser` in the `[paths]`
+table at a specific binary. When no browser is found, the HTML snapshot is
+kept as a fallback so nothing is lost.
 
 ### TOTP
 

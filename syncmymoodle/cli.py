@@ -183,25 +183,28 @@ def warn_legacy_json_config(path: Path) -> None:
     )
 
 
+def config_text_looks_like_json(text: str) -> bool:
+    return text.lstrip().startswith("{")
+
+
 def read_config_file(path: Path, warn_legacy_json: bool = True) -> ConfigDict:
     """Parse, canonicalize and validate a single config file.
 
     Raises OSError if the file cannot be read, ValueError if it cannot be
      parsed, and ConfigValidationError if it fails validation.
     """
-    if path.suffix == ".toml":
-        with path.open("rb") as fb:
-            raw: Any = tomllib.load(fb)
-    else:
+    text = path.read_text(encoding="utf-8")
+    if config_text_looks_like_json(text):
         if warn_legacy_json:
             warn_legacy_json_config(path)
-        with path.open() as f:
-            raw = json.load(f)
+        raw: Any = json.loads(text)
         if not isinstance(raw, Mapping):
             raise ValueError(
                 f"config root must be a table/object, got {type(raw).__name__}"
             )
         raw = convert_legacy_config(raw)
+    else:
+        raw = tomllib.loads(text)
     canonical = canonicalize(raw)
     errors = config_validation_errors(canonical)
     if errors:
@@ -283,8 +286,8 @@ def migrate_json_config(
     if not input_path.is_file():
         msg = f"config file not found: {input_path}"
         raise FileNotFoundError(msg)
-    if input_path.suffix != ".json":
-        msg = f"migration input must be a JSON config file: {input_path}"
+    if not config_text_looks_like_json(input_path.read_text(encoding="utf-8")):
+        msg = f"migration input must be a legacy JSON config file: {input_path}"
         raise ValueError(msg)
     if output_path.exists() and not force:
         msg = f"TOML config already exists: {output_path}; use --force to overwrite"
