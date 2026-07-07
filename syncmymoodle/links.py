@@ -94,7 +94,7 @@ def scan_for_links(
                 )
                 # instantly return as it was a direct link
                 return
-            elif not ctx.config.nolinks:
+            elif ctx.config.follow_links:
                 response = ctx.require_session().get(text)
                 scan_html_text_for_links(
                     ctx,
@@ -107,11 +107,11 @@ def scan_for_links(
         except Exception:
             # Maybe the url is down?
             log.exception(f"Error while downloading url {text}")
-    if ctx.config.nolinks:
+    if not ctx.config.follow_links:
         return
 
     # Youtube videos
-    if ctx.config.url_module_enabled("youtube"):
+    if ctx.config.link_source_enabled("youtube"):
         youtube_links = [
             match.group(1)
             # finds youtube.com, youtu.be and embed links
@@ -125,7 +125,7 @@ def scan_for_links(
             )
 
     # OpenCast videos
-    if ctx.config.url_module_enabled("opencast"):
+    if ctx.config.link_source_enabled("opencast"):
         opencast_links = OPENCAST_LINK_RE.findall(text)
         for vid in opencast_links:
             if filters.should_skip_url(ctx.config, vid, "Opencast link", log):
@@ -154,5 +154,5 @@ def scan_for_links(
             )
 
     # https://rwth-aachen.sciebo.de/s/XXX
-    if ctx.config.url_module_enabled("sciebo"):
+    if ctx.config.link_source_enabled("sciebo"):
         sciebo_api.scan_public_shares(ctx, text, parent_node, log)

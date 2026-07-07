@@ -165,7 +165,7 @@ def build_duplicate_section_file_tree():
 
 
 def test_download_streams_chunks_to_disk_and_records_metadata(tmp_path):
-    config = {"basedir": str(tmp_path)}
+    config = {"paths.basedir": str(tmp_path)}
     syncer, file_node = make_run_syncer(config, timemodified=1710000500)
     download_path = node_path(syncer, file_node)
     chunks = [b"%PDF-1.4 first-chunk ", b"second-chunk ", b"third-chunk"]
@@ -192,7 +192,7 @@ def test_download_streams_chunks_to_disk_and_records_metadata(tmp_path):
 
 
 def test_download_is_skipped_for_excluded_filetypes(tmp_path):
-    config = {"basedir": str(tmp_path), "exclude_filetypes": ["pdf"]}
+    config = {"paths.basedir": str(tmp_path), "filters.exclude_filetypes": ["pdf"]}
     syncer, file_node = make_run_syncer(config, timemodified=1710000500)
     download_path = node_path(syncer, file_node)
 
@@ -205,7 +205,7 @@ def test_download_is_skipped_for_excluded_filetypes(tmp_path):
 def test_download_path_is_deduplicated_within_a_run(tmp_path):
     # Two distinct nodes that resolve to the same on-disk path must download
     # only once, exercising the per-run downloaded path guard.
-    config = {"basedir": str(tmp_path)}
+    config = {"paths.basedir": str(tmp_path)}
     syncer = make_context(config)
     syncer.session = FakeSession()
     syncer.session.add(
@@ -236,9 +236,9 @@ def _setup_conflict(tmp_path, conflict_mode):
     original = b"original remote content"
     local_modified = b"locally edited content"
     config = {
-        "basedir": str(tmp_path),
-        "updatefiles": True,
-        "update_files_conflict": conflict_mode,
+        "paths.basedir": str(tmp_path),
+        "downloads.update_files": True,
+        "downloads.update_files_conflict": conflict_mode,
     }
     seed_course_cache(config, timemodified=1710000300, etag=sha1(original))
 
@@ -321,9 +321,9 @@ def test_unchanged_timemodified_skips_download_despite_local_edit(tmp_path):
     # considered unchanged remotely and the local copy is left untouched.
     original = b"original remote content"
     config = {
-        "basedir": str(tmp_path),
-        "updatefiles": True,
-        "update_files_conflict": "rename",
+        "paths.basedir": str(tmp_path),
+        "downloads.update_files": True,
+        "downloads.update_files_conflict": "rename",
     }
     seed_course_cache(config, timemodified=1710000300, etag=sha1(original))
     syncer, file_node = make_run_syncer(config, timemodified=1710000300)
@@ -340,7 +340,7 @@ def test_failed_previous_download_is_retried_not_skipped(tmp_path):
     # The cache records Moodle's timemodified even when the previous download
     # failed (is_downloaded=False). Such an entry must not suppress a retry,
     # otherwise a stale file would be kept forever.
-    config = {"basedir": str(tmp_path), "updatefiles": True}
+    config = {"paths.basedir": str(tmp_path), "downloads.update_files": True}
     seed_course_cache(config, timemodified=1710000300, etag=None, is_downloaded=False)
     syncer, file_node = make_run_syncer(config, timemodified=1710000300)
     download_path = node_path(syncer, file_node)
@@ -362,7 +362,7 @@ def test_failed_previous_download_is_retried_not_skipped(tmp_path):
 def test_successful_previous_download_with_same_timemodified_is_skipped(tmp_path):
     # The complement: a downloaded cache entry with an unchanged timemodified is
     # still skipped without contacting the server.
-    config = {"basedir": str(tmp_path), "updatefiles": True}
+    config = {"paths.basedir": str(tmp_path), "downloads.update_files": True}
     seed_course_cache(config, timemodified=1710000300, etag=None, is_downloaded=True)
     syncer, file_node = make_run_syncer(config, timemodified=1710000300)
     download_path = node_path(syncer, file_node)
@@ -377,7 +377,7 @@ def test_unchanged_linked_file_etag_skips_download(tmp_path):
     # Direct linked files do not have Moodle timemodified metadata. The HEAD
     # ETag discovered while scanning is their remote version marker, so an
     # unchanged ETag must suppress the GET on later runs.
-    config = {"basedir": str(tmp_path), "updatefiles": True}
+    config = {"paths.basedir": str(tmp_path), "downloads.update_files": True}
     etag = '"linked-file-v1"'
     content = b"already downloaded linked file"
     seed_course_cache(config, timemodified=None, etag=etag, is_downloaded=True)
@@ -395,7 +395,7 @@ def test_get_only_etag_304_skips_download(tmp_path):
     # Legacy Opencast/embedded nodes may only have the ETag discovered during
     # the previous GET. If the current scan cannot provide a marker, validate
     # the cached ETag with If-None-Match before re-downloading.
-    config = {"basedir": str(tmp_path), "updatefiles": True}
+    config = {"paths.basedir": str(tmp_path), "downloads.update_files": True}
     etag = '"opencast-v1"'
     content = b"already downloaded video"
     seed_course_cache(config, timemodified=None, etag=etag, is_downloaded=True)
@@ -423,7 +423,7 @@ def test_get_only_etag_same_200_skips_download(tmp_path):
     # Some servers ignore If-None-Match but still return the same ETag on a 200
     # response. Closing that streamed response without reading the body avoids
     # a needless full re-download.
-    config = {"basedir": str(tmp_path), "updatefiles": True}
+    config = {"paths.basedir": str(tmp_path), "downloads.update_files": True}
     etag = '"video-v1"'
     content = b"already downloaded video"
     seed_course_cache(config, timemodified=None, etag=etag, is_downloaded=True)
@@ -447,7 +447,7 @@ def test_get_only_etag_same_200_skips_download(tmp_path):
 
 
 def test_get_only_etag_changed_200_downloads_update(tmp_path):
-    config = {"basedir": str(tmp_path), "updatefiles": True}
+    config = {"paths.basedir": str(tmp_path), "downloads.update_files": True}
     original = b"already downloaded video"
     old_etag = sha1(original)
     new_etag = '"video-v2"'
@@ -481,7 +481,7 @@ def test_unchanged_duplicate_section_file_uses_matching_cache_node(tmp_path):
     # onto the same local directory. Cache lookup must still match the section
     # by its stable id, otherwise the second section can inherit timestamps from
     # the first and re-download unchanged files as false conflicts.
-    config = {"basedir": str(tmp_path), "updatefiles": True}
+    config = {"paths.basedir": str(tmp_path), "downloads.update_files": True}
     content = b"same case study pdf bytes"
 
     cached_root, cached_first, cached_second = build_duplicate_section_file_tree()
@@ -595,10 +595,10 @@ def test_excluded_filetype_existing_file_is_not_touched(tmp_path):
     # Exclusions are honored before any conflict handling, so an excluded file
     # that already exists is never displaced or downloaded.
     config = {
-        "basedir": str(tmp_path),
-        "updatefiles": True,
-        "update_files_conflict": "rename",
-        "exclude_filetypes": ["pdf"],
+        "paths.basedir": str(tmp_path),
+        "downloads.update_files": True,
+        "downloads.update_files_conflict": "rename",
+        "filters.exclude_filetypes": ["pdf"],
     }
     seed_course_cache(config, timemodified=1710000300, etag=sha1(b"original"))
     syncer, file_node = make_run_syncer(config, timemodified=1710000400)
@@ -629,7 +629,7 @@ def _seed_partial(syncer, file_node, body, etag):
 
 
 def test_resume_appends_when_remote_unchanged(tmp_path):
-    config = {"basedir": str(tmp_path)}
+    config = {"paths.basedir": str(tmp_path)}
     syncer, file_node = make_run_syncer(config, timemodified=1710000500)
     download_path = _seed_partial(syncer, file_node, b"HEAD-", '"v1"')
     syncer.session.add(
@@ -651,7 +651,7 @@ def test_resume_appends_when_remote_unchanged(tmp_path):
 def test_resume_discards_partial_when_remote_served_full_content(tmp_path):
     # If-Range honored: the remote changed, so the server sends a 200 with the
     # full new body. The stale partial must be discarded, not appended to.
-    config = {"basedir": str(tmp_path)}
+    config = {"paths.basedir": str(tmp_path)}
     syncer, file_node = make_run_syncer(config, timemodified=1710000500)
     download_path = _seed_partial(syncer, file_node, b"OLD-PARTIAL", '"v1"')
     syncer.session.add(
@@ -673,7 +673,7 @@ def test_resume_aborts_when_server_ignores_if_range(tmp_path):
     # Some servers honor Range but ignore If-Range, returning a 206 tail of a
     # changed file. The mismatched ETag must be detected so we discard the
     # partial and retry fresh next run instead of corrupting the file.
-    config = {"basedir": str(tmp_path)}
+    config = {"paths.basedir": str(tmp_path)}
     syncer, file_node = make_run_syncer(config, timemodified=1710000500)
     download_path = _seed_partial(syncer, file_node, b"OLD-PARTIAL", '"v1"')
     syncer.session.add(
@@ -695,7 +695,7 @@ def test_resume_aborts_when_server_ignores_if_range(tmp_path):
 def test_resume_aborts_when_partial_response_has_no_etag(tmp_path):
     # A 206 response without an ETag cannot prove that the returned tail belongs
     # to the same remote version as the saved partial.
-    config = {"basedir": str(tmp_path)}
+    config = {"paths.basedir": str(tmp_path)}
     syncer, file_node = make_run_syncer(config, timemodified=1710000500)
     download_path = _seed_partial(syncer, file_node, b"OLD-PARTIAL", '"v1"')
     syncer.session.add(
@@ -716,7 +716,7 @@ def test_resume_aborts_when_partial_response_has_no_etag(tmp_path):
 def test_unrecognized_partial_without_sidecar_is_not_resumed(tmp_path):
     # A leftover partial with no etag sidecar cannot be validated, so it is
     # discarded and a fresh full download is performed.
-    config = {"basedir": str(tmp_path)}
+    config = {"paths.basedir": str(tmp_path)}
     syncer, file_node = make_run_syncer(config, timemodified=1710000500)
     download_path = node_path(syncer, file_node)
     download_path.parent.mkdir(parents=True, exist_ok=True)
@@ -783,7 +783,7 @@ GETETAG_V2 = '"67a09e8d7c6b5"'
 
 def test_sciebo_changed_etag_triggers_redownload(tmp_path):
     # Sciebo files have no timemodified, so a changed ETag is the only signal.
-    config = {"basedir": str(tmp_path), "updatefiles": True}
+    config = {"paths.basedir": str(tmp_path), "downloads.update_files": True}
     old = b"old sciebo content"
     download_path = _seed_sciebo_cache(config, sha1(old), old)
     syncer = make_context(config)
@@ -803,7 +803,7 @@ def test_sciebo_changed_etag_triggers_redownload(tmp_path):
 
 
 def test_sciebo_unchanged_etag_skips_download(tmp_path):
-    config = {"basedir": str(tmp_path), "updatefiles": True}
+    config = {"paths.basedir": str(tmp_path), "downloads.update_files": True}
     content = b"sciebo content"
     download_path = _seed_sciebo_cache(config, sha1(content), content)
     syncer = make_context(config)
@@ -820,7 +820,7 @@ def test_sciebo_unchanged_opaque_getetag_skips_without_conflict(tmp_path):
     # which is not a content hash. An unchanged getetag must skip cleanly rather
     # than re-download and move the identical local copy aside as a conflict on
     # every run.
-    config = {"basedir": str(tmp_path), "updatefiles": True}
+    config = {"paths.basedir": str(tmp_path), "downloads.update_files": True}
     content = b"post-quantum notes"
     download_path = _seed_sciebo_cache(config, GETETAG_V1, content)
     syncer = make_context(config)
@@ -836,7 +836,7 @@ def test_sciebo_unchanged_opaque_getetag_skips_without_conflict(tmp_path):
 def test_sciebo_download_records_content_hash(tmp_path):
     # A fresh download stores a sha256 of exactly the bytes we wrote, so later
     # runs can detect local edits even though the ETag is opaque.
-    config = {"basedir": str(tmp_path), "updatefiles": True}
+    config = {"paths.basedir": str(tmp_path), "downloads.update_files": True}
     download_path = _seed_sciebo_cache(config, GETETAG_V1, b"old")
     syncer = make_context(config)
     syncer.session = FakeSession()
@@ -857,7 +857,7 @@ def test_sciebo_download_keeps_propfind_etag_when_get_etag_differs(tmp_path):
     # The next sync discovers Sciebo files through PROPFIND again, so the
     # cached version marker must stay comparable to the PROPFIND value. Some
     # WebDAV downloads return a different GET ETag for the same file.
-    config = {"basedir": str(tmp_path), "updatefiles": True}
+    config = {"paths.basedir": str(tmp_path), "downloads.update_files": True}
     download_path = _seed_sciebo_cache(config, GETETAG_V1, b"old")
     syncer = make_context(config)
     syncer.session = FakeSession()
@@ -884,7 +884,7 @@ def test_sciebo_download_keeps_propfind_etag_when_get_etag_differs(tmp_path):
 def test_sciebo_changed_getetag_without_local_edit_overwrites_cleanly(tmp_path):
     # Remote changed but the user did not touch the local file (it matches the
     # stored content hash): overwrite without a spurious conflict copy.
-    config = {"basedir": str(tmp_path), "updatefiles": True}
+    config = {"paths.basedir": str(tmp_path), "downloads.update_files": True}
     original = b"our downloaded copy"
     download_path = _seed_sciebo_cache(
         config, GETETAG_V1, original, content_hash=sha256(original)
@@ -907,7 +907,7 @@ def test_sciebo_changed_getetag_without_local_edit_overwrites_cleanly(tmp_path):
 def test_sciebo_changed_getetag_with_local_edit_preserves_conflict(tmp_path):
     # Remote changed AND the user edited the local file (it no longer matches the
     # stored content hash): preserve the user's version as a conflict copy.
-    config = {"basedir": str(tmp_path), "updatefiles": True}
+    config = {"paths.basedir": str(tmp_path), "downloads.update_files": True}
     original = b"our downloaded copy"
     download_path = _seed_sciebo_cache(
         config, GETETAG_V1, original, content_hash=sha256(original)
@@ -933,7 +933,7 @@ def test_sciebo_changed_getetag_with_local_edit_preserves_conflict(tmp_path):
 
 
 def test_opaque_etag_is_not_treated_as_local_content_hash(tmp_path):
-    config = {"basedir": str(tmp_path), "updatefiles": True}
+    config = {"paths.basedir": str(tmp_path), "downloads.update_files": True}
     original = b"etag-looking marker is not a content proof"
     old_marker = sha1(original)
     download_path = _seed_sciebo_cache(
@@ -974,7 +974,7 @@ def _cached_file_node(config, course_node):
 
 
 def test_cache_preserves_markers_for_failed_download_over_existing_file(tmp_path):
-    config = {"basedir": str(tmp_path), "updatefiles": True}
+    config = {"paths.basedir": str(tmp_path), "downloads.update_files": True}
     v1 = b"version one"
     seed_course_cache(config, timemodified=100, etag=sha1(v1), is_downloaded=True)
     download_path = node_path(
@@ -1001,7 +1001,7 @@ def test_cache_preserves_markers_for_failed_download_over_existing_file(tmp_path
 
 
 def test_legacy_is_downloaded_cache_key_is_read_as_handled(tmp_path):
-    config = {"basedir": str(tmp_path), "updatefiles": True}
+    config = {"paths.basedir": str(tmp_path), "downloads.update_files": True}
     content = b"legacy cached file"
     root, cached_file = build_single_file_tree(
         "slides.pdf", URL, timemodified=100, etag=sha1(content)
@@ -1051,7 +1051,7 @@ def test_legacy_is_downloaded_cache_key_is_read_as_handled(tmp_path):
 
 
 def test_cache_preserves_content_hash_for_skipped_existing_file(tmp_path):
-    config = {"basedir": str(tmp_path), "updatefiles": True}
+    config = {"paths.basedir": str(tmp_path), "downloads.update_files": True}
     v1 = b"version one"
     v1_hash = sha256(v1)
     cache_syncer = make_context(config)
@@ -1085,7 +1085,7 @@ def test_cache_preserves_content_hash_for_skipped_existing_file(tmp_path):
 
 
 def test_cache_does_not_preserve_markers_when_file_absent(tmp_path):
-    config = {"basedir": str(tmp_path), "updatefiles": True}
+    config = {"paths.basedir": str(tmp_path), "downloads.update_files": True}
     seed_course_cache(config, timemodified=100, etag="old", is_downloaded=True)
 
     # Failed download with no file on disk: nothing to preserve.

@@ -74,7 +74,7 @@ def sync(ctx: SyncContext) -> None:
         }
 
         assignments = None
-        if config.module_enabled("assign") and ("assign" in module_names):
+        if config.module_enabled("assignment") and ("assign" in module_names):
             assignments = moodle_api.get_assignment(session, wstoken, course_id)
         assignments_by_cmid = {
             assignment["cmid"]: assignment

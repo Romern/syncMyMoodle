@@ -50,7 +50,7 @@ def handle_assignment_module(
     assignments_by_cmid = module_context.assignments_by_cmid
 
     # Get Assignments
-    if module["modname"] == "assign" and ctx.config.module_enabled("assign"):
+    if module["modname"] == "assign" and ctx.config.module_enabled("assignment"):
         ass = assignments_by_cmid.get(module["id"])
         if not ass:
             return
@@ -177,21 +177,23 @@ def handle_embedded_link_module(
     log = module_context.log
 
     # Get embedded videos in pages or labels
-    if module["modname"] not in [
-        "page",
-        "label",
-        "h5pactivity",
-    ] or not ctx.config.module_enabled("url"):
+    if (
+        module["modname"]
+        not in [
+            "page",
+            "label",
+            "h5pactivity",
+        ]
+        or not ctx.config.follow_links
+    ):
         return
 
     if module["modname"] == "page":
-        opencast_enabled = ctx.config.url_module_enabled("opencast")
+        opencast_enabled = ctx.config.link_source_enabled("opencast")
         html_url = (
             module.get("url") or f"{MOODLE_URL}mod/page/view.php?id={module['id']}"
         )
-        scan_page_links = not ctx.config.nolinks and not filters.should_skip_url(
-            ctx.config, html_url, "page link"
-        )
+        scan_page_links = not filters.should_skip_url(ctx.config, html_url, "page link")
         if opencast_enabled or scan_page_links:
             try:
                 response = ctx.require_session().get(html_url)
@@ -300,7 +302,7 @@ def handle_opencast_lti_module(
     log = module_context.log
 
     # New OpenCast integration
-    if module["modname"] != "lti" or not ctx.config.url_module_enabled("opencast"):
+    if module["modname"] != "lti" or not ctx.config.link_source_enabled("opencast"):
         return
 
     info_url = f"{MOODLE_URL}mod/lti/launch.php?id={module['id']}&triggerview=0"
@@ -411,7 +413,7 @@ def handle_quiz_module(
     section_node = module_context.section_node
 
     # Integration for Quizzes
-    if module["modname"] != "quiz" or not ctx.config.url_module_enabled("quiz"):
+    if module["modname"] != "quiz" or ctx.config.quiz_mode == "off":
         return
 
     info_url = f"{MOODLE_URL}mod/quiz/view.php?id={module['id']}"

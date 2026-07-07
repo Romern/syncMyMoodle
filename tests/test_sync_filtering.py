@@ -24,10 +24,10 @@ def test_selected_courses_override_semester_filter(monkeypatch):
     synced_course_ids = []
     syncer = make_context(
         {
-            "selected_courses": [
+            "courses.selected": [
                 "https://moodle.rwth-aachen.de/course/view.php?id=202"
             ],
-            "only_sync_semester": ["26ss"],
+            "courses.semesters": ["26ss"],
         }
     )
     install_filter_fixtures(monkeypatch, synced_course_ids, FILTER_COURSES)
@@ -46,8 +46,8 @@ def test_skip_courses_and_semester_filter_limit_synced_courses(monkeypatch):
     synced_course_ids = []
     syncer = make_context(
         {
-            "skip_courses": ["https://moodle.rwth-aachen.de/course/view.php?id=203"],
-            "only_sync_semester": ["26ss"],
+            "courses.skip": ["https://moodle.rwth-aachen.de/course/view.php?id=203"],
+            "courses.semesters": ["26ss"],
         }
     )
     install_filter_fixtures(monkeypatch, synced_course_ids, FILTER_COURSES)
@@ -83,7 +83,7 @@ def _run_filter(config, monkeypatch):
 def test_selected_courses_match_by_exact_id_not_substring(monkeypatch):
     # Selecting course 12 must not also pull in courses 1 and 2.
     synced = _run_filter(
-        {"selected_courses": ["https://moodle.rwth-aachen.de/course/view.php?id=12"]},
+        {"courses.selected": ["https://moodle.rwth-aachen.de/course/view.php?id=12"]},
         monkeypatch,
     )
     assert synced == [12]
@@ -92,14 +92,14 @@ def test_selected_courses_match_by_exact_id_not_substring(monkeypatch):
 def test_skip_courses_match_by_exact_id_not_substring(monkeypatch):
     # Skipping course 12 must not silently drop courses 1 and 2.
     synced = _run_filter(
-        {"skip_courses": ["https://moodle.rwth-aachen.de/course/view.php?id=12"]},
+        {"courses.skip": ["https://moodle.rwth-aachen.de/course/view.php?id=12"]},
         monkeypatch,
     )
     assert synced == [1, 2, 123]
 
 
 def test_bare_numeric_id_entry_is_accepted(monkeypatch):
-    synced = _run_filter({"selected_courses": ["12"]}, monkeypatch)
+    synced = _run_filter({"courses.selected": ["12"]}, monkeypatch)
     assert synced == [12]
 
 
@@ -107,6 +107,6 @@ def test_selected_courses_override_skip_courses(monkeypatch):
     # A course present in both lists is synced: selected_courses wins.
     url = "https://moodle.rwth-aachen.de/course/view.php?id=12"
     synced = _run_filter(
-        {"selected_courses": [url], "skip_courses": [url]}, monkeypatch
+        {"courses.selected": [url], "courses.skip": [url]}, monkeypatch
     )
     assert synced == [12]

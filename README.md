@@ -100,23 +100,24 @@ deactivate  # leave virtual environment
 The following command line arguments are available:
 
 ```bash
-usage: python3 -m syncmymoodle [-h] [--secretservice] [--secretservicetotpsecret]
-                               [--user USER] [--password PASSWORD]
-                               [--totp TOTP] [--totpsecret TOTPSECRET]
-                               [--config CONFIG] [--cookiefile COOKIEFILE]
-                               [--courses COURSES] [--skipcourses SKIPCOURSES]
-                               [--semester SEMESTER] [--basedir BASEDIR]
+usage: python3 -m syncmymoodle [-h] [--config CONFIG] [--user USER]
+                               [--password PASSWORD] [--totp TOTP]
+                               [--totpsecret TOTPSECRET] [--secretservice]
+                               [--secretservicetotpsecret] [--basedir BASEDIR]
+                               [--cookiefile COOKIEFILE]
                                [--chromiumpath CHROMIUMPATH]
-                               [--courseprefix {keep,remove,suffix}] [--nolinks]
+                               [--courses COURSES] [--skipcourses SKIPCOURSES]
+                               [--semester SEMESTER]
+                               [--courseprefix {keep,remove,suffix}]
+                               [--updatefiles]
+                               [--updatefilesconflict {rename,keep,overwrite}]
                                [--excludefiletypes EXCLUDEFILETYPES]
                                [--excludefiles EXCLUDEFILES]
                                [--excludelinks EXCLUDELINKS]
                                [--alloweddomains ALLOWEDDOMAINS]
                                [--excludesections EXCLUDESECTIONS]
-                               [--excludemodules EXCLUDEMODULES]
-                               [--quiz {off,html,pdf,both}] [--updatefiles]
-                               [--updatefilesconflict {rename,keep,overwrite}]
-                               [-v]
+                               [--excludemodules EXCLUDEMODULES] [--nolinks]
+                               [--quiz {off,html,pdf,both}] [-v]
                                {config} ...
 
 Synchronization client for RWTH Moodle. All optional arguments override those
@@ -128,20 +129,25 @@ positional arguments:
 
 options:
   -h, --help            show this help message and exit
-  --secretservice       use system's secret service integration for storing and
-                        retrieving account credentials
-  --secretservicetotpsecret
-                        Save TOTP secret in keyring
+  --config CONFIG       set your configuration file
   --user USER           set your RWTH Single Sign-On username
   --password PASSWORD   set your RWTH Single Sign-On password
   --totp TOTP           set your RWTH Single Sign-On TOTP provider's serial
-                        number (see
-                        https://idm.rwth-aachen.de/selfservice/MFATokenManager)
+                        number (see https://idm.rwth-
+                        aachen.de/selfservice/MFATokenManager)
   --totpsecret TOTPSECRET
-                        (optional) set your RWTH Single Sign-On TOTP provider Secret
-  --config CONFIG       set your configuration file
+                        (optional) set your RWTH Single Sign-On TOTP provider
+                        Secret
+  --secretservice       Use system's keyring for storing and retrieving
+                        account credentials
+  --secretservicetotpsecret
+                        Save TOTP secret in keyring
+  --basedir BASEDIR     specify the directory where all files will be synced
   --cookiefile COOKIEFILE
                         set the location of a cookie file
+  --chromiumpath CHROMIUMPATH
+                        set the path to a Chrome/Chromium/Edge binary for quiz
+                        PDF rendering
   --courses COURSES     specify the courses that should be synced using comma-
                         separated links. Defaults to all courses, if no
                         additional restrictions e.g. semester are defined.
@@ -151,16 +157,16 @@ options:
   --semester SEMESTER   specify semesters to be synced e.g. `22s`, comma-
                         separated. Defaults to all semesters, if no additional
                         restrictions e.g. courses are defined.
-  --basedir BASEDIR     specify the directory where all files will be synced
-  --chromiumpath CHROMIUMPATH
-                        set the path to a Chrome/Chromium/Edge binary for quiz
-                        PDF rendering
   --courseprefix {keep,remove,suffix}
                         handle leading two-character course prefixes in local
                         folder names: 'keep' (default), 'remove', or 'suffix'
-  --nolinks             define whether various links in moodle pages should
-                        also be inspected e.g. youtube videos, wikipedia
-                        articles
+  --updatefiles         define whether modified files with the same name/path
+                        should be redownloaded
+  --updatefilesconflict {rename,keep,overwrite}
+                        define how to handle locally modified files when
+                        updating: 'rename' (default) moves the old file aside,
+                        'keep' skips the update, 'overwrite' replaces the
+                        local file
   --excludefiletypes EXCLUDEFILETYPES
                         specify whether specific file types should be
                         excluded, comma-separated e.g. "mp4,mkv"
@@ -179,16 +185,12 @@ options:
   --excludemodules EXCLUDEMODULES
                         exclude Moodle modules by comma-separated names, ids,
                         types, URLs or patterns
+  --nolinks             define whether various links in moodle pages should
+                        also be inspected e.g. youtube videos, wikipedia
+                        articles
   --quiz {off,html,pdf,both}
                         save quiz review attempts as 'off', 'html', 'pdf', or
                         'both'
-  --updatefiles         define whether modified files with the same name/path
-                        should be redownloaded
-  --updatefilesconflict {rename,keep,overwrite}
-                        define how to handle locally modified files when
-                        updating: 'rename' (default) moves the old file aside,
-                        'keep' skips the update, 'overwrite' replaces the
-                        local file
   -v, --verbose         show information useful for debugging
 ```
 
@@ -208,56 +210,67 @@ an existing TOML file.
 
 Copy `config.toml.example` to `config.toml` in your current directory or to
 `~/.config/syncmymoodle/config.toml` if you wish to configure `syncmymoodle`
-user-wide. The TOML example groups related settings into tables such as
-`[auth]`, `[paths]`, `[courses]`, `[downloads]`, `[links]`, `[skip_rules]` and
-`[modules]`.
-
-Legacy `config.json` files are still supported, but `syncmymoodle` will warn
-when loading one and point to `syncmymoodle config migrate`.
+user-wide.
 
 Here's an overview of the available options with some additional remarks as to
-what each configuration does. The JSON-like shape below mirrors the same
-individual keys accepted in TOML tables and legacy JSON configs:
+what each configuration does:
 
-```js
-{
-    "selected_courses": [], // Only the specified courses (e.g. ["https://moodle.rwth-aachen.de/course/view.php?id=XXXXX"], separated using commas) will be synced
-    "skip_courses": [], // Exclude the specified courses. `selected_courses` overrides this option.
-    "only_sync_semester": [], // Only the specified semesters (e.g. ["23ss", "22ws"]) will be synced. `selected_courses` overrides this option.
-    "user": "", // RWTH SSO username
-    "password": "", // RWTH SSO password
-    "totp": "", // RWTH SSO TOTP "Serial Number", format: TOTP0000000A, see https://idm.rwth-aachen.de/selfservice/MFATokenManager
-    "totpsecret": "", // The TOTP Secret for your TOTP generator (optional)
-    "basedir": "./", // The base directory where all your files will be synced to
-    "course_prefix_handling": "suffix", // How to handle local course folders starting with a two-character prefix like "(VO) ": "keep" (backwards-compatible default), "remove", or "suffix" (recommended)
-    "cookie_file": "./session", // The location of the session/cookie file, which can be used instead of a password.
-    "chromium_path": "", // Optional path to a Chrome/Chromium/Edge binary for quiz PDF rendering. Leave empty to auto-detect.
-    "use_secret_service": false, // Use the system keyring (see README), instead of a password.
-    "secret_service_store_totp_secret": false, // Store the TOTP secret in the system keyring.
-    "no_links": false, // Skip links embedded in pages. Warning: This *will* prevent Onlycast videos from being downloaded.
-    "used_modules": { // Disable downloading certain modules.
-        "assign": true, // Assignments
-        "resource": true, // Resources
-        "url": {
-            "youtube": true, // Include YouTube Links/Embeds
-            "opencast": true, // Include Opencast Links/Embeds
-            "sciebo": true, // Include Sciebo Links/Embeds
-            "quiz": "html" // Save quiz review attempts: "off", "html" (self-contained snapshot, default), "pdf" (browser-rendered PDF), or "both"
-        },
-        "folder": true // Include folders
-    },
-    "exclude_filetypes": [], // Exclude specific filetypes (e.g. ["mp4", "mkv"]) to disable downloading most videos
-    "exclude_files": [], // Exclude specific files using UNIX filename pattern matching (e.g. "Lecture{video,zoom}*.{mp4,mkv}")
-    "exclude_links": [], // Exclude specific links using UNIX pattern matching (e.g. ["*tooltask.igm.rwth-aachen.de/hinge*"])
-    "allowed_domains": [], // Optional allowlist for discovered http(s) links. If set, links outside these domains are skipped (e.g. ["moodle.rwth-aachen.de", "rwth-aachen.sciebo.de"])
-    "exclude_sections": [], // Exclude sections by name or id using pattern matching. Can also be an object keyed by course id, e.g. {"13489": ["Week 1"]}
-    "exclude_modules": [], // Exclude modules by name, type, id or Moodle module URL. Can also be an object keyed by course id
-    "update_files": true, // If true, existing files are redownloaded only when Moodle/Sciebo report that they were modified (based on timemodified and checksums).
-    "update_files_conflict": "rename" // How to handle locally modified files when a newer version is available on Moodle/Sciebo: "rename" (default, move to <name>.syncconflict.<hash>), "keep" (skip update), or "overwrite" (!!DANGEROUS!! replaces the local file, you may lose any files you edited/changed!).
-}
+```toml
+[auth]
+user = ""       # RWTH SSO username
+password = ""   # RWTH SSO password (consider the keyring integration instead, see below)
+totp = ""       # RWTH SSO TOTP "Serial Number", format: TOTP0000000A, see https://idm.rwth-aachen.de/selfservice/MFATokenManager
+totpsecret = "" # The TOTP secret for your TOTP generator (optional)
+use_secret_service = false               # Use the system keyring (see README) instead of a password
+secret_service_store_totp_secret = false # Store the TOTP secret in the system keyring
+
+[paths]
+basedir = "./"            # The base directory where all your files will be synced to
+cookie_file = "./session" # The location of the session/cookie file, which can be used instead of a password
+chromium_path = ""        # Optional path to a Chrome/Chromium/Edge binary for quiz PDF rendering. Leave empty to auto-detect.
+
+[courses]
+selected = []  # Only the specified courses (e.g. ["https://moodle.rwth-aachen.de/course/view.php?id=XXXXX"]) will be synced
+skip = []      # Exclude the specified courses. `selected` overrides this option.
+semesters = [] # Only the specified semesters (e.g. ["23ss", "22ws"]) will be synced. `selected` overrides this option.
+prefix_handling = "suffix" # How to handle local course folders starting with a two-character prefix like "(VO) ": "keep" (backwards-compatible default), "remove", or "suffix" (recommended)
+
+[downloads]
+update_files = true # If true, existing files are redownloaded only when Moodle/Sciebo report that they were modified (based on timemodified and checksums).
+update_files_conflict = "rename" # How to handle locally modified files when a newer version is available on Moodle/Sciebo: "rename" (default, move to <name>.syncconflict.<hash>), "keep" (skip update), or "overwrite" (!!DANGEROUS!! replaces the local file, you may lose any files you edited/changed!).
+
+[filters]
+exclude_filetypes = [] # Exclude specific filetypes (e.g. ["mp4", "mkv"]) to disable downloading most videos
+exclude_files = []     # Exclude specific files using UNIX filename pattern matching (e.g. "Lecture{video,zoom}*.{mp4,mkv}")
+exclude_links = []     # Exclude specific links using UNIX pattern matching (e.g. ["*tooltask.igm.rwth-aachen.de/hinge*"])
+allowed_domains = []   # Optional allowlist for discovered http(s) links. If set, links outside these domains are skipped (e.g. ["moodle.rwth-aachen.de", "rwth-aachen.sciebo.de"])
+exclude_sections = []  # Exclude sections by name or id using pattern matching. Can also be a table keyed by course id, e.g. { "13489" = ["Week 1"] }
+exclude_modules = []   # Exclude modules by name, type, id or Moodle module URL. Can also be a table keyed by course id
+
+[links]
+follow_links = true # Inspect links embedded in pages. Warning: turning this off also disables all link sources below, including Opencast videos.
+youtube = true      # Include YouTube links/embeds
+opencast = true     # Include Opencast links/embeds
+sciebo = true       # Include Sciebo links/embeds
+
+[modules]
+assignment = true # Assignments
+resource = true # Resources
+folder = true   # Folders
+quiz = "html"   # Save quiz review attempts: "off", "html" (self-contained snapshot, default), "pdf" (browser-rendered PDF), or "both"
 ```
 
-`course_prefix_handling` controls local course folder names that start with a
+Legacy `config.json` files are still supported, but `syncmymoodle` will warn
+when loading one and point to `syncmymoodle config migrate`. When a JSON
+config is loaded, its old flat key spellings (e.g. `selected_courses`,
+`updatefiles`, `nolinks`/`no_links`) are converted onto the options above;
+`nolinks = true` becomes `follow_links = false`, and a `used_modules` tree
+keeps its historical semantics (entries omitted from the tree stay disabled,
+while keys omitted from the `[modules]`/`[links]` tables keep their
+defaults). TOML configs must use the current names — a legacy spelling in a
+TOML file is rejected with a hint pointing at the current option.
+
+`prefix_handling` controls local course folder names that start with a
 prefix of exactly two characters in parentheses, followed by a space. For
 example, `(VO) Analysis` stays unchanged with `keep`, becomes `Analysis` with
 `remove`, and becomes `Analysis (VO)` with `suffix`. If not set, the default
@@ -288,11 +301,12 @@ inside each synced course directory. Delete that file to force a fresh metadata
 cache for a course.
 
 Quiz review attempts are saved as self-contained HTML snapshots by default
-(`url.quiz = "html"`). The snapshot inlines same-origin Moodle assets and strips
-network-bearing content so it remains readable offline and does not contact
-Moodle when opened later. Set `url.quiz` to `"off"` to disable quiz snapshots.
+(`quiz = "html"` in the `[modules]` table). The snapshot inlines same-origin
+Moodle assets and strips network-bearing content so it remains readable offline
+and does not contact Moodle when opened later. Set `quiz` to `"off"` to disable
+quiz snapshots.
 
-PDF rendering is separate and opt-in: set `url.quiz` to `"pdf"` or `"both"` to
+PDF rendering is separate and opt-in: set `quiz` to `"pdf"` or `"both"` to
 render snapshots with a locally installed Chrome, Chromium or Edge browser. This
 uses the browser's built-in headless PDF output, which avoids the old
 `pdfkit`/`wkhtmltopdf` renderer and its security issues, but syncMyMoodle does
@@ -306,10 +320,10 @@ browser is found, the HTML snapshot is kept as a fallback so nothing is lost.
 From the RWTH IDM service you will get a TOTP secret which will be used to
 generate OTP tokens. The serial number of the TOTP, which can be seen in the 
 [RWTH IDM Token Manager](https://idm.rwth-aachen.de/selfservice/MFATokenManager),
-has to be provided using the `--totp` option or the JSON entry of the same name.
-It usually has the format `TOTP12345678`.
+has to be provided using the `--totp` option or the config entry of the same
+name. It usually has the format `TOTP12345678`.
 
-The TOTP secret can be specified using the `--totpsecret` option or the JSON 
+The TOTP secret can be specified using the `--totpsecret` option or the config 
 entry of the same name. It can be found in the `otpauth://` link in the secret
 argument.
 

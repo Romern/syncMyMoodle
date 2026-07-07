@@ -12,33 +12,31 @@ cookie_file = "./session"
 chromium_path = ""
 
 [courses]
-selected_courses = []
-skip_courses = []
-only_sync_semester = []
-course_prefix_handling = "suffix"
+selected = []
+skip = []
+semesters = []
+prefix_handling = "suffix"
 
 [downloads]
 update_files = true
 update_files_conflict = "rename"
+
+[filters]
 exclude_filetypes = []
 exclude_files = []
-
-[links]
-no_links = false
 exclude_links = []
 allowed_domains = []
-
-[skip_rules]
 exclude_sections = []
 exclude_modules = []
 
-[modules]
-assign = true
-resource = true
-folder = true
-
-[modules.url]
+[links]
+follow_links = true
 youtube = true
 opencast = true
 sciebo = true
+
+[modules]
+assignment = true
+resource = true
+folder = true
 quiz = "html"

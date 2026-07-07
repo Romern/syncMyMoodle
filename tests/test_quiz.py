@@ -37,18 +37,8 @@ QUIZ_HTML = (
 def quiz_context(tmp_path, mode):
     ctx = make_context(
         {
-            "basedir": str(tmp_path),
-            "used_modules": {
-                "assign": True,
-                "resource": True,
-                "folder": True,
-                "url": {
-                    "youtube": True,
-                    "opencast": True,
-                    "sciebo": True,
-                    "quiz": mode,
-                },
-            },
+            "paths.basedir": str(tmp_path),
+            "modules.quiz": mode,
         }
     )
     session = FakeSession()

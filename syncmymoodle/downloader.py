@@ -281,7 +281,7 @@ def decide_download(
     """
     if not downloadpath.exists():
         return DownloadDecision(skip=False)
-    if not ctx.config.updatefiles:
+    if not ctx.config.update_files:
         return DownloadDecision(skip=True)
 
     old_node = course_cache.get_old_node_for(ctx, node, log)

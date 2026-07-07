@@ -1,17 +1,16 @@
 #!/usr/bin/env python3
 
-import copy
 import getpass
 import json
 import logging
 import os
 import sys
 import tomllib
-from argparse import ArgumentParser, Namespace
-from collections.abc import Sequence
+from argparse import SUPPRESS, ArgumentParser, Namespace
+from collections.abc import Mapping, Sequence
 from pathlib import Path
 from types import ModuleType
-from typing import Any, cast
+from typing import Any
 
 import tomli_w
 
@@ -19,15 +18,15 @@ from syncmymoodle import course_cache, downloader, rwth, sync
 from syncmymoodle import moodle as moodle_api
 from syncmymoodle.config import (
     CONFIG_OPTIONS,
-    CONFIG_OPTIONS_BY_FIELD,
     Config,
+    ConfigDict,
     ConfigValidationError,
+    canonicalize,
     config_validation_errors,
-    expand_config_groups,
+    convert_legacy_config,
     group_config_for_toml,
-    validate_config,
 )
-from syncmymoodle.constants import QUIZ_MODES, RWTH_MOODLE_STATUS_URL
+from syncmymoodle.constants import RWTH_MOODLE_STATUS_URL
 from syncmymoodle.context import SyncContext
 
 try:
@@ -38,7 +37,6 @@ except ImportError:
     keyring = None
 
 logger = logging.getLogger(__name__)
-ConfigDict = dict[str, Any]
 CONFIG_FILENAMES = ("config.toml", "config.json")
 
 
@@ -50,129 +48,19 @@ def build_parser(keyring_backend: Any = None) -> ArgumentParser:
             "override those in config.toml/config.json."
         ),
     )
-
-    if keyring_backend:
-        parser.add_argument(
-            "--secretservice",
-            action="store_true",
-            help="Use system's keyring for storing and retrieving account credentials",
-        )
-        parser.add_argument(
-            "--secretservicetotpsecret",
-            action="store_true",
-            help="Save TOTP secret in keyring",
-        )
-
-    parser.add_argument(
-        "--user", default=None, help="set your RWTH Single Sign-On username"
-    )
-    parser.add_argument(
-        "--password", default=None, help="set your RWTH Single Sign-On password"
-    )
-    parser.add_argument(
-        "--totp",
-        default=None,
-        help="set your RWTH Single Sign-On TOTP provider's serial number (see https://idm.rwth-aachen.de/selfservice/MFATokenManager)",
-    )
-    parser.add_argument(
-        "--totpsecret",
-        default=None,
-        help="(optional) set your RWTH Single Sign-On TOTP provider Secret",
-    )
     parser.add_argument("--config", default=None, help="set your configuration file")
-    parser.add_argument(
-        "--cookiefile", default=None, help="set the location of a cookie file"
-    )
-    parser.add_argument(
-        "--courses",
-        default=None,
-        help="specify the courses that should be synced using comma-separated links. Defaults to all courses, if no additional restrictions e.g. semester are defined.",
-    )
-    parser.add_argument(
-        "--skipcourses",
-        default=None,
-        help="exclude specific courses using comma-separated links. Defaults to None.",
-    )
-    parser.add_argument(
-        "--semester",
-        default=None,
-        help="specify semesters to be synced e.g. `22s`, comma-separated. Defaults to all semesters, if no additional restrictions e.g. courses are defined.",
-    )
-    parser.add_argument(
-        "--basedir",
-        default=None,
-        help="specify the directory where all files will be synced",
-    )
-    parser.add_argument(
-        "--chromiumpath",
-        default=None,
-        help="set the path to a Chrome/Chromium/Edge binary for quiz PDF rendering",
-    )
-    parser.add_argument(
-        "--courseprefix",
-        choices=CONFIG_OPTIONS_BY_FIELD["course_prefix_handling"].choices,
-        default=None,
-        help=(
-            "handle leading two-character course prefixes in local folder names: "
-            "'keep' (default), 'remove', or 'suffix'"
-        ),
-    )
-    parser.add_argument(
-        "--nolinks",
-        action="store_true",
-        help="define whether various links in moodle pages should also be inspected e.g. youtube videos, wikipedia articles",
-    )
-    parser.add_argument(
-        "--excludefiletypes",
-        default=None,
-        help='specify whether specific file types should be excluded, comma-separated e.g. "mp4,mkv"',
-    )
-    parser.add_argument(
-        "--excludefiles",
-        default=None,
-        help='exclude specific files using comma-separated patterns e.g. "*.bak,*.tmp"',
-    )
-    parser.add_argument(
-        "--excludelinks",
-        default=None,
-        help="exclude discovered links using comma-separated URL patterns",
-    )
-    parser.add_argument(
-        "--alloweddomains",
-        default=None,
-        help="only keep discovered links on these comma-separated domains",
-    )
-    parser.add_argument(
-        "--excludesections",
-        default=None,
-        help="exclude Moodle sections by comma-separated names, ids or patterns",
-    )
-    parser.add_argument(
-        "--excludemodules",
-        default=None,
-        help="exclude Moodle modules by comma-separated names, ids, types, URLs or patterns",
-    )
-    parser.add_argument(
-        "--quiz",
-        choices=QUIZ_MODES,
-        default=None,
-        help="save quiz review attempts as 'off', 'html', 'pdf', or 'both'",
-    )
-    parser.add_argument(
-        "--updatefiles",
-        action="store_true",
-        help="define whether modified files with the same name/path should be redownloaded",
-    )
-    parser.add_argument(
-        "--updatefilesconflict",
-        choices=CONFIG_OPTIONS_BY_FIELD["update_files_conflict"].choices,
-        default=None,
-        help=(
-            "define how to handle locally modified files when updating: "
-            "'rename' (default) moves the old file aside, 'keep' skips the "
-            "update, 'overwrite' replaces the local file"
-        ),
-    )
+    for option in CONFIG_OPTIONS:
+        cli = option.cli
+        if cli is None or (cli.requires_keyring and not keyring_backend):
+            continue
+        if cli.value_kind == "flag":
+            parser.add_argument(f"--{cli.arg_name}", action="store_true", help=cli.help)
+        elif option.choices:
+            parser.add_argument(
+                f"--{cli.arg_name}", choices=option.choices, default=None, help=cli.help
+            )
+        else:
+            parser.add_argument(f"--{cli.arg_name}", default=None, help=cli.help)
     parser.add_argument(
         "-v",
         "--verbose",
@@ -212,22 +100,14 @@ def build_parser(keyring_backend: Any = None) -> ArgumentParser:
         "check",
         help="validate a configuration file",
     )
+    # SUPPRESS keeps a --config given before the subcommand intact: subparser
+    # defaults would otherwise overwrite the already-parsed global value.
     check_parser.add_argument(
         "--config",
-        default=None,
+        default=SUPPRESS,
         help="config file to validate; defaults to discovered config.toml/config.json",
     )
     return parser
-
-
-def read_json_config(path: Path) -> ConfigDict:
-    with path.open() as f:
-        return cast(ConfigDict, json.load(f))
-
-
-def read_toml_config(path: Path) -> ConfigDict:
-    with path.open("rb") as f:
-        return tomllib.load(f)
 
 
 def warn_legacy_json_config(path: Path) -> None:
@@ -239,12 +119,30 @@ def warn_legacy_json_config(path: Path) -> None:
     )
 
 
-def read_config(path: Path, warn_legacy_json: bool = True) -> ConfigDict:
+def read_config_file(path: Path, warn_legacy_json: bool = True) -> ConfigDict:
+    """Parse, canonicalize and validate a single config file.
+
+    Raises OSError if the file cannot be read, ValueError if it cannot be
+    parsed and ConfigValidationError if it fails validation.
+    """
     if path.suffix == ".toml":
-        return expand_config_groups(read_toml_config(path))
-    if warn_legacy_json:
-        warn_legacy_json_config(path)
-    return expand_config_groups(read_json_config(path))
+        with path.open("rb") as fb:
+            raw: Any = tomllib.load(fb)
+    else:
+        if warn_legacy_json:
+            warn_legacy_json_config(path)
+        with path.open() as f:
+            raw = json.load(f)
+        if not isinstance(raw, Mapping):
+            raise ValueError(
+                f"config root must be a table/object, got {type(raw).__name__}"
+            )
+        raw = convert_legacy_config(raw)
+    canonical = canonicalize(raw)
+    errors = config_validation_errors(canonical)
+    if errors:
+        raise ConfigValidationError(path, errors)
+    return canonical
 
 
 def global_config_dir() -> Path:
@@ -282,21 +180,27 @@ def discover_config_files() -> list[Path]:
 
 
 def load_config(args: Namespace, parser: ArgumentParser) -> ConfigDict:
+    """Read and merge all config files into one canonical dict (local wins)."""
     if args.config:
-        overwrite_config = Path(args.config)
-        if not overwrite_config.is_file():
+        explicit_config = Path(args.config)
+        if not explicit_config.is_file():
             # Silently continuing without the explicitly requested file would
             # sync with unintended settings (or crash later); fail fast instead.
             parser.error(f"config file not found: {args.config}")
-        try:
-            return read_config(overwrite_config)
-        except ValueError as error:
-            parser.error(str(error))
+        config_paths = [explicit_config]
+    else:
+        config_paths = discover_config_files()
 
     config: ConfigDict = {}
-    for config_file in discover_config_files():
-        config.update(read_config(config_file))
-
+    for config_path in config_paths:
+        try:
+            config.update(read_config_file(config_path))
+        except ConfigValidationError as error:
+            parser.error(str(error))
+        except OSError as error:
+            parser.error(f"could not read config file {config_path}: {error}")
+        except ValueError as error:
+            parser.error(f"could not parse config file {config_path}: {error}")
     return config
 
 
@@ -315,9 +219,13 @@ def migrate_json_config(
         msg = f"TOML config already exists: {output_path}; use --force to overwrite"
         raise FileExistsError(msg)
 
-    config = group_config_for_toml(read_config(input_path, warn_legacy_json=False))
+    config = read_config_file(input_path, warn_legacy_json=False)
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    output_path.write_text(tomli_w.dumps(config), encoding="utf-8")
+    output_path.write_text(
+        tomli_w.dumps(group_config_for_toml(config)), encoding="utf-8"
+    )
+    # The config may hold credentials; keep it readable only by the user.
+    output_path.chmod(0o600)
     return output_path
 
 
@@ -338,24 +246,20 @@ def migrate_config_command(args: Namespace, parser: ArgumentParser) -> None:
 
 def check_config_command(args: Namespace, parser: ArgumentParser) -> None:
     config_paths = config_check_paths(args, parser)
-    try:
-        config: ConfigDict = {}
-        for config_path in config_paths:
-            config.update(read_config(config_path))
-    except OSError as error:
-        parser.error(str(error))
-    except ValueError as error:
-        parser.error(f"could not parse config: {error}")
-
-    errors = config_validation_errors(config)
-    if errors:
-        print(
-            f"Config is invalid: {format_config_paths(config_paths)}", file=sys.stderr
-        )
-        for validation_error in errors:
-            print(f"- {validation_error}", file=sys.stderr)
+    valid = True
+    for config_path in config_paths:
+        try:
+            read_config_file(config_path)
+        except ConfigValidationError as error:
+            valid = False
+            print(f"Config is invalid: {config_path}", file=sys.stderr)
+            for detail in error.errors:
+                print(f"- {detail}", file=sys.stderr)
+        except (OSError, ValueError) as error:
+            valid = False
+            print(f"Could not read config: {config_path}: {error}", file=sys.stderr)
+    if not valid:
         raise SystemExit(1)
-
     print(f"Config is valid: {format_config_paths(config_paths)}")
 
 
@@ -388,74 +292,20 @@ def run_config_command(args: Namespace, parser: ArgumentParser) -> None:
     parser.error(f"unknown config command: {args.config_command}")
 
 
-def apply_cli_overrides(
-    config: ConfigDict,
-    args: Namespace,
-    keyring_backend: Any = None,
-) -> None:
+def apply_cli_overrides(config: ConfigDict, args: Namespace) -> None:
     for option in CONFIG_OPTIONS:
-        if option.cli is None:
+        cli = option.cli
+        if cli is None:
             continue
-        value = getattr(args, option.cli.arg_name)
-        if option.cli.value_kind == "flag":
+        value = getattr(args, cli.arg_name, None)
+        if cli.value_kind == "flag":
             if value:
-                config[option.canonical_key] = True
+                config[option.canonical_key] = cli.flag_value
         elif value is not None:
-            if option.cli.value_kind == "csv":
+            if cli.value_kind == "csv":
                 config[option.canonical_key] = value.split(",")
             else:
                 config[option.canonical_key] = value
-
-    if keyring_backend and getattr(args, "secretservice", False):
-        config["use_secret_service"] = True
-    if keyring_backend and getattr(args, "secretservicetotpsecret", False):
-        config["secret_service_store_totp_secret"] = True
-    apply_quiz_cli_override(config, args)
-
-
-def apply_quiz_cli_override(config: ConfigDict, args: Namespace) -> None:
-    if args.quiz is None:
-        return
-
-    used_modules = config.get("used_modules")
-    if isinstance(used_modules, dict):
-        used_modules = copy.deepcopy(used_modules)
-    else:
-        used_modules = {}
-
-    url_modules = used_modules.get("url")
-    if isinstance(url_modules, dict):
-        url_modules = copy.deepcopy(url_modules)
-    else:
-        url_modules = {}
-
-    url_modules["quiz"] = args.quiz
-    used_modules["url"] = url_modules
-    config["used_modules"] = used_modules
-
-
-def validate_keyring_config(config: ConfigDict, args: Namespace) -> None:
-    if config.get("password"):
-        logger.critical("You need to remove your password from your config file!")
-        sys.exit(1)
-
-    if config.get("secret_service_store_totp_secret") and config.get("totpsecret"):
-        logger.critical("You need to remove your totpsecret from your config file!")
-        sys.exit(1)
-
-    if not args.user and not config.get("user"):
-        print("You need to provide your username in the config file or through --user!")
-        sys.exit(1)
-
-    if (
-        config.get("secret_service_store_totp_secret")
-        and not args.totp
-        and not config.get("totp")
-    ):
-        print(
-            "You need to provide your TOTP provider in the config file or through --totp!"
-        )
-        sys.exit(1)
 
 
 def get_or_prompt_keyring_secret(
@@ -474,48 +324,67 @@ def get_or_prompt_keyring_secret(
 
 
 def resolve_keyring_credentials(
-    config: ConfigDict,
-    args: Namespace,
-    keyring_backend: Any = None,
+    config: Config,
+    file_config: ConfigDict,
+    keyring_backend: Any,
 ) -> None:
-    if not keyring_backend or not config.get("use_secret_service"):
-        return
+    """Fill config.password/totpsecret from the keyring (prompting once).
 
-    validate_keyring_config(config, args)
-    config["password"] = get_or_prompt_keyring_secret(
+    ``file_config`` is the merged file-only config, used to insist that
+    secrets are not stored in config files; CLI-provided values are allowed
+    and seed the keyring on first use.
+    """
+    if not keyring_backend:
+        logger.critical(
+            "use_secret_service is enabled, but the keyring package is not installed!"
+        )
+        sys.exit(1)
+
+    if file_config.get("auth.password"):
+        logger.critical("You need to remove your password from your config file!")
+        sys.exit(1)
+
+    if config.secret_service_store_totp_secret and file_config.get("auth.totpsecret"):
+        logger.critical("You need to remove your totpsecret from your config file!")
+        sys.exit(1)
+
+    if not config.user:
+        print("You need to provide your username in the config file or through --user!")
+        sys.exit(1)
+
+    if config.secret_service_store_totp_secret and not config.totp:
+        print(
+            "You need to provide your TOTP provider in the config file or through --totp!"
+        )
+        sys.exit(1)
+
+    config.password = get_or_prompt_keyring_secret(
         keyring_backend,
-        config.get("user"),
+        config.user,
         "Password:",
-        args.password,
+        config.password,
     )
 
-    if config.get("secret_service_store_totp_secret"):
-        config["totpsecret"] = get_or_prompt_keyring_secret(
+    if config.secret_service_store_totp_secret:
+        config.totpsecret = get_or_prompt_keyring_secret(
             keyring_backend,
-            config.get("totp"),
+            config.totp,
             "TOTP-Secret:",
-            args.totpsecret,
+            config.totpsecret,
         )
 
 
-def validate_required_credentials(config: ConfigDict) -> None:
-    if not config.get("user") or not config.get("password"):
+def validate_required_credentials(config: Config) -> None:
+    if not config.user or not config.password:
         logger.critical(
             "You need to specify your username and password in the config file or as an argument!"
         )
         sys.exit(1)
-    if not config.get("totp"):
+    if not config.totp:
         logger.critical(
             "You need to specify your TOTP generator in the config file or as an argument!"
         )
         sys.exit(1)
-
-
-def validate_config_or_error(config: ConfigDict, parser: ArgumentParser) -> None:
-    try:
-        validate_config(config)
-    except ConfigValidationError as error:
-        parser.error(str(error))
 
 
 def config_from_args(
@@ -523,12 +392,14 @@ def config_from_args(
     parser: ArgumentParser,
     keyring_backend: Any = None,
 ) -> Config:
-    config = load_config(args, parser)
-    apply_cli_overrides(config, args, keyring_backend)
-    validate_config_or_error(config, parser)
-    resolve_keyring_credentials(config, args, keyring_backend)
+    file_config = load_config(args, parser)
+    merged = dict(file_config)
+    apply_cli_overrides(merged, args)
+    config = Config.from_dict(merged)
+    if config.use_secret_service:
+        resolve_keyring_credentials(config, file_config, keyring_backend)
     validate_required_credentials(config)
-    return Config.from_dict(config)
+    return config
 
 
 def main(argv: Sequence[str] | None = None) -> None:

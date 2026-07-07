@@ -7,7 +7,7 @@ from syncmymoodle.pathing import sanitize_path_part
 
 
 def format_course_name(handling, name):
-    config = Config.from_dict({"course_prefix_handling": handling})
+    config = Config.from_dict({"courses.prefix_handling": handling})
     return format_course_name_impl(name, config)
 
 

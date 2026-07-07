@@ -32,12 +32,12 @@ def test_assignment_intro_opencast_embed_is_added_to_assignment_node(monkeypatch
     courses = [load_json_fixture("moodle", "courses.json")[1]]
     syncer = make_context(
         {
-            "used_modules": {
-                "assign": True,
-                "resource": False,
-                "url": {"youtube": False, "opencast": True, "sciebo": False},
-                "folder": False,
-            }
+            "modules.assignment": True,
+            "modules.resource": False,
+            "modules.folder": False,
+            "links.youtube": False,
+            "links.opencast": True,
+            "links.sciebo": False,
         }
     )
     install_moodle_fixtures(
@@ -76,16 +76,16 @@ def test_skip_rules_apply_to_sections_modules_links_and_domains(monkeypatch):
     courses = [load_json_fixture("moodle", "courses.json")[2]]
     syncer = make_context(
         {
-            "exclude_sections": {"*": ["Hidden*"]},
-            "exclude_modules": {"103": ["Skip Module"]},
-            "exclude_links": ["*excluded.pdf"],
-            "allowed_domains": ["moodle.rwth-aachen.de"],
-            "used_modules": {
-                "assign": False,
-                "resource": True,
-                "url": {"youtube": False, "opencast": False, "sciebo": False},
-                "folder": False,
-            },
+            "filters.exclude_sections": {"*": ["Hidden*"]},
+            "filters.exclude_modules": {"103": ["Skip Module"]},
+            "filters.exclude_links": ["*excluded.pdf"],
+            "filters.allowed_domains": ["moodle.rwth-aachen.de"],
+            "modules.assignment": False,
+            "modules.resource": True,
+            "modules.folder": False,
+            "links.youtube": False,
+            "links.opencast": False,
+            "links.sciebo": False,
         }
     )
     install_moodle_fixtures(
@@ -106,12 +106,12 @@ def test_sciebo_public_share_is_cached_per_sync_run():
     public_slides = "https://rwth-aachen.sciebo.de/public.php/webdav/slides/"
     syncer = make_context(
         {
-            "used_modules": {
-                "assign": False,
-                "resource": False,
-                "url": {"youtube": False, "opencast": False, "sciebo": True},
-                "folder": False,
-            }
+            "modules.assignment": False,
+            "modules.resource": False,
+            "modules.folder": False,
+            "links.youtube": False,
+            "links.opencast": False,
+            "links.sciebo": True,
         }
     )
     session = FakeSession()
@@ -176,12 +176,12 @@ def test_sciebo_share_without_token_input_uses_url_token():
     public_slides = "https://rwth-aachen.sciebo.de/public.php/webdav/slides/"
     syncer = make_context(
         {
-            "used_modules": {
-                "assign": False,
-                "resource": False,
-                "url": {"youtube": False, "opencast": False, "sciebo": True},
-                "folder": False,
-            }
+            "modules.assignment": False,
+            "modules.resource": False,
+            "modules.folder": False,
+            "links.youtube": False,
+            "links.opencast": False,
+            "links.sciebo": True,
         }
     )
     session = FakeSession()
@@ -228,12 +228,12 @@ def test_mixed_course_sync_tree_covers_common_module_surfaces(monkeypatch):
     h5p_iframe_url = "https://moodle.rwth-aachen.de/h5p/embed/317"
     syncer = make_context(
         {
-            "used_modules": {
-                "assign": True,
-                "resource": True,
-                "url": {"youtube": True, "opencast": True, "sciebo": False},
-                "folder": True,
-            }
+            "modules.assignment": True,
+            "modules.resource": True,
+            "modules.folder": True,
+            "links.youtube": True,
+            "links.opencast": True,
+            "links.sciebo": False,
         }
     )
     install_moodle_fixtures(
@@ -322,12 +322,12 @@ def test_opencast_lti_single_and_series_use_lti_and_api_routes(monkeypatch):
     )
     syncer = make_context(
         {
-            "used_modules": {
-                "assign": False,
-                "resource": False,
-                "url": {"youtube": False, "opencast": True, "sciebo": False},
-                "folder": False,
-            }
+            "modules.assignment": False,
+            "modules.resource": False,
+            "modules.folder": False,
+            "links.youtube": False,
+            "links.opencast": True,
+            "links.sciebo": False,
         }
     )
     install_moodle_fixtures(
