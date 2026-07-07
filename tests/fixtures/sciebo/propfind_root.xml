@@ -13,6 +13,7 @@
     <d:propstat>
       <d:prop>
         <d:getetag>"etag-readme"</d:getetag>
+        <d:getcontentlength>123</d:getcontentlength>
         <oc:checksums>
           <oc:checksum>SHA1:1111111111111111111111111111111111111111</oc:checksum>
         </oc:checksums>

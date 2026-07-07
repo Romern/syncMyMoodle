@@ -1,4 +1,5 @@
 import hashlib
+import logging
 import os
 
 from syncmymoodle import course_cache, downloader, pathing
@@ -109,6 +110,14 @@ def test_youtube_outtmpl_applies_windows_prefix_after_template_suffix(
     assert captured["links"] == ["https://youtu.be/abcdefghijk"]
 
 
+def test_human_readable_size_formats_binary_units():
+    assert downloader.human_readable_size(10) == "10 B"
+    assert downloader.human_readable_size(1024) == "1 KiB"
+    assert downloader.human_readable_size(1536) == "1.5 KiB"
+    assert downloader.human_readable_size(5 * 1024**2) == "5 MiB"
+    assert downloader.human_readable_size(1024**5) == "1 PiB"
+
+
 def seed_course_cache(config, *, timemodified, etag, is_downloaded=True):
     """Write a per-course cache to disk describing a previously synced file.
 
@@ -125,12 +134,16 @@ def seed_course_cache(config, *, timemodified, etag, is_downloaded=True):
     course_cache.cache_root_node(cache_syncer)
 
 
-def make_run_syncer(config, *, timemodified, etag=None):
+def make_run_syncer(config, *, timemodified, etag=None, remote_size=None):
     """Return a syncer plus the leaf node for the current (changed) sync run."""
     syncer = make_context(config)
     syncer.session = FakeSession()
     _, file_node = build_single_file_tree(
-        "slides.pdf", URL, timemodified=timemodified, etag=etag
+        "slides.pdf",
+        URL,
+        timemodified=timemodified,
+        etag=etag,
+        remote_size=remote_size,
     )
     return syncer, file_node
 
@@ -158,6 +171,15 @@ def build_duplicate_section_file_tree():
         name_clash_id=None,
     )
     return root, first_file, second_file
+
+
+def build_youtube_tree(link):
+    root = Node("", -1, "Root", None)
+    semester = root.add_child("26ss", None, "Semester")
+    course = semester.add_child("Video Course", 301, "Course")
+    section = course.add_child("General", 401, "Section")
+    video = section.add_child("Video", link, "Youtube", url=link)
+    return root, section, video
 
 
 # --------------------------------------------------------------------------
@@ -206,7 +228,7 @@ def test_download_is_skipped_for_excluded_filetypes(tmp_path):
     assert syncer.session.calls == []
 
 
-def test_download_is_skipped_when_max_file_size_is_exceeded(tmp_path):
+def test_download_is_skipped_when_max_file_size_is_exceeded(tmp_path, caplog):
     config = {"paths.sync_directory": str(tmp_path), "filters.max_file_size": "1K"}
     syncer, file_node = make_run_syncer(config, timemodified=1710000500)
     download_path = node_path(syncer, file_node)
@@ -219,8 +241,26 @@ def test_download_is_skipped_when_max_file_size_is_exceeded(tmp_path):
         ),
     )
 
+    caplog.set_level(logging.WARNING, logger="syncmymoodle.downloader")
     assert download_file(syncer, file_node) is True
     assert not download_path.exists()
+    assert file_node.remote_size == 2048
+    assert "known size" not in caplog.text
+    assert "size (2 KiB) exceeds max_file_size (1 KiB)" in caplog.text
+    assert "2048 bytes" not in caplog.text
+
+
+def test_download_uses_known_remote_size_before_get(tmp_path):
+    config = {"paths.sync_directory": str(tmp_path), "filters.max_file_size": "1K"}
+    syncer, file_node = make_run_syncer(
+        config, timemodified=1710000500, remote_size=2048
+    )
+    download_path = node_path(syncer, file_node)
+
+    # No GET route registered: the known size is enough to skip.
+    assert download_file(syncer, file_node) is True
+    assert not download_path.exists()
+    assert syncer.session.calls == []
 
 
 def test_download_is_skipped_when_below_min_file_size(tmp_path):
@@ -238,15 +278,14 @@ def test_download_is_skipped_when_below_min_file_size(tmp_path):
 
     assert download_file(syncer, file_node) is True
     assert not download_path.exists()
+    assert file_node.remote_size == 10
 
 
 def test_max_file_size_skips_large_youtube_videos(tmp_path, monkeypatch):
     config = {"paths.sync_directory": str(tmp_path), "filters.max_file_size": "1M"}
     syncer = make_context(config)
     link = "https://youtu.be/abcdefghijk"
-    root = Node("", -1, "Root", None)
-    section = root.add_child("Section", 1, "Section")
-    video_node = section.add_child("Video", link, "Youtube", url=link)
+    _, section, video_node = build_youtube_tree(link)
 
     class FakeYoutubeDL:
         def __init__(self, opts):
@@ -269,6 +308,32 @@ def test_max_file_size_skips_large_youtube_videos(tmp_path, monkeypatch):
 
     assert downloader.scan_and_download_youtube(syncer, video_node) is True
     assert not node_path(syncer, section).exists()
+    assert video_node.remote_size == 5 * 1024**2
+
+
+def test_cached_youtube_size_skips_without_yt_dlp(tmp_path, monkeypatch):
+    config = {"paths.sync_directory": str(tmp_path), "filters.max_file_size": "1M"}
+    link = "https://youtu.be/abcdefghijk"
+
+    cache_syncer = make_context(config)
+    cached_root, _, cached_video = build_youtube_tree(link)
+    cached_video.remote_size = 5 * 1024**2
+    cached_video.mark_handled()
+    cache_syncer.root_node = cached_root
+    course_cache.cache_root_node(cache_syncer)
+
+    syncer = make_context(config)
+    _, section, video_node = build_youtube_tree(link)
+
+    class FakeYoutubeDL:
+        def __init__(self, opts):
+            raise AssertionError("cached oversized video must not query yt-dlp")
+
+    monkeypatch.setattr(downloader.yt_dlp, "YoutubeDL", FakeYoutubeDL)
+
+    assert downloader.scan_and_download_youtube(syncer, video_node) is True
+    assert not node_path(syncer, section).exists()
+    assert video_node.remote_size == 5 * 1024**2
 
 
 def test_dry_run_honors_youtube_size_limits(tmp_path, monkeypatch, capsys):
@@ -279,9 +344,7 @@ def test_dry_run_honors_youtube_size_limits(tmp_path, monkeypatch, capsys):
     }
     syncer = make_context(config)
     link = "https://youtu.be/abcdefghijk"
-    root = Node("", -1, "Root", None)
-    section = root.add_child("Section", 1, "Section")
-    video_node = section.add_child("Video", link, "Youtube", url=link)
+    _, section, video_node = build_youtube_tree(link)
 
     class FakeYoutubeDL:
         def __init__(self, opts):
@@ -305,6 +368,7 @@ def test_dry_run_honors_youtube_size_limits(tmp_path, monkeypatch, capsys):
     assert downloader.scan_and_download_youtube(syncer, video_node) is True
     assert "Would download" not in capsys.readouterr().out
     assert not node_path(syncer, section).exists()
+    assert video_node.remote_size == 5 * 1024**2
 
 
 def test_youtube_estimated_size_sums_requested_formats():
@@ -341,6 +405,7 @@ def test_download_within_max_file_size_proceeds(tmp_path):
 
     assert download_file(syncer, file_node) is True
     assert node_path(syncer, file_node).read_bytes() == b"data"
+    assert file_node.remote_size == 4
 
 
 def test_dry_run_reports_downloads_without_writing(tmp_path, capsys):
@@ -1203,6 +1268,22 @@ def test_legacy_is_downloaded_cache_key_is_read_as_handled(tmp_path):
     assert syncer.session.calls == []
     assert download_path.read_bytes() == content
     assert course_cache.get_old_node_for(syncer, current_file).is_handled is True
+
+
+def test_course_cache_round_trips_remote_size(tmp_path):
+    config = {"paths.sync_directory": str(tmp_path)}
+    cache_syncer = make_context(config)
+    cached_root, cached_file = build_single_file_tree(
+        "slides.pdf", URL, timemodified=100, etag='"v1"', remote_size=2048
+    )
+    cached_file.is_downloaded = True
+    cache_syncer.root_node = cached_root
+    course_cache.cache_root_node(cache_syncer)
+
+    syncer, current_file = make_run_syncer(config, timemodified=100)
+    old_file = course_cache.get_old_node_for(syncer, current_file)
+
+    assert old_file.remote_size == 2048
 
 
 def test_cache_preserves_content_hash_for_skipped_existing_file(tmp_path):

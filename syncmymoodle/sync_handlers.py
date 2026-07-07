@@ -246,6 +246,7 @@ def handle_embedded_link_module(
                             url=track.url,
                             etag=track.remote_marker,
                             etag_kind=track.remote_marker_kind,
+                            remote_size=track.size,
                         )
 
                 if scan_page_links:
@@ -377,6 +378,7 @@ def handle_opencast_lti_module(
                 url=track.url,
                 etag=track.remote_marker,
                 etag_kind=track.remote_marker_kind,
+                remote_size=track.size,
             )
     else:
         if not engage_single_id:
@@ -401,6 +403,7 @@ def handle_opencast_lti_module(
                 url=track.url,
                 etag=track.remote_marker,
                 etag_kind=track.remote_marker_kind,
+                remote_size=track.size,
             )
 
 

@@ -33,6 +33,19 @@ def content_type_without_parameters(response: Any) -> str:
     return media_type_without_parameters(response.headers.get("Content-Type", ""))
 
 
+def content_length(response: Any, extra_bytes: int = 0) -> int | None:
+    value = response.headers.get("Content-Length") or response.headers.get(
+        "content-length"
+    )
+    if not value:
+        return None
+    try:
+        size = int(value) + max(extra_bytes, 0)
+    except ValueError:
+        return None
+    return size if size >= 0 else None
+
+
 def filename_from_url(url: Any) -> str:
     """Return the last path segment of a URL, ignoring query and fragment."""
     return urllib.parse.urlsplit(str(url)).path.split("/")[-1]

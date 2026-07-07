@@ -22,6 +22,7 @@ from syncmymoodle.constants import (
 from syncmymoodle.context import SyncContext
 from syncmymoodle.http_utils import (
     HTML_CONTENT_TYPES,
+    content_length,
     content_type_without_parameters,
 )
 from syncmymoodle.node import Node, RemoteMarkerKind
@@ -341,19 +342,53 @@ def size_limits_configured(ctx: SyncContext) -> bool:
     return bool(ctx.config.max_file_size or ctx.config.min_file_size)
 
 
+def human_readable_size(size: int) -> str:
+    if size < 1024:
+        return f"{size} B"
+    value = float(size)
+    for unit in ("KiB", "MiB", "GiB", "TiB", "PiB"):
+        value /= 1024
+        if value < 1024 or unit == "PiB":
+            if value.is_integer():
+                return f"{value:.0f} {unit}"
+            return f"{value:.1f} {unit}" if value < 10 else f"{value:.0f} {unit}"
+    raise AssertionError("unreachable")
+
+
 def size_limit_violation(ctx: SyncContext, size: int) -> str | None:
     """Which of filters.max_file_size/min_file_size ``size`` violates, if any."""
     max_size = ctx.config.max_file_size
     if max_size and size > max_size:
-        return f"exceeds max_file_size ({max_size} bytes)"
+        return f"exceeds max_file_size ({human_readable_size(max_size)})"
     min_size = ctx.config.min_file_size
     if min_size and size < min_size:
-        return f"is below min_file_size ({min_size} bytes)"
+        return f"is below min_file_size ({human_readable_size(min_size)})"
     return None
+
+
+def known_remote_size_violates_limit(
+    ctx: SyncContext,
+    node: Node,
+    downloadpath: Path,
+    log: logging.Logger = logger,
+) -> bool:
+    if not size_limits_configured(ctx) or node.remote_size is None:
+        return False
+    violation = size_limit_violation(ctx, node.remote_size)
+    if violation is None:
+        return False
+    log.warning(
+        "Skipping download of %s because its known size (%s) %s",
+        downloadpath,
+        human_readable_size(node.remote_size),
+        violation,
+    )
+    return True
 
 
 def download_violates_size_limits(
     ctx: SyncContext,
+    node: Node,
     response: Any,
     resume_size: int,
     downloadpath: Path,
@@ -363,22 +398,19 @@ def download_violates_size_limits(
 
     Best-effort: responses without a Content-Length header are not limited.
     """
+    total_size = content_length(response, resume_size)
+    if total_size is None:
+        return False
+    node.remote_size = total_size
     if not size_limits_configured(ctx):
-        return False
-    content_length = response.headers.get("content-length")
-    if not content_length:
-        return False
-    try:
-        total_size = int(content_length) + max(resume_size, 0)
-    except ValueError:
         return False
     violation = size_limit_violation(ctx, total_size)
     if violation is None:
         return False
     log.warning(
-        "Skipping download of %s because its size (%d bytes) %s",
+        "Skipping download of %s because its size (%s) %s",
         downloadpath,
-        total_size,
+        human_readable_size(total_size),
         violation,
     )
     return True
@@ -551,6 +583,8 @@ def download_file(
 
     if should_skip_before_decision(ctx, node, downloadpath, log):
         return True
+    if known_remote_size_violates_limit(ctx, node, downloadpath, log):
+        return True
 
     decision = decide_download(ctx, node, downloadpath, log)
     if decision.skip:
@@ -583,7 +617,9 @@ def download_file(
         resume_size = transfer.resume_size if transfer is not None else 0
         if not download_response_is_usable(node, response, downloadpath, log):
             return True if ctx.config.dry_run else False
-        if download_violates_size_limits(ctx, response, resume_size, downloadpath, log):
+        if download_violates_size_limits(
+            ctx, node, response, resume_size, downloadpath, log
+        ):
             return True
 
         if ctx.config.dry_run:
@@ -687,6 +723,8 @@ def scan_and_download_youtube(
     if ctx.config.dry_run and not size_limits_configured(ctx):
         print(f"Would download YouTube video {link} to {path} [Youtube]")
         return True
+    if cached_youtube_size_violates_limit(ctx, node, path, log):
+        return True
     outtmpl = pathing.with_windows_extended_length_prefix(
         path / "%(title)s-%(id)s.%(ext)s",
         force=True,
@@ -699,7 +737,7 @@ def scan_and_download_youtube(
         "match_filter": yt_dlp.match_filter_func("!is_live"),
     }
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-        if youtube_violates_size_limits(ctx, ydl, link, log):
+        if youtube_violates_size_limits(ctx, ydl, node, link, log):
             return True
         if ctx.config.dry_run:
             print(f"Would download YouTube video {link} to {path} [Youtube]")
@@ -709,9 +747,23 @@ def scan_and_download_youtube(
     return True
 
 
+def cached_youtube_size_violates_limit(
+    ctx: SyncContext,
+    node: Node,
+    path: Path,
+    log: logging.Logger = logger,
+) -> bool:
+    old_node = course_cache.get_old_node_for(ctx, node, log)
+    if old_node is None or not old_node.is_handled or old_node.remote_size is None:
+        return False
+    node.remote_size = old_node.remote_size
+    return known_remote_size_violates_limit(ctx, node, path, log)
+
+
 def youtube_violates_size_limits(
     ctx: SyncContext,
     ydl: Any,
+    node: Node,
     link: str,
     log: logging.Logger = logger,
 ) -> bool:
@@ -728,13 +780,14 @@ def youtube_violates_size_limits(
     total_size = youtube_estimated_size(info)
     if total_size is None:
         return False
+    node.remote_size = total_size
     violation = size_limit_violation(ctx, total_size)
     if violation is None:
         return False
     log.warning(
-        "Skipping YouTube video %s because its estimated size (%d bytes) %s",
+        "Skipping YouTube video %s because its estimated size (%s) %s",
         link,
-        total_size,
+        human_readable_size(total_size),
         violation,
     )
     return True

@@ -13,6 +13,7 @@
     <d:propstat>
       <d:prop>
         <d:getetag>"etag-deck"</d:getetag>
+        <d:getcontentlength>456</d:getcontentlength>
         <oc:checksums>
           <oc:checksum>SHA1:2222222222222222222222222222222222222222</oc:checksum>
         </oc:checksums>

@@ -41,6 +41,16 @@ def _download_status(value: DownloadStatus | str | None) -> DownloadStatus | Non
         return None
 
 
+def _optional_int(value: Any) -> int | None:
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return None
+    return parsed if parsed >= 0 else None
+
+
 class Node:
     def __init__(
         self,
@@ -54,6 +64,7 @@ class Node:
         etag: str | None = None,
         etag_kind: RemoteMarkerKind | str | None = None,
         content_hash: str | None = None,
+        remote_size: Any = None,
         name_clash_id: Any = NAME_CLASH_ID_UNSET,
         download_status: DownloadStatus | str | None = None,
         is_downloaded: bool = False,
@@ -72,6 +83,7 @@ class Node:
         # Unlike etag, which for Sciebo/WebDAV is an opaque revision token, this
         # is a real hash of our copy, used to detect local user modifications.
         self.content_hash = content_hash
+        self.remote_size = _optional_int(remote_size)
         self.name_clash_id = (
             id if name_clash_id is NAME_CLASH_ID_UNSET else name_clash_id
         )
@@ -109,6 +121,7 @@ class Node:
         timemodified: Any = None,
         etag: str | None = None,
         etag_kind: RemoteMarkerKind | str | None = None,
+        remote_size: Any = None,
         name_clash_id: Any = NAME_CLASH_ID_UNSET,
     ) -> Node | None:
         if url:
@@ -131,6 +144,7 @@ class Node:
             timemodified=timemodified,
             etag=etag,
             etag_kind=etag_kind,
+            remote_size=remote_size,
             name_clash_id=name_clash_id,
         )
         self.children.append(temp)
@@ -148,6 +162,7 @@ class Node:
             etag=self.etag,
             etag_kind=self.etag_kind,
             content_hash=self.content_hash,
+            remote_size=self.remote_size,
             name_clash_id=self.name_clash_id,
             download_status=self.download_status,
         )

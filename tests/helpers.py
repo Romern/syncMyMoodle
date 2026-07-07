@@ -224,6 +224,7 @@ def build_single_file_tree(
     *,
     timemodified: int | None = None,
     etag: str | None = None,
+    remote_size: int | None = None,
     semester: str = "26ss",
     course: str = "Download Course",
     course_id: int = 301,
@@ -248,5 +249,6 @@ def build_single_file_tree(
         url=url,
         timemodified=timemodified,
         etag=etag,
+        remote_size=remote_size,
     )
     return root, file_node

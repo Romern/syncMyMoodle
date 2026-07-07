@@ -29,6 +29,7 @@ PROPFIND_BODY = """<?xml version="1.0" encoding="UTF-8"?>
   <d:prop>
     <d:getlastmodified/>
     <d:getetag/>
+    <d:getcontentlength/>
     <oc:checksums/>
   </d:prop>
 </d:propfind>"""
@@ -170,6 +171,7 @@ def _add_sciebo_files(
         remote_marker = _extract_remote_marker(resp)
         etag_value = remote_marker[0] if remote_marker else None
         etag_kind = remote_marker[1] if remote_marker else None
+        remote_size = _extract_remote_size(resp)
 
         log.info(f"Sciebo response href: {new_href}")
         # get the displayname of the response
@@ -191,6 +193,7 @@ def _add_sciebo_files(
                 "Sciebo Folder",
                 etag=etag_value,
                 etag_kind=etag_kind,
+                remote_size=remote_size,
             )
             if folder_node is None:
                 continue
@@ -208,6 +211,7 @@ def _add_sciebo_files(
                 download_headers=auth_header,
                 etag=etag_value,
                 etag_kind=etag_kind,
+                remote_size=remote_size,
             )
 
 
@@ -230,3 +234,17 @@ def _extract_remote_marker(response_tag: Any) -> tuple[str, RemoteMarkerKind] | 
         return str(etag_tag.text).strip(), RemoteMarkerKind.OPAQUE
 
     return None
+
+
+def _extract_remote_size(response_tag: Any) -> int | None:
+    prop = response_tag.find("d:prop")
+    if prop is None:
+        return None
+    size_tag = prop.find("d:getcontentlength")
+    if size_tag is None or not size_tag.text:
+        return None
+    try:
+        size = int(size_tag.text.strip())
+    except ValueError:
+        return None
+    return size if size >= 0 else None

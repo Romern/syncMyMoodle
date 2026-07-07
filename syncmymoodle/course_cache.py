@@ -49,6 +49,7 @@ def node_to_cache_data(
     etag = node.etag
     etag_kind = node.etag_kind
     content_hash = getattr(node, "content_hash", None)
+    remote_size = getattr(node, "remote_size", None)
     is_handled = node.is_handled
     node_path = _node_path(ctx, node)
     downloaded_this_run = node_path in ctx.downloaded_paths
@@ -67,6 +68,11 @@ def node_to_cache_data(
         etag = getattr(old_node, "etag", None)
         etag_kind = getattr(old_node, "etag_kind", None)
         content_hash = getattr(old_node, "content_hash", None)
+        remote_size = (
+            remote_size
+            if remote_size is not None
+            else getattr(old_node, "remote_size", None)
+        )
         is_handled = True
     return {
         "name": node.name,
@@ -77,6 +83,7 @@ def node_to_cache_data(
         "etag": etag,
         "etag_kind": str(etag_kind) if etag_kind else None,
         "content_hash": content_hash,
+        "remote_size": remote_size,
         "name_clash_id": node.name_clash_id,
         "download_status": str(
             DownloadStatus.HANDLED if is_handled else DownloadStatus.PENDING
@@ -103,6 +110,7 @@ def node_from_cache_data(data: dict[str, Any], parent: Node | None = None) -> No
         etag=data.get("etag"),
         etag_kind=data.get("etag_kind"),
         content_hash=data.get("content_hash"),
+        remote_size=data.get("remote_size"),
         name_clash_id=data.get("name_clash_id", NAME_CLASH_ID_UNSET),
         download_status=download_status,
         is_downloaded=legacy_is_downloaded,
@@ -125,6 +133,8 @@ def ensure_timemodified_attribute(node: Node) -> None:
         node.etag_kind = None
     if not hasattr(node, "content_hash"):
         node.content_hash = None
+    if not hasattr(node, "remote_size"):
+        node.remote_size = None
     if not hasattr(node, "name_clash_id"):
         node.name_clash_id = getattr(node, "id", None)
     for child in getattr(node, "children", []):

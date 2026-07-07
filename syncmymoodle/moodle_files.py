@@ -29,6 +29,7 @@ def add_moodle_file_node(
     type: str,  # noqa: A002 - keep Moodle payload name
     url: str | None,
     timemodified: Any = None,
+    remote_size: int | None = None,
     name_clash_id: Any = NAME_CLASH_ID_UNSET,
 ) -> Node | None:
     target_node: Node | None = parent_node
@@ -55,6 +56,7 @@ def add_moodle_file_node(
         type,
         url=url,
         timemodified=timemodified,
+        remote_size=remote_size,
         name_clash_id=name_clash_id,
     )
 
@@ -82,6 +84,7 @@ def add_moodle_content_file_node(
         file_type or f"Linked file [{mimetype}]",
         file_url,
         timemodified=content.get("timemodified"),
+        remote_size=content.get("filesize"),
         name_clash_id=None,
     )
 

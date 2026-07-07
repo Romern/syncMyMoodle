@@ -140,6 +140,9 @@ def test_sciebo_public_share_is_cached_per_sync_run():
     assert session.count("GET", link) == 1
     assert session.count("PROPFIND", public_root) == 1
     assert session.count("PROPFIND", public_slides) == 1
+    sciebo_root = first_parent.children[0]
+    assert sciebo_root.children[0].remote_size == 123
+    assert sciebo_root.children[1].children[0].remote_size == 456
     assert [
         row.replace("First occurrence/", "") for row in node_rows(first_parent)
     ] == [row.replace("Second occurrence/", "") for row in node_rows(second_parent)]
@@ -249,7 +252,11 @@ def test_mixed_course_sync_tree_covers_common_module_surfaces(monkeypatch):
         "HEAD",
         direct_pdf,
         FakeResponse(
-            headers={"Content-Type": "application/pdf", "ETag": '"direct-file-v1"'}
+            headers={
+                "Content-Type": "application/pdf",
+                "Content-Length": "1234",
+                "ETag": '"direct-file-v1"',
+            }
         ),
     )
     session.add(
@@ -288,6 +295,7 @@ def test_mixed_course_sync_tree_covers_common_module_surfaces(monkeypatch):
             f"https://video.example.test/{episode_id}/presentation.mp4",
             checksum_type="md5",
             checksum="33333333333333333333333333333333",
+            size=5678,
         ),
     )
 
@@ -300,6 +308,14 @@ def test_mixed_course_sync_tree_covers_common_module_surfaces(monkeypatch):
     assert session.count("GET", page_url) == 1
     assert session.count("GET", h5p_url) == 1
     assert session.count("GET", h5p_iframe_url) == 1
+    direct_node = syncer.root_node.go_to_path(
+        ["26ss", "Comprehensive Sync", "Materials", "direct.pdf"]
+    )
+    opencast_node = syncer.root_node.go_to_path(
+        ["26ss", "Comprehensive Sync", "Materials", "Page module"]
+    )
+    assert direct_node.remote_size == 1234
+    assert opencast_node.remote_size == 5678
     assert_snapshot("mixed_course_tree.txt", node_rows(syncer.root_node))
 
 

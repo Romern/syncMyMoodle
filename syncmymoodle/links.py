@@ -9,6 +9,7 @@ from syncmymoodle.constants import OPENCAST_LINK_RE, YOUTUBE_LINK_RE
 from syncmymoodle.context import SyncContext
 from syncmymoodle.http_utils import (
     HTML_CONTENT_TYPES,
+    content_length,
     content_type_without_parameters,
     filename_from_url,
     parse_html,
@@ -91,6 +92,7 @@ def scan_for_links(
                         if response.headers.get("ETag")
                         else None
                     ),
+                    remote_size=content_length(response),
                 )
                 # instantly return as it was a direct link
                 return
@@ -151,6 +153,7 @@ def scan_for_links(
                 url=track.url,
                 etag=track.remote_marker,
                 etag_kind=track.remote_marker_kind,
+                remote_size=track.size,
             )
 
     # https://rwth-aachen.sciebo.de/s/XXX
