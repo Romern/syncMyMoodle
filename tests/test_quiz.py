@@ -341,17 +341,24 @@ def test_render_pdf_with_chromium_success(tmp_path, monkeypatch):
     html_path.write_text("<html></html>", encoding="utf-8")
     pdf_path = tmp_path / "out.pdf"
     command = []
+    run_kwargs = {}
 
     def fake_run(cmd, **kwargs):
         command.extend(cmd)
+        run_kwargs.update(kwargs)
         # The output path is passed via --print-to-pdf=<path>.
         pdf_path.write_bytes(b"%PDF-1.4 fake")
         return SimpleNamespace(returncode=0, stderr=b"")
 
+    monkeypatch.setattr(quiz, "CHROMIUM_PROCESS_TIMEOUT_SECONDS", 12)
     monkeypatch.setattr(subprocess, "run", fake_run)
     assert quiz.render_pdf_with_chromium("/fake/chrome", html_path, pdf_path)
     assert pdf_path.exists()
     assert "--no-pdf-header-footer" in command
+    assert "--disable-file-system" in command
+    assert "--disable-javascript" in command
+    assert "--js-flags=--jitless" in command
+    assert run_kwargs["timeout"] == 12
 
 
 def test_render_pdf_with_chromium_failure(tmp_path, monkeypatch):

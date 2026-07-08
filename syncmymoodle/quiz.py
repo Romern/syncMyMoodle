@@ -28,6 +28,7 @@ from syncmymoodle.constants import (
     CHROMIUM_BINARY_NAMES,
     CHROMIUM_KNOWN_PATHS,
     CHROMIUM_PDF_TIMEOUT_MS,
+    CHROMIUM_PROCESS_TIMEOUT_SECONDS,
     DEFAULT_BLOCK_SIZE,
     MOODLE_NETLOC,
     MOODLE_URL,
@@ -776,7 +777,10 @@ def render_pdf_with_chromium(
                 "--disable-component-update",
                 "--disable-default-apps",
                 "--disable-extensions",
+                "--disable-file-system",
+                "--disable-javascript",
                 "--disable-sync",
+                "--js-flags=--jitless",
                 "--no-default-browser-check",
                 "--no-first-run",
                 "--no-pdf-header-footer",
@@ -789,7 +793,7 @@ def render_pdf_with_chromium(
                 cmd,
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.PIPE,
-                timeout=CHROMIUM_PDF_TIMEOUT_MS / 1000 + 60,
+                timeout=CHROMIUM_PROCESS_TIMEOUT_SECONDS,
             )
     except (OSError, subprocess.SubprocessError) as exc:
         log.warning("Failed to run %s for quiz PDF rendering: %s", browser, exc)

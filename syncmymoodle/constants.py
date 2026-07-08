@@ -75,7 +75,8 @@ CHROMIUM_KNOWN_PATHS = (
     r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe",
 )
 
-# Headless render budget (ms). Chromium's --virtual-time-budget lets client-side
-# MathJax finish typesetting before the page is printed, replacing the fixed
-# javascript-delay the old wkhtmltopdf renderer relied on.
+# Headless render budget (ms). The snapshot has no active JavaScript, but
+# Chromium's virtual time gives local assets and layout a bounded window to
+# settle before printing.
 CHROMIUM_PDF_TIMEOUT_MS = 30000
+CHROMIUM_PROCESS_TIMEOUT_SECONDS = 90
