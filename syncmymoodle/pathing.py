@@ -22,18 +22,31 @@ def is_windows() -> bool:
     return os.name == "nt"
 
 
+def absolute_path(path: Path, base_dir: Path | None = None) -> Path:
+    """Return an absolute path without depending on later CWD changes."""
+    path = path.expanduser()
+    if path.is_absolute():
+        return Path(os.path.abspath(path))
+    if base_dir is None:
+        base_dir = Path.cwd()
+    return Path(os.path.abspath(absolute_path(base_dir) / path))
+
+
 def user_config_dir() -> Path:
     xdg_config_home = os.environ.get("XDG_CONFIG_HOME")
     if xdg_config_home:
-        return Path(xdg_config_home).expanduser() / "syncmymoodle"
-    if is_windows():
-        root = os.environ.get("APPDATA")
-        if root:
-            return Path(root).expanduser() / "syncmymoodle"
-        return Path.home() / "AppData" / "Roaming" / "syncmymoodle"
-    if sys.platform == "darwin":
-        return Path.home() / "Library" / "Application Support" / "syncmymoodle"
-    return Path("~/.config").expanduser() / "syncmymoodle"
+        root = Path(xdg_config_home).expanduser()
+    elif is_windows():
+        appdata = os.environ.get("APPDATA")
+        if appdata:
+            root = Path(appdata).expanduser()
+        else:
+            root = Path.home() / "AppData" / "Roaming"
+    elif sys.platform == "darwin":
+        root = Path.home() / "Library" / "Application Support"
+    else:
+        root = Path("~/.config").expanduser()
+    return absolute_path(root / "syncmymoodle")
 
 
 def is_windows_reserved_path_part(path: str) -> bool:

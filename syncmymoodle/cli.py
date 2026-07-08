@@ -25,6 +25,7 @@ from syncmymoodle.config import (
     config_validation_errors,
     convert_legacy_config,
     group_config_for_toml,
+    resolve_relative_path_options,
 )
 from syncmymoodle.constants import COURSE_CACHE_FILENAME, RWTH_MOODLE_STATUS_URL
 from syncmymoodle.context import SyncContext
@@ -37,7 +38,9 @@ except ImportError:
     keyring = None
 
 logger = logging.getLogger(__name__)
-CONFIG_FILENAMES = ("config.toml", "config.json")
+CONFIG_TOML_FILENAME = "config.toml"
+CONFIG_JSON_FILENAME = "config.json"
+CONFIG_FILENAMES = (CONFIG_TOML_FILENAME, CONFIG_JSON_FILENAME)
 STARTER_CONFIG_RESOURCE = "config.toml.example"
 
 
@@ -206,6 +209,7 @@ def read_config_file(path: Path, warn_legacy_json: bool = True) -> ConfigDict:
     Raises OSError if the file cannot be read, ValueError if it cannot be
      parsed, and ConfigValidationError if it fails validation.
     """
+    path = pathing.absolute_path(path)
     text = path.read_text(encoding="utf-8")
     if config_text_looks_like_json(text):
         if warn_legacy_json:
@@ -222,15 +226,11 @@ def read_config_file(path: Path, warn_legacy_json: bool = True) -> ConfigDict:
     errors = config_validation_errors(canonical)
     if errors:
         raise ConfigValidationError(path, errors)
-    return canonical
-
-
-def global_config_dir() -> Path:
-    return pathing.user_config_dir()
+    return resolve_relative_path_options(canonical, path.parent)
 
 
 def global_config_path() -> Path:
-    return global_config_dir() / "config.toml"
+    return pathing.user_config_dir() / CONFIG_TOML_FILENAME
 
 
 def discover_config_file(directory: Path) -> Path | None:
@@ -242,15 +242,10 @@ def discover_config_file(directory: Path) -> Path | None:
 
 
 def discover_json_migration_input() -> Path | None:
-    global_config = global_config_dir() / "config.json"
+    global_config = pathing.user_config_dir() / CONFIG_JSON_FILENAME
     if global_config.is_file():
         return global_config
     return None
-
-
-def discover_config_files() -> list[Path]:
-    config_file = discover_config_file(global_config_dir())
-    return [] if config_file is None else [config_file]
 
 
 def starter_config_text() -> str:
@@ -263,7 +258,7 @@ def starter_config_text() -> str:
 
 def generate_global_config(force: bool = False) -> Path:
     target_path = global_config_path()
-    existing_path = discover_config_file(global_config_dir())
+    existing_path = discover_config_file(pathing.user_config_dir())
     if existing_path is not None and not force:
         msg = f"global config already exists: {existing_path}; use --force to overwrite"
         raise FileExistsError(msg)
@@ -277,14 +272,15 @@ def generate_global_config(force: bool = False) -> Path:
 def load_config(args: Namespace, parser: ArgumentParser) -> ConfigDict:
     """Read the explicit config or the global config, if present."""
     if args.config:
-        explicit_config = Path(args.config)
+        explicit_config = pathing.absolute_path(Path(args.config))
         if not explicit_config.is_file():
             # Silently continuing without the explicitly requested file would
             # sync with unintended settings (or crash later); fail fast instead.
             parser.error(f"config file not found: {args.config}")
         config_paths = [explicit_config]
     else:
-        config_paths = discover_config_files()
+        config_path = discover_config_file(pathing.user_config_dir())
+        config_paths = [] if config_path is None else [config_path]
 
     config: ConfigDict = {}
     for config_path in config_paths:
@@ -332,13 +328,21 @@ def migrate_json_config(
 
 
 def migrate_config_command(args: Namespace, parser: ArgumentParser) -> None:
-    input_path = Path(args.input) if args.input else discover_json_migration_input()
+    input_path = (
+        pathing.absolute_path(Path(args.input))
+        if args.input
+        else discover_json_migration_input()
+    )
     if input_path is None:
         parser.error(
             "no legacy config.json found; pass --input to choose a file explicitly"
         )
 
-    output_path = Path(args.output) if args.output else input_path.with_suffix(".toml")
+    output_path = (
+        pathing.absolute_path(Path(args.output))
+        if args.output
+        else input_path.with_suffix(".toml")
+    )
     try:
         migrated_path = migrate_json_config(input_path, output_path, args.force)
     except (FileNotFoundError, FileExistsError, ValueError) as error:
@@ -357,8 +361,9 @@ def generate_config_command(args: Namespace, parser: ArgumentParser) -> None:
 
 
 def path_config_command() -> None:
-    discovered_path = discover_config_file(global_config_dir())
-    print(f"Global config directory: {global_config_dir()}")
+    config_dir = pathing.user_config_dir()
+    discovered_path = discover_config_file(config_dir)
+    print(f"Global config directory: {config_dir}")
     print(f"Default TOML config: {global_config_path()}")
     print(f"Discovered config: {discovered_path if discovered_path else '<none>'}")
 
@@ -384,17 +389,17 @@ def check_config_command(args: Namespace, parser: ArgumentParser) -> None:
 
 def config_check_paths(args: Namespace, parser: ArgumentParser) -> list[Path]:
     if args.config:
-        config_path = Path(args.config)
+        config_path = pathing.absolute_path(Path(args.config))
         if not config_path.is_file():
             parser.error(f"config file not found: {args.config}")
         return [config_path]
 
-    config_paths = discover_config_files()
-    if not config_paths:
+    discovered_path = discover_config_file(pathing.user_config_dir())
+    if discovered_path is None:
         parser.error(
             "no global config.toml or config.json found; pass --config to choose a file"
         )
-    return config_paths
+    return [discovered_path]
 
 
 def format_config_paths(paths: list[Path]) -> str:
@@ -424,7 +429,7 @@ def count_phrase(count: int, singular: str, plural: str) -> str:
 
 def cleanup_root_from_args(args: Namespace, parser: ArgumentParser) -> Path:
     if args.path:
-        root = Path(args.path)
+        root = pathing.absolute_path(Path(args.path))
     else:
         file_config = load_config(args, parser)
         merged = dict(file_config)
@@ -497,7 +502,12 @@ def run_clean_command(args: Namespace, parser: ArgumentParser) -> None:
     parser.error(f"unknown clean command: {args.clean_command}")
 
 
-def apply_cli_overrides(config: ConfigDict, args: Namespace) -> None:
+def apply_cli_overrides(
+    config: ConfigDict,
+    args: Namespace,
+    path_base: Path | None = None,
+) -> None:
+    path_base = Path.cwd() if path_base is None else path_base
     for option in CONFIG_OPTIONS:
         cli = option.cli
         if cli is None:
@@ -510,7 +520,11 @@ def apply_cli_overrides(config: ConfigDict, args: Namespace) -> None:
             if cli.value_kind == "csv":
                 config[option.canonical_key] = value.split(",")
             else:
-                config[option.canonical_key] = value
+                config[option.canonical_key] = (
+                    str(pathing.absolute_path(Path(value), path_base))
+                    if option.resolve_relative_path
+                    else value
+                )
 
 
 def get_or_prompt_keyring_secret(

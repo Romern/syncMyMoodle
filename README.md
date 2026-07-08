@@ -260,6 +260,8 @@ use_keyring = false               # Use the system keyring (see README) instead 
 keyring_store_totp_secret = false # Store the TOTP secret in the system keyring
 
 [paths]
+# Relative paths in config files resolve from that config file's directory.
+# Relative CLI path arguments resolve from the current working directory.
 sync_directory = "./"     # The directory where all your files will be synced to
 cookie_file = ""          # Optional session/cookie file path. Defaults to the user config directory.
 browser = ""              # Optional path to a Chrome/Chromium/Edge binary for quiz PDF rendering. Leave empty to auto-detect.

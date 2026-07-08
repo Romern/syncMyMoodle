@@ -84,6 +84,25 @@ def test_clean_conflicts_dry_run_uses_config_without_credentials(tmp_path, capsy
     assert conflict.exists()
 
 
+def test_clean_uses_config_relative_sync_directory(tmp_path, monkeypatch, capsys):
+    config_dir = tmp_path / "config"
+    root = config_dir / "Moodle"
+    current = write(root / "course" / "file.pdf", b"content")
+    conflict = write(current.with_name("file.syncconflict.aaaaaaaa.pdf"), b"content")
+    config_dir.mkdir(exist_ok=True)
+    config_path = config_dir / "config.toml"
+    config_path.write_text('[paths]\nsync_directory = "Moodle"\n', encoding="utf-8")
+    cwd = tmp_path / "work"
+    cwd.mkdir()
+    monkeypatch.chdir(cwd)
+
+    cli.main(["--config", str(config_path), "clean", "conflicts"])
+
+    captured = capsys.readouterr()
+    assert f"Would delete: {conflict}" in captured.out
+    assert captured.err == ""
+
+
 def test_clean_conflicts_apply_deletes_redundant_conflicts(tmp_path, capsys):
     current = write(tmp_path / "course" / "file.pdf", b"content")
     conflict = write(current.with_name("file.syncconflict.aaaaaaaa.pdf"), b"content")

@@ -159,6 +159,7 @@ def option(
     choices: tuple[str, ...] = (),
     validate: Callable[[Any], str | None] | None = None,
     cli: CliOverride | None = None,
+    resolve_relative_path: bool = False,
 ) -> Any:
     """Declare a :class:`Config` field together with its option schema.
 
@@ -176,6 +177,7 @@ def option(
             "choices": choices,
             "validate": validate,
             "cli": cli,
+            "resolve_relative_path": resolve_relative_path,
         }
     }
     if factory is not None:
@@ -247,6 +249,7 @@ class Config:
         "./",
         group="paths",
         falsey_uses_default=True,
+        resolve_relative_path=True,
         cli=cli_arg(
             "sync-directory",
             "specify the directory where all files will be synced",
@@ -257,6 +260,7 @@ class Config:
         factory=default_cookie_file,
         group="paths",
         falsey_uses_default=True,
+        resolve_relative_path=True,
         cli=cli_arg(
             "cookie-file",
             "set the location of a cookie file",
@@ -268,6 +272,7 @@ class Config:
     browser: str | None = option(
         group="paths",
         falsey_uses_default=True,
+        resolve_relative_path=True,
         cli=cli_arg(
             "browser",
             "set the path to a Chrome/Chromium/Edge binary for quiz PDF rendering",
@@ -566,6 +571,7 @@ class ConfigOption:
     choices: tuple[str, ...]
     validate: Callable[[Any], str | None] | None
     cli: CliOverride | None
+    resolve_relative_path: bool
 
 
 def _build_config_options() -> tuple[ConfigOption, ...]:
@@ -585,6 +591,7 @@ def _build_config_options() -> tuple[ConfigOption, ...]:
                 choices=meta["choices"],
                 validate=meta["validate"],
                 cli=meta["cli"],
+                resolve_relative_path=meta["resolve_relative_path"],
             )
         )
     return tuple(options)
@@ -613,6 +620,27 @@ def canonicalize(raw: Mapping[str, Any] | None) -> ConfigDict:
     flat: ConfigDict = {}
     _flatten_into(flat, raw or {}, "")
     return flat
+
+
+def _resolve_config_path_value(value: Any, base_dir: Path) -> Any:
+    if not value or not isinstance(value, (str, os.PathLike)):
+        return value
+    path_value = Path(cast(str | os.PathLike[str], value))
+    return os.fspath(pathing.absolute_path(path_value, base_dir))
+
+
+def resolve_relative_path_options(
+    raw: Mapping[str, Any],
+    base_dir: Path,
+) -> ConfigDict:
+    config = dict(canonicalize(raw))
+    for opt in CONFIG_OPTIONS:
+        if opt.resolve_relative_path and opt.canonical_key in config:
+            config[opt.canonical_key] = _resolve_config_path_value(
+                config[opt.canonical_key],
+                base_dir,
+            )
+    return config
 
 
 def _flatten_into(flat: ConfigDict, mapping: Mapping[str, Any], group: str) -> None:

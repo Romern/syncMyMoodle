@@ -548,6 +548,120 @@ def test_explicit_config_can_read_cwd_config(tmp_path, monkeypatch):
     assert cfg.follow_links is True
 
 
+def test_explicit_config_relative_paths_resolve_from_config_dir(tmp_path, monkeypatch):
+    config_dir = tmp_path / "configs"
+    config_dir.mkdir()
+    cwd = tmp_path / "work"
+    cwd.mkdir()
+    config_path = config_dir / "sync.toml"
+    config_path.write_text(
+        """
+[paths]
+sync_directory = "downloads"
+cookie_file = "cookies/session"
+browser = "bin/chrome"
+""",
+        encoding="utf-8",
+    )
+    monkeypatch.chdir(cwd)
+
+    parser = cli.build_parser()
+    args = parser.parse_args(["--config", "../configs/sync.toml"])
+
+    assert cli.load_config(args, parser) == {
+        "paths.sync_directory": str(config_dir / "downloads"),
+        "paths.cookie_file": str(config_dir / "cookies" / "session"),
+        "paths.browser": str(config_dir / "bin" / "chrome"),
+    }
+
+
+def test_global_config_relative_paths_resolve_from_global_config_dir(
+    tmp_path, monkeypatch
+):
+    config_dir = tmp_path / "xdg" / "syncmymoodle"
+    config_dir.mkdir(parents=True)
+    (config_dir / "config.toml").write_text(
+        """
+[paths]
+sync_directory = "downloads"
+cookie_file = "cookies/session"
+browser = "bin/chrome"
+""",
+        encoding="utf-8",
+    )
+    cwd = tmp_path / "work"
+    cwd.mkdir()
+    monkeypatch.chdir(cwd)
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "xdg"))
+
+    parser = cli.build_parser()
+    args = parser.parse_args([])
+
+    assert cli.load_config(args, parser) == {
+        "paths.sync_directory": str(config_dir / "downloads"),
+        "paths.cookie_file": str(config_dir / "cookies" / "session"),
+        "paths.browser": str(config_dir / "bin" / "chrome"),
+    }
+
+
+def test_cli_relative_path_overrides_resolve_from_invoking_cwd(tmp_path, monkeypatch):
+    config_dir = tmp_path / "configs"
+    config_dir.mkdir()
+    cwd = tmp_path / "work"
+    cwd.mkdir()
+    (config_dir / "sync.toml").write_text(
+        """
+[paths]
+sync_directory = "config-downloads"
+cookie_file = "config-session"
+browser = "config-browser"
+""",
+        encoding="utf-8",
+    )
+    monkeypatch.chdir(cwd)
+
+    parser = cli.build_parser()
+    args = parser.parse_args(
+        [
+            "--config",
+            "../configs/sync.toml",
+            "--sync-directory",
+            "cli-downloads",
+            "--cookie-file",
+            "cli-session",
+            "--browser",
+            "bin/chrome",
+        ]
+    )
+
+    config = cli.config_from_args(args, parser, require_credentials=False)
+
+    assert config.sync_directory == str(cwd / "cli-downloads")
+    assert config.cookie_file == str(cwd / "cli-session")
+    assert config.browser == str(cwd / "bin" / "chrome")
+
+
+def test_cli_path_overrides_do_not_resolve_symlinks(tmp_path, monkeypatch):
+    cwd = tmp_path / "work"
+    cwd.mkdir()
+    real_browser = tmp_path / "real-chrome"
+    real_browser.touch()
+    browser = cwd / "chrome"
+    try:
+        browser.symlink_to(real_browser)
+    except OSError as exc:
+        pytest.skip(f"symlinks are not available: {exc}")
+    monkeypatch.chdir(cwd)
+
+    parser = cli.build_parser()
+    args = parser.parse_args(["--browser", "chrome"])
+    config: dict = {}
+
+    cli.apply_cli_overrides(config, args)
+
+    assert config == {"paths.browser": str(browser)}
+
+
 def test_cli_rejects_legacy_keys_in_toml_config(tmp_path, capsys):
     # Legacy spellings are only converted for JSON configs; TOML must use
     # the current names, and the error points at them.

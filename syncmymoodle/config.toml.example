@@ -7,6 +7,7 @@ use_keyring = false
 keyring_store_totp_secret = false
 
 [paths]
+# Relative paths in this file resolve from this config file's directory.
 sync_directory = "./"
 cookie_file = "" # Defaults to the user config directory, e.g. ~/.config/syncmymoodle/session on Linux
 browser = ""

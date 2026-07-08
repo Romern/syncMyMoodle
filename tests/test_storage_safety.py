@@ -78,6 +78,13 @@ def test_user_config_dir_uses_xdg_override(tmp_path, monkeypatch):
     assert pathing.user_config_dir() == tmp_path / "xdg" / "syncmymoodle"
 
 
+def test_user_config_dir_returns_absolute_path(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("XDG_CONFIG_HOME", "xdg")
+
+    assert pathing.user_config_dir() == tmp_path / "xdg" / "syncmymoodle"
+
+
 def test_user_config_dir_uses_windows_appdata(tmp_path, monkeypatch):
     monkeypatch.delenv("XDG_CONFIG_HOME", raising=False)
     monkeypatch.setenv("APPDATA", str(tmp_path / "appdata"))
