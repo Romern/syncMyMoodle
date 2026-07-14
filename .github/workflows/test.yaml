@@ -11,10 +11,17 @@ permissions:
 
 jobs:
   test:
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.os }}
     strategy:
+      fail-fast: false
       matrix:
+        os: [ubuntu-latest]
         python-version: ["3.11", "3.12", "3.13", "3.14"]
+        include:
+          - os: macos-latest
+            python-version: "3.13"
+          - os: windows-latest
+            python-version: "3.13"
 
     steps:
       - uses: actions/checkout@v6
@@ -31,13 +38,16 @@ jobs:
           pip install .[test]
 
       - name: Check formatting with ruff
+        if: runner.os == 'Linux'
         run: ruff format --check syncmymoodle tests
 
       - name: Lint with ruff
+        if: runner.os == 'Linux'
         run: ruff check syncmymoodle tests
 
       - name: Run tests
         run: python -m pytest
 
       - name: Analyze with mypy
+        if: runner.os == 'Linux'
         run: mypy syncmymoodle

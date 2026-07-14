@@ -51,14 +51,13 @@ target-version = "py311"
 
 [tool.ruff.lint]
 # E/W: pycodestyle, F: pyflakes, B: bugbear, I: import sorting (replaces
-# black + isort + flake8 + flake8-bugbear).
-# Complexity checking (C90) is turned off for now; the old flake8 config
-# selected it but never took effect. Enabling it flags several long
-# functions (e.g. rwth.login, sync_handlers) that might be worth a
-# refactor later.
-select = ["E", "W", "F", "B", "I"]
+# black + isort + flake8 + flake8-bugbear), C90: McCabe complexity.
+select = ["E", "W", "F", "B", "I", "C90"]
 # Line length is the formatter's job.
 ignore = ["E501"]
+
+[tool.ruff.lint.mccabe]
+max-complexity = 10
 
 [tool.mypy]
 check_untyped_defs = true
