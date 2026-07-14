@@ -13,7 +13,6 @@ from typing import Any
 
 import requests
 import yt_dlp
-from tqdm import tqdm
 
 from syncmymoodle import course_cache, filters, links, pathing, quiz
 from syncmymoodle.constants import (
@@ -36,6 +35,7 @@ from syncmymoodle.http_utils import (
     safe_request_error,
 )
 from syncmymoodle.node import Node, RemoteMarkerKind
+from syncmymoodle.output import TransferProgress, format_size
 
 logger = logging.getLogger(__name__)
 CONTENT_RANGE_RE = re.compile(
@@ -95,6 +95,56 @@ class TransferPlan:
         self.partial_etag = None
         self.tmp_path.unlink(missing_ok=True)
         self.etag_sidecar.unlink(missing_ok=True)
+
+
+class YtDlpLogger:
+    """Route yt-dlp messages through the application's logging policy."""
+
+    def __init__(self, log: logging.Logger) -> None:
+        self.log = log
+
+    def debug(self, message: str) -> None:
+        if message.startswith("[debug] "):
+            self.log.debug("%s", message.removeprefix("[debug] "))
+        else:
+            self.log.info("%s", message)
+
+    def info(self, message: str) -> None:
+        self.log.info("%s", message)
+
+    def warning(self, message: str) -> None:
+        self.log.warning("%s", message)
+
+    def error(self, message: str) -> None:
+        self.log.error("%s", message)
+
+
+def update_yt_dlp_progress(progress: TransferProgress, data: dict[str, Any]) -> None:
+    """Translate a yt-dlp progress hook payload into the shared progress display."""
+    if data.get("status") not in {"downloading", "finished"}:
+        return
+    completed = data.get("downloaded_bytes")
+    total = data.get("total_bytes") or data.get("total_bytes_estimate")
+    if not isinstance(completed, (int, float)) or isinstance(completed, bool):
+        return
+    completed_int = max(0, int(completed))
+    total_int = (
+        max(0, int(total))
+        if isinstance(total, (int, float)) and not isinstance(total, bool)
+        else None
+    )
+    progress.update(completed_int, total_int)
+
+
+def yt_dlp_output_options(
+    log: logging.Logger,
+    progress: TransferProgress,
+) -> dict[str, Any]:
+    return {
+        "logger": YtDlpLogger(log),
+        "noprogress": True,
+        "progress_hooks": [lambda data: update_yt_dlp_progress(progress, data)],
+    }
 
 
 def classify_local_file(path: Path, marker: str | None) -> FileMatch:
@@ -423,7 +473,10 @@ def should_skip_before_decision(
             f"matches {pattern!r}",
         )
         return True
-    return downloadpath in ctx.downloaded_paths
+    if downloadpath in ctx.downloaded_paths:
+        ctx.stats.unchanged += 1
+        return True
+    return False
 
 
 def conflict_action(
@@ -453,32 +506,19 @@ def size_limits_configured(ctx: SyncContext) -> bool:
     return bool(ctx.config.max_file_size or ctx.config.min_file_size)
 
 
-def human_readable_size(size: int) -> str:
-    if size < 1024:
-        return f"{size} B"
-    value = float(size)
-    for unit in ("KiB", "MiB", "GiB", "TiB", "PiB"):
-        value /= 1024
-        if value < 1024 or unit == "PiB":
-            if value.is_integer():
-                return f"{value:.0f} {unit}"
-            return f"{value:.1f} {unit}" if value < 10 else f"{value:.0f} {unit}"
-    raise AssertionError("unreachable")
-
-
 def size_limit_violation(ctx: SyncContext, size: int) -> tuple[str, str] | None:
     """Which of filters.max_file_size/min_file_size ``size`` violates, if any."""
     max_size = ctx.config.max_file_size
     if max_size and size > max_size:
         return (
             "filters.max_file_size",
-            f"exceeds the configured limit ({human_readable_size(max_size)})",
+            f"exceeds the configured limit ({format_size(max_size)})",
         )
     min_size = ctx.config.min_file_size
     if min_size and size < min_size:
         return (
             "filters.min_file_size",
-            f"is below the configured limit ({human_readable_size(min_size)})",
+            f"is below the configured limit ({format_size(min_size)})",
         )
     return None
 
@@ -497,7 +537,7 @@ def record_size_limit_filter(
         config_key,
         "file",
         item,
-        f"{size_kind} ({human_readable_size(size)}) {reason}",
+        f"{size_kind} ({format_size(size)}) {reason}",
     )
     return True
 
@@ -551,9 +591,13 @@ def planned_download_action(
 
     decision = decide_download(ctx, node, downloadpath, log)
     if decision.skip:
+        ctx.stats.unchanged += 1
         return None
     action = conflict_action(ctx, decision, downloadpath, log)
-    return None if action == ConflictAction.SKIP else action
+    if action == ConflictAction.SKIP:
+        ctx.stats.unchanged += 1
+        return None
+    return action
 
 
 def prepare_transfer_plan(node: Node, downloadpath: Path) -> TransferPlan:
@@ -641,19 +685,23 @@ def response_body_is_usable(
 
 
 def write_response_body(
+    ctx: SyncContext,
     node: Node,
     response: Any,
     transfer: TransferPlan,
     downloadpath: Path,
     content: Any,
     first_chunk: bytes,
-) -> None:
-    print(f"Downloading {downloadpath} [{node.type}]")
-    total_size_in_bytes = content_length(response, transfer.resume_size) or 0
-    progress_bar = tqdm(total=total_size_in_bytes, unit="iB", unit_scale=True)
-    try:
+) -> int:
+    ctx.output.action("Downloading", downloadpath, node.type)
+    total_size_in_bytes = content_length(response, transfer.resume_size)
+    with ctx.output.transfer(
+        downloadpath.name,
+        total_size_in_bytes,
+        transfer.resume_size,
+    ) as progress:
         if transfer.resume_size:
-            progress_bar.update(transfer.resume_size)
+            progress.update(transfer.resume_size, total_size_in_bytes)
         downloadpath.parent.mkdir(parents=True, exist_ok=True)
 
         etag_header = response.headers.get("ETag")
@@ -666,13 +714,12 @@ def write_response_body(
         mode = "ab" if transfer.resume_size else "wb"
         with transfer.tmp_path.open(mode) as file:
             if first_chunk:
-                progress_bar.update(len(first_chunk))
+                progress.advance(len(first_chunk))
                 file.write(first_chunk)
             for data in content:
-                progress_bar.update(len(data))
+                progress.advance(len(data))
                 file.write(data)
-    finally:
-        progress_bar.close()
+    return progress.transferred_bytes
 
 
 def install_downloaded_file(
@@ -745,7 +792,8 @@ def process_download_response(
         return True
 
     if ctx.config.dry_run:
-        print(f"Would download {downloadpath} [{node.type}]")
+        ctx.output.action("Would download", downloadpath, node.type, dry_run=True)
+        ctx.stats.record_transfer(existed=downloadpath.exists(), dry_run=True)
         return True
 
     assert transfer is not None
@@ -754,11 +802,22 @@ def process_download_response(
     if not response_body_is_usable(node, first_chunk, downloadpath, log):
         return False
 
-    write_response_body(node, response, transfer, downloadpath, content, first_chunk)
+    existed = downloadpath.exists()
+    transferred_bytes = write_response_body(
+        ctx,
+        node,
+        response,
+        transfer,
+        downloadpath,
+        content,
+        first_chunk,
+    )
     if not install_downloaded_file(downloadpath, transfer, action, log):
+        ctx.stats.failed += 1
         return True
     record_download_metadata(node, downloadpath, etag_header)
     ctx.downloaded_paths.add(downloadpath)
+    ctx.stats.record_transfer(existed=existed, size=transferred_bytes)
     return True
 
 
@@ -810,7 +869,8 @@ def download_file(
         return True
 
     if ctx.config.dry_run and not size_limits_configured(ctx):
-        print(f"Would download {downloadpath} [{node.type}]")
+        ctx.output.action("Would download", downloadpath, node.type, dry_run=True)
+        ctx.stats.record_transfer(existed=downloadpath.exists(), dry_run=True)
         return True
 
     transfer = None if ctx.config.dry_run else prepare_transfer_plan(node, downloadpath)
@@ -869,56 +929,58 @@ def download_all_files(
     download_node_tree(ctx, ctx.root_node, log)
 
 
-def download_node_tree(  # noqa: C901 - legacy traversal awaiting decomposition
+def download_leaf(
+    ctx: SyncContext,
+    node: Node,
+    log: logging.Logger,
+) -> bool:
+    try:
+        assert node.url is not None
+        if node.type == "Youtube":
+            return scan_and_download_youtube(ctx, node, log)
+        if node.type == "Emedia":
+            return download_emedia_video(ctx, node, log)
+        if node.type == "Quiz":
+            return quiz.download_quiz(ctx, node, log)
+        if node.type == "Opencast" and ".mp4" not in node.name:
+            node.name = f"{node.name}.mp4" if node.name else node.url.rsplit("/", 1)[-1]
+        return download_file(ctx, node, log)
+    except Exception:
+        log.exception("Failed to download the module %s", node)
+        if node.type in {"Youtube", "Emedia"}:
+            log.error(
+                "This could be caused by an out-of-date yt-dlp version. Try "
+                "upgrading yt-dlp through pip or your package manager."
+            )
+        return False
+
+
+def download_node_tree(
     ctx: SyncContext,
     cur_node: Node,
     log: logging.Logger = logger,
 ) -> None:
-    if len(cur_node.children) == 0:
-        if cur_node.url and not cur_node.is_handled:
-            if cur_node.type in {"Youtube", "Emedia"}:
-                try:
-                    handler = (
-                        scan_and_download_youtube
-                        if cur_node.type == "Youtube"
-                        else download_emedia_video
-                    )
-                    if handler(ctx, cur_node, log):
-                        cur_node.mark_handled()
-                except Exception:
-                    log.exception(f"Failed to download the module {cur_node}")
-                    log.error(
-                        "This could be caused by an out of date yt-dlp version. Try upgrading yt-dlp through pip or "
-                        "your package manager."
-                    )
-            elif cur_node.type == "Opencast":
-                try:
-                    # download Opencast videos
-                    if ".mp4" not in cur_node.name:
-                        if cur_node.name is not None and cur_node.name != "":
-                            cur_node.name += ".mp4"
-                        else:
-                            cur_node.name = cur_node.url.split("/")[-1]
-                    if download_file(ctx, cur_node, log):
-                        cur_node.mark_handled()
-                except Exception:
-                    log.exception(f"Failed to download the module {cur_node}")
-            elif cur_node.type == "Quiz":
-                try:
-                    if quiz.download_quiz(ctx, cur_node, log):
-                        cur_node.mark_handled()
-                except Exception:
-                    log.exception(f"Failed to download the module {cur_node}")
-            else:
-                try:
-                    if download_file(ctx, cur_node, log):
-                        cur_node.mark_handled()
-                except Exception:
-                    log.exception(f"Failed to download the module {cur_node}")
-        return
+    pending: list[Node] = []
 
-    for child in cur_node.children:
-        download_node_tree(ctx, child, log)
+    def collect(node: Node) -> None:
+        if not node.children:
+            if node.url and not node.is_handled:
+                pending.append(node)
+            return
+        for child in node.children:
+            collect(child)
+
+    collect(cur_node)
+    progress = ctx.output.sync_progress
+    progress.begin_items(len(pending), dry_run=ctx.config.dry_run)
+    for index, node in enumerate(pending, start=1):
+        path = "/".join(part for part in node.get_path() if part)
+        progress.start_item(index, f"{node.type}: {path or node.name}")
+        if download_leaf(ctx, node, log):
+            node.mark_handled()
+        else:
+            ctx.stats.failed += 1
+        progress.finish_item(index)
 
 
 def download_emedia_video(
@@ -938,9 +1000,11 @@ def download_emedia_video(
     if cached_yt_dlp_size_violates_limit(ctx, node, downloadpath, log):
         return True
     if ctx.config.dry_run and not size_limits_configured(ctx):
-        print(f"Would download {downloadpath} [Emedia]")
+        ctx.output.action("Would download", downloadpath, "Emedia", dry_run=True)
+        ctx.stats.record_transfer(existed=downloadpath.exists(), dry_run=True)
         return True
 
+    existed = downloadpath.exists()
     suffix = downloadpath.suffix or ".mp4"
     stem = (
         downloadpath.name[: -len(suffix)] if downloadpath.suffix else downloadpath.name
@@ -948,7 +1012,8 @@ def download_emedia_video(
     temporary_path = pathing.with_windows_extended_length_prefix(
         downloadpath.parent / f".{stem}.smmpart{suffix}"
     )
-    ydl_opts = {
+    progress = ctx.output.transfer(downloadpath.name, node.remote_size)
+    ydl_opts: dict[str, Any] = {
         "format": "best",
         "fragment_retries": 15,
         "http_headers": dict(node.download_headers or {}),
@@ -956,6 +1021,7 @@ def download_emedia_video(
         "nooverwrites": True,
         "outtmpl": os.fspath(temporary_path),
         "retries": 15,
+        **yt_dlp_output_options(log, progress),
     }
     if suffix.casefold() == ".ts":
         ydl_opts["fixup"] = "never"
@@ -963,11 +1029,15 @@ def download_emedia_video(
         if yt_dlp_violates_size_limits(ctx, ydl, node, node.url, "emedia video"):
             return True
         if ctx.config.dry_run:
-            print(f"Would download {downloadpath} [Emedia]")
+            ctx.output.action("Would download", downloadpath, "Emedia", dry_run=True)
+            ctx.stats.record_transfer(existed=downloadpath.exists(), dry_run=True)
             return True
+        ctx.output.action("Downloading", downloadpath, "Emedia")
         downloadpath.parent.mkdir(parents=True, exist_ok=True)
         temporary_path.unlink(missing_ok=True)
-        if ydl.download([node.url]) != 0 or not temporary_path.is_file():
+        with progress:
+            result = ydl.download([node.url])
+        if result not in (None, 0) or not temporary_path.is_file():
             log.warning("yt-dlp did not download VEIRA video %s", node.id)
             return False
 
@@ -980,6 +1050,10 @@ def download_emedia_video(
         return False
     record_download_metadata(node, downloadpath, None)
     ctx.downloaded_paths.add(downloadpath)
+    ctx.stats.record_transfer(
+        existed=existed,
+        size=progress.transferred_bytes or downloadpath.stat().st_size,
+    )
     return True
 
 
@@ -1004,9 +1078,16 @@ def scan_and_download_youtube(
             and completed_name.search(file.name)
             for file in path.iterdir()
         ):
+            ctx.stats.unchanged += 1
             return True
     if ctx.config.dry_run and not size_limits_configured(ctx):
-        print(f"Would download YouTube video {link} to {path} [Youtube]")
+        ctx.output.action(
+            "Would download YouTube video",
+            f"{link} to {path}",
+            "Youtube",
+            dry_run=True,
+        )
+        ctx.stats.record_transfer(existed=False, dry_run=True)
         return True
     if cached_yt_dlp_size_violates_limit(ctx, node, path, log):
         return True
@@ -1014,21 +1095,34 @@ def scan_and_download_youtube(
         path / "%(title)s-%(id)s.%(ext)s",
         force=True,
     )
-    ydl_opts = {
+    progress = ctx.output.transfer(node.name or "YouTube video", node.remote_size)
+    ydl_opts: dict[str, Any] = {
         "outtmpl": os.fspath(outtmpl),
         "ignoreerrors": True,
         "nooverwrites": True,
         "retries": 15,
         "match_filter": yt_dlp.match_filter_func("!is_live"),
+        **yt_dlp_output_options(log, progress),
     }
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
         if yt_dlp_violates_size_limits(ctx, ydl, node, link, "YouTube video"):
             return True
         if ctx.config.dry_run:
-            print(f"Would download YouTube video {link} to {path} [Youtube]")
+            ctx.output.action(
+                "Would download YouTube video",
+                f"{link} to {path}",
+                "Youtube",
+                dry_run=True,
+            )
+            ctx.stats.record_transfer(existed=False, dry_run=True)
             return True
+        ctx.output.action("Downloading YouTube video", f"{link} to {path}", "Youtube")
         path.mkdir(parents=True, exist_ok=True)
-        ydl.download([link])
+        with progress:
+            result = ydl.download([link])
+    if result not in (None, 0):
+        return False
+    ctx.stats.record_transfer(existed=False, size=progress.transferred_bytes)
     return True
 
 

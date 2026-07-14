@@ -95,10 +95,8 @@ def test_setup_logs_in_once_and_writes_only_non_secret_config(
     stored = tokens()
     answers = iter([stored.username, "TOTP123", str(tmp_path / "sync"), ""])
     login_calls = []
-    prompts = []
 
-    def answer(prompt):
-        prompts.append(prompt)
+    def answer():
         return next(answers)
 
     monkeypatch.setenv("XDG_CONFIG_HOME", str(config_home))
@@ -122,6 +120,7 @@ def test_setup_logs_in_once_and_writes_only_non_secret_config(
     )
 
     cli.main(["setup"])
+    output = capsys.readouterr().out
 
     config_path = config_home / "syncmymoodle" / "config.toml"
     text = config_path.read_text(encoding="utf-8")
@@ -137,12 +136,10 @@ def test_setup_logs_in_once_and_writes_only_non_secret_config(
     assert login_calls == [(False, False)]
     assert len(fake_keyring.values) == 1
     assert MoodleTokens.from_json(next(iter(fake_keyring.values.values()))) == stored
-    assert ("RWTH SSO TOTP serial (for example, TOTP12345678): ") in prompts
-    assert any(
-        prompt.startswith("Directory to sync Moodle files to [") for prompt in prompts
-    )
-    assert "Store Moodle tokens in the system keyring (recommended) [Y/n]: " in prompts
-    assert "Normal syncs use the stored Moodle tokens" in (capsys.readouterr().out)
+    assert "RWTH SSO TOTP serial (for example, TOTP12345678): " in output
+    assert "Directory to sync Moodle files to [" in output
+    assert "Store Moodle tokens in the system keyring (recommended) [Y/n]: " in output
+    assert "Normal syncs use the stored Moodle tokens" in output
 
 
 def test_setup_rolls_back_tokens_when_config_write_fails(tmp_path, monkeypatch):
@@ -198,13 +195,11 @@ def test_setup_rolls_back_tokens_when_config_write_fails(tmp_path, monkeypatch):
     assert not (tmp_path / "xdg" / "syncmymoodle" / "config.toml").exists()
 
 
-def test_setup_token_file_fallback_prompt_is_clear(tmp_path, monkeypatch):
+def test_setup_token_file_fallback_prompt_is_clear(tmp_path, monkeypatch, capsys):
     token_path = tmp_path / "tokens.env"
     config = {}
-    prompts = []
 
-    def answer(prompt):
-        prompts.append(prompt)
+    def answer():
         return str(token_path)
 
     monkeypatch.setattr(cli, "load_keyring_backend", lambda: None)
@@ -212,10 +207,11 @@ def test_setup_token_file_fallback_prompt_is_clear(tmp_path, monkeypatch):
 
     cli.prompt_setup_token_store(config, "ab123456", None)
 
-    assert prompts == [
+    assert (
         "File for securely storing Moodle tokens "
         f"[{cli.pathing.user_config_dir() / 'moodle-tokens.env'}]: "
-    ]
+        in capsys.readouterr().out
+    )
     assert config == {
         "auth.tokens.store": "env-file",
         "auth.tokens.env_file": str(token_path),
@@ -223,7 +219,7 @@ def test_setup_token_file_fallback_prompt_is_clear(tmp_path, monkeypatch):
 
 
 def test_setup_configures_detected_password_manager_and_uses_it_for_login(
-    tmp_path, monkeypatch
+    tmp_path, monkeypatch, capsys
 ):
     config_home = tmp_path / "xdg"
     fake_keyring = FakeKeyring()
@@ -231,7 +227,6 @@ def test_setup_configures_detected_password_manager_and_uses_it_for_login(
     password_ref = "op://Private/RWTH/password"
     otp_ref = "op://Private/RWTH/one-time password?attribute=otp"
     built_providers = []
-    prompts = []
     answers = iter(
         [
             stored.username,
@@ -269,8 +264,7 @@ def test_setup_configures_detected_password_manager_and_uses_it_for_login(
         built_providers.append(provider_name)
         return FakeProvider()
 
-    def answer(prompt):
-        prompts.append(prompt)
+    def answer():
         return next(answers)
 
     monkeypatch.setenv("XDG_CONFIG_HOME", str(config_home))
@@ -292,6 +286,7 @@ def test_setup_configures_detected_password_manager_and_uses_it_for_login(
     )
 
     cli.main(["setup"])
+    output = capsys.readouterr().out
 
     parsed = tomllib.loads(
         (config_home / "syncmymoodle" / "config.toml").read_text(encoding="utf-8")
@@ -303,17 +298,15 @@ def test_setup_configures_detected_password_manager_and_uses_it_for_login(
     assert login_config["otp"] == otp_ref
     assert login_config["password_command"] == []
     assert built_providers == ["1password"]
-    assert any(
+    assert (
         "1Password password reference "
-        "(for example, op://Private/RWTH/password)" in prompt
-        for prompt in prompts
+        "(for example, op://Private/RWTH/password)" in output
     )
-    assert any(
+    assert (
         "1Password TOTP reference "
-        "(for example, op://Private/RWTH/one-time password?attribute=otp" in prompt
-        for prompt in prompts
+        "(for example, op://Private/RWTH/one-time password?attribute=otp" in output
     )
-    assert not any("automatically" in prompt for prompt in prompts)
+    assert "automatically" not in output
 
 
 def test_setup_explains_limited_opencast_before_recommending_token_reset(
@@ -336,10 +329,8 @@ def test_setup_explains_limited_opencast_before_recommending_token_reset(
             "y",
         ]
     )
-    prompts = []
 
-    def answer(prompt):
-        prompts.append(prompt)
+    def answer():
         return next(answers)
 
     monkeypatch.setenv("XDG_CONFIG_HOME", str(config_home))
@@ -358,14 +349,14 @@ def test_setup_explains_limited_opencast_before_recommending_token_reset(
     assert (config_home / "syncmymoodle" / "config.toml").is_file()
     stored = MoodleTokens.from_json(next(iter(fake_keyring.values.values())))
     assert stored == legacy_tokens
-    assert any(
-        "browser login token required for embedded Opencast downloads" in prompt
-        and "limited Opencast support" in prompt
-        for prompt in prompts
+    captured = capsys.readouterr()
+    assert (
+        "browser login token required for embedded Opencast downloads" in captured.out
     )
-    output = capsys.readouterr().out
-    assert output.index("Setup complete") < output.index("auth reset-token")
-    assert "cached browser session expires" in output
+    assert "limited Opencast support" in captured.out
+    assert "Setup complete" in captured.out
+    assert "auth reset-token" in captured.err
+    assert "cached browser session expires" in captured.err
 
 
 def test_setup_points_legacy_json_users_to_migration(tmp_path, monkeypatch, capsys):
@@ -375,7 +366,7 @@ def test_setup_points_legacy_json_users_to_migration(tmp_path, monkeypatch, caps
     config_path.write_text('{"user": "ab123456"}', encoding="utf-8")
     monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "xdg"))
     monkeypatch.setattr(
-        "builtins.input", lambda prompt: pytest.fail("setup must stop before prompting")
+        "builtins.input", lambda: pytest.fail("setup must stop before prompting")
     )
 
     with pytest.raises(SystemExit) as error:
@@ -395,7 +386,7 @@ def test_setup_points_existing_toml_users_to_manual_editing(
     config_path.write_text('[auth]\nuser = "ab123456"\n', encoding="utf-8")
     monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "xdg"))
     monkeypatch.setattr(
-        "builtins.input", lambda prompt: pytest.fail("setup must stop before prompting")
+        "builtins.input", lambda: pytest.fail("setup must stop before prompting")
     )
 
     with pytest.raises(SystemExit) as exc_info:
@@ -447,6 +438,45 @@ def test_auth_status_is_read_only_and_reports_exact_cached_session_time(
     assert stored.wstoken not in output
 
 
+def test_auth_status_colors_invalid_and_expired_states_on_stdout(
+    tmp_path, monkeypatch, capsys
+):
+    config_path, _, _ = write_env_token_config(tmp_path)
+    monkeypatch.delenv("NO_COLOR", raising=False)
+    monkeypatch.setattr(
+        cli.moodle_api,
+        "validate_mobile_tokens",
+        lambda value: cli.moodle_api.TokenValidation(
+            cli.moodle_api.TokenValidationKind.INVALID, "Moodle rejected it"
+        ),
+    )
+    monkeypatch.setattr(
+        cli.rwth,
+        "cached_session_status",
+        lambda path: cli.rwth.SessionStatus(cli.rwth.SessionStatusKind.EXPIRED),
+    )
+
+    with pytest.raises(SystemExit) as exc_info:
+        cli.main(
+            [
+                "--config",
+                str(config_path),
+                "--color",
+                "always",
+                "auth",
+                "status",
+            ]
+        )
+
+    assert exc_info.value.code == 1
+    captured = capsys.readouterr()
+    assert (
+        "\x1b[31mMoodle API token: invalid (Moodle rejected it)\x1b[0m" in captured.out
+    )
+    assert "\x1b[33mCached browser session: expired\x1b[0m" in captured.out
+    assert captured.err == ""
+
+
 @pytest.mark.parametrize(
     ("availability", "expected_state"),
     [
@@ -475,10 +505,10 @@ def test_sign_in_method_checks_password_manager_availability(
         cli, "build_external_secret_provider", lambda provider_name: provider
     )
 
-    assert (
-        cli.sign_in_method_description(config, None)
-        == f"1Password CLI ({expected_state})"
-    )
+    description, available = cli.sign_in_method_status(config, None)
+
+    assert description == f"1Password CLI ({expected_state})"
+    assert available is availability.available
 
 
 def test_sign_in_method_checks_configured_otp_command(monkeypatch):
@@ -501,9 +531,10 @@ def test_sign_in_method_checks_configured_otp_command(monkeypatch):
     )
     monkeypatch.setattr(cli, "CommandSecretProvider", lambda *args: provider)
 
-    description = cli.sign_in_method_description(config, None)
+    description, available = cli.sign_in_method_status(config, None)
 
     assert "unavailable: 'otp-helper' executable not found" in description
+    assert available is False
 
 
 @pytest.mark.parametrize(
@@ -726,7 +757,8 @@ def test_auth_migrate_rejects_destination_aliasing_config_before_write(
 
 def test_auth_reset_token_requires_confirmation(tmp_path, monkeypatch, capsys):
     config_path, _, _ = write_env_token_config(tmp_path)
-    monkeypatch.setattr("builtins.input", lambda prompt: "n")
+    monkeypatch.delenv("NO_COLOR", raising=False)
+    monkeypatch.setattr("builtins.input", lambda: "n")
     monkeypatch.setattr(
         cli.rwth, "login", lambda *args: pytest.fail("cancelled reset performed SSO")
     )
@@ -736,9 +768,19 @@ def test_auth_reset_token_requires_confirmation(tmp_path, monkeypatch, capsys):
         lambda *args: pytest.fail("cancelled reset changed server state"),
     )
 
-    cli.main(["--config", str(config_path), "auth", "reset-token"])
+    cli.main(
+        [
+            "--config",
+            str(config_path),
+            "--color",
+            "always",
+            "auth",
+            "reset-token",
+        ]
+    )
 
     output = capsys.readouterr().out
+    assert "\x1b[33mThis resets the shared Moodle API token.\x1b[0m" in output
     assert "every other syncMyMoodle installation" in output
     assert "Other Moodle service tokens are unaffected" in output
     assert "Token reset cancelled" in output
@@ -751,7 +793,7 @@ def test_auth_forget_removes_only_local_env_token_and_session(
     cookie_path = tmp_path / "session"
     cookie_path.write_bytes(b"cached session")
     original_config = config_path.read_text(encoding="utf-8")
-    monkeypatch.setattr("builtins.input", lambda prompt: "y")
+    monkeypatch.setattr("builtins.input", lambda: "y")
     monkeypatch.setattr(
         cli.rwth, "login", lambda *args: pytest.fail("forget must not perform SSO")
     )
@@ -775,20 +817,36 @@ def test_auth_forget_requires_confirmation(tmp_path, monkeypatch, capsys):
     config_path, token_path, _ = write_env_token_config(tmp_path)
     cookie_path = tmp_path / "session"
     cookie_path.write_bytes(b"cached session")
-    prompts = []
+    monkeypatch.delenv("NO_COLOR", raising=False)
 
-    def decline(prompt):
-        prompts.append(prompt)
+    def decline():
         return "n"
 
     monkeypatch.setattr("builtins.input", decline)
 
-    cli.main(["--config", str(config_path), "auth", "forget"])
+    cli.main(
+        [
+            "--config",
+            str(config_path),
+            "--color",
+            "always",
+            "auth",
+            "forget",
+        ]
+    )
 
     assert token_path.is_file()
     assert cookie_path.is_file()
-    assert prompts == ["Forget local Moodle tokens and cached browser session [y/N]: "]
-    assert "left unchanged" in capsys.readouterr().out
+    output = capsys.readouterr().out
+    assert (
+        "\x1b[33mThis removes authentication data stored only on this installation."
+        "\x1b[0m" in output
+    )
+    assert (
+        "\x1b[33mForget local Moodle tokens and cached browser session [y/N]: "
+        "\x1b[0m" in output
+    )
+    assert "left unchanged" in output
 
 
 def test_auth_forget_deletes_keyring_record(tmp_path, monkeypatch):
@@ -814,7 +872,7 @@ cookie_file = {str(tmp_path / "session")!r}
         encoding="utf-8",
     )
     monkeypatch.setattr(cli, "load_keyring_backend", lambda: fake_keyring)
-    monkeypatch.setattr("builtins.input", lambda prompt: "y")
+    monkeypatch.setattr("builtins.input", lambda: "y")
 
     cli.main(["--config", str(config_path), "auth", "forget"])
 
@@ -834,7 +892,7 @@ def test_auth_forget_still_removes_session_when_token_delete_fails(
 
     store.delete = fail_delete  # type: ignore[method-assign]
     monkeypatch.setattr(cli, "token_store_from_config", lambda config, backend: store)
-    monkeypatch.setattr("builtins.input", lambda prompt: "y")
+    monkeypatch.setattr("builtins.input", lambda: "y")
 
     with pytest.raises(SystemExit) as exc_info:
         cli.main(["--config", str(config_path), "auth", "forget"])

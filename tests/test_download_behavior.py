@@ -9,6 +9,7 @@ from syncmymoodle import course_cache, downloader, links, moodle, pathing
 from syncmymoodle.constants import COURSE_CACHE_FILENAME, YOUTUBE_WATCH_URL
 from syncmymoodle.downloader import download_file
 from syncmymoodle.node import Node, RemoteMarkerKind
+from syncmymoodle.output import format_size
 from syncmymoodle.storage import write_private_gzip_json
 
 from .helpers import (
@@ -174,12 +175,12 @@ def test_tokenized_request_failure_does_not_log_token(caplog):
     assert "[REDACTED]" in caplog.text
 
 
-def test_human_readable_size_formats_binary_units():
-    assert downloader.human_readable_size(10) == "10 B"
-    assert downloader.human_readable_size(1024) == "1 KiB"
-    assert downloader.human_readable_size(1536) == "1.5 KiB"
-    assert downloader.human_readable_size(5 * 1024**2) == "5 MiB"
-    assert downloader.human_readable_size(1024**5) == "1 PiB"
+def test_format_size_uses_binary_units():
+    assert format_size(10) == "10 B"
+    assert format_size(1024) == "1 KiB"
+    assert format_size(1536) == "1.5 KiB"
+    assert format_size(5 * 1024**2) == "5 MiB"
+    assert format_size(1024**5) == "1 PiB"
 
 
 def seed_course_cache(config, *, timemodified, etag, handled=True):
@@ -261,6 +262,7 @@ def test_existing_youtube_download_is_marked_handled(tmp_path):
     downloader.download_node_tree(ctx, root)
 
     assert video.is_handled
+    assert ctx.stats.unchanged == 1
 
 
 # --------------------------------------------------------------------------
@@ -293,6 +295,79 @@ def test_download_streams_chunks_to_disk_and_records_metadata(tmp_path):
     # The ETag is persisted on the node for the next run's change detection.
     assert file_node.etag == etag
     assert syncer.session.count("GET", URL) == 1
+    assert syncer.stats.downloaded == 1
+    assert syncer.stats.transferred_bytes == len(b"".join(chunks))
+
+
+def test_yt_dlp_progress_payload_updates_shared_progress():
+    ctx = make_context()
+    progress = ctx.output.transfer("video.mp4", total=None)
+
+    downloader.update_yt_dlp_progress(
+        progress,
+        {
+            "status": "downloading",
+            "downloaded_bytes": 512,
+            "total_bytes_estimate": 1024,
+        },
+    )
+
+    assert progress.transferred_bytes == 512
+
+
+def test_failed_youtube_download_is_reported_by_tree_walk(tmp_path, monkeypatch):
+    captured = {}
+
+    class FakeYoutubeDL:
+        def __init__(self, opts):
+            captured.update(opts)
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def download(self, urls):
+            return 1
+
+    monkeypatch.setattr(downloader.yt_dlp, "YoutubeDL", FakeYoutubeDL)
+    ctx = make_context({"paths.sync_directory": str(tmp_path)})
+    root, _, video = build_youtube_tree("https://youtu.be/abcdefghijk")
+
+    downloader.download_node_tree(ctx, root)
+
+    assert video.is_handled is False
+    assert ctx.stats.failed == 1
+    assert captured["noprogress"] is True
+    assert len(captured["progress_hooks"]) == 1
+    assert isinstance(captured["logger"], downloader.YtDlpLogger)
+
+
+def test_download_walk_reports_progress_for_every_pending_item(monkeypatch, capsys):
+    ctx = make_context()
+    root = Node("", -1, "Root", None)
+    section = root.add_child("Course", 1, "Section")
+    first = section.add_child("slides.pdf", 2, "File", url="https://example.test/1")
+    second = section.add_child("lecture.mp4", 3, "Video", url="https://example.test/2")
+    handled = section.add_child("old.pdf", 4, "File", url="https://example.test/3")
+    handled.mark_handled()
+    visited = []
+    monkeypatch.setattr(
+        downloader,
+        "download_leaf",
+        lambda context, node, log: visited.append(node) or True,
+    )
+
+    downloader.download_node_tree(ctx, root)
+
+    assert visited == [first, second]
+    assert first.is_handled
+    assert second.is_handled
+    output = capsys.readouterr().out
+    assert "Processing 2 items..." in output
+    assert "[1/2] Processing File: Course/slides.pdf" in output
+    assert "[2/2] Processing Video: Course/lecture.mp4" in output
 
 
 def test_download_is_skipped_for_excluded_filetypes(tmp_path):

@@ -128,7 +128,7 @@ def test_skip_courses_and_semester_filter_limit_synced_courses(monkeypatch):
     ]
 
 
-def test_excluded_course_roles_skip_matches_and_keep_unknowns(monkeypatch):
+def test_excluded_course_roles_skip_matches_and_keep_unknowns(monkeypatch, capsys):
     synced_course_ids = []
     role_lookup_batches = []
     syncer = make_context({"courses.exclude_roles": ["Tutor"]})
@@ -153,6 +153,10 @@ def test_excluded_course_roles_skip_matches_and_keep_unknowns(monkeypatch):
 
     assert role_lookup_batches == [[201, 202, 203]]
     assert synced_course_ids == [201, 203]
+    output = capsys.readouterr().out
+    assert "Scanning 2 courses..." in output
+    assert "[1/2] Scanning Current Semester..." in output
+    assert "[2/2] Scanning Skipped Current Semester..." in output
     assert filtered_rows(syncer) == [
         (
             "courses.exclude_roles",

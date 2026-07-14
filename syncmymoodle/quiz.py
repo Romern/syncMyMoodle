@@ -795,7 +795,7 @@ def render_quiz_pdf(
         )
         return False
 
-    print(f"Rendering {pdf_path} [Quiz PDF]")
+    ctx.output.action("Rendering", pdf_path, "Quiz PDF")
     pdf_ok = render_pdf_with_chromium(browser, html_path, pdf_path, log)
     if not pdf_ok:
         log.warning(
@@ -804,7 +804,30 @@ def render_quiz_pdf(
         )
     elif mode == "pdf":
         html_path.unlink(missing_ok=True)
+    if pdf_ok:
+        try:
+            size = pdf_path.stat().st_size
+        except OSError:
+            size = 0
+        ctx.stats.record_transfer(existed=False, size=size)
     return pdf_ok
+
+
+def report_quiz_dry_run(
+    ctx: SyncContext,
+    html_path: Path,
+    pdf_path: Path,
+    *,
+    want_html: bool,
+    want_pdf: bool,
+) -> None:
+    if not html_path.exists():
+        ctx.output.action("Would download", html_path, "Quiz", dry_run=True)
+        if want_html:
+            ctx.stats.record_transfer(existed=False, dry_run=True)
+    if want_pdf and not pdf_path.exists():
+        ctx.output.action("Would render", pdf_path, "Quiz PDF", dry_run=True)
+        ctx.stats.record_transfer(existed=False, dry_run=True)
 
 
 def download_quiz(ctx: SyncContext, node: Any, log: logging.Logger = logger) -> bool:
@@ -829,14 +852,19 @@ def download_quiz(ctx: SyncContext, node: Any, log: logging.Logger = logger) -> 
     # Idempotency: skip when every wanted artifact is already on disk.
     html_done = html_path.exists() if want_html else True
     pdf_done = pdf_path.exists() if want_pdf else True
+    ctx.stats.unchanged += int(want_html and html_path.exists())
+    ctx.stats.unchanged += int(want_pdf and pdf_path.exists())
     if html_done and pdf_done:
         return True
 
     if ctx.config.dry_run:
-        if not html_path.exists():
-            print(f"Would download {html_path} [Quiz]")
-        if want_pdf and not pdf_path.exists():
-            print(f"Would render {pdf_path} [Quiz PDF]")
+        report_quiz_dry_run(
+            ctx,
+            html_path,
+            pdf_path,
+            want_html=want_html,
+            want_pdf=want_pdf,
+        )
         return True
 
     # Only (re)build the snapshot when it is not already on disk. When just the
@@ -844,7 +872,7 @@ def download_quiz(ctx: SyncContext, node: Any, log: logging.Logger = logger) -> 
     # we render from the existing snapshot rather than re-downloading the page
     # and re-inlining every asset.
     if not html_path.exists():
-        print(f"Downloading {html_path} [Quiz]")
+        ctx.output.action("Downloading", html_path, "Quiz")
         review_html = ctx.quiz_review_cache.get(node.url)
         if review_html is None:
             log.warning("No token-derived quiz review is available for %s", node.url)
@@ -860,6 +888,11 @@ def download_quiz(ctx: SyncContext, node: Any, log: logging.Logger = logger) -> 
             ),
             encoding="utf-8",
         )
+        if want_html:
+            ctx.stats.record_transfer(
+                existed=False,
+                size=html_path.stat().st_size,
+            )
 
     if not want_pdf or pdf_path.exists():
         return True

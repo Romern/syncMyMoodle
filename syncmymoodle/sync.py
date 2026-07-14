@@ -20,6 +20,7 @@ def sync(ctx: SyncContext) -> None:  # noqa: C901 - legacy sync awaiting decompo
     root_node = Node("", -1, "Root", None)
     ctx.root_node = root_node
 
+    ctx.output.sync_progress.discovering_courses()
     selected_courses = config.selected_courses
     course_candidates = []
     for course in moodle_api.get_all_courses(session, wstoken, user_id):
@@ -84,7 +85,7 @@ def sync(ctx: SyncContext) -> None:  # noqa: C901 - legacy sync awaiting decompo
             logger,
         )
 
-    # Syncing all courses that passed the local course filters.
+    courses_to_sync = []
     for course_name, course_id, semestername in course_candidates:
         if config.exclude_course_roles:
             excluded_role = config.matching_excluded_course_role(
@@ -98,11 +99,36 @@ def sync(ctx: SyncContext) -> None:  # noqa: C901 - legacy sync awaiting decompo
                     f"your directly assigned Moodle course role is {excluded_role!r}",
                 )
                 continue
+        courses_to_sync.append((course_name, course_id, semestername))
 
-        print(f"Syncing {course_name}...")
+    progress = ctx.output.sync_progress
+    progress.begin_courses(len(courses_to_sync))
+    # Syncing all courses that passed the local course filters.
+    for course_index, (course_name, course_id, semestername) in enumerate(
+        courses_to_sync, start=1
+    ):
+        ctx.stats.courses += 1
+        progress.start_course(course_index, course_name)
         course_sections = moodle_api.get_course(session, wstoken, course_id)
         if course_sections is None:
+            ctx.stats.failed += 1
+            progress.finish_course(course_index)
             continue
+
+        section_total = len(course_sections)
+        module_total = sum(
+            len(section.get("modules", []))
+            for section in course_sections
+            if isinstance(section, dict)
+        )
+        module_index = 0
+        progress.update_course(
+            course_name,
+            section=0,
+            sections=section_total,
+            module=0,
+            modules=module_total,
+        )
 
         semester_nodes = [s for s in root_node.children if s.name == semestername]
         if len(semester_nodes) == 0:
@@ -139,11 +165,34 @@ def sync(ctx: SyncContext) -> None:  # noqa: C901 - legacy sync awaiting decompo
             folder.get("coursemodule"): folder for folder in folders
         }
 
-        for section in course_sections:
+        for section_index, section in enumerate(course_sections, start=1):
             if isinstance(section, str):
                 logger.error("Moodle returned an invalid section for %s", course_name)
+                ctx.stats.failed += 1
+                progress.update_course(
+                    course_name,
+                    section=section_index,
+                    sections=section_total,
+                    module=module_index,
+                    modules=module_total,
+                )
                 continue
+            progress.update_course(
+                course_name,
+                section=section_index,
+                sections=section_total,
+                module=module_index,
+                modules=module_total,
+            )
             if filters.should_skip_section(ctx, section, course_id):
+                module_index += len(section["modules"])
+                progress.update_course(
+                    course_name,
+                    section=section_index,
+                    sections=section_total,
+                    module=module_index,
+                    modules=module_total,
+                )
                 continue
             section_node = cast(
                 Node,
@@ -166,10 +215,30 @@ def sync(ctx: SyncContext) -> None:  # noqa: C901 - legacy sync awaiting decompo
                     sync_handlers.handle_module(module_context, module)
 
                 except Exception:
+                    ctx.stats.failed += 1
                     logger.exception(
                         "Failed to process Moodle module %s (%s)",
                         module.get("id"),
                         module.get("modname"),
                     )
+                finally:
+                    module_index += 1
+                    progress.update_course(
+                        course_name,
+                        section=section_index,
+                        sections=section_total,
+                        module=module_index,
+                        modules=module_total,
+                    )
+            if not section["modules"]:
+                progress.update_course(
+                    course_name,
+                    section=section_index,
+                    sections=section_total,
+                    module=module_index,
+                    modules=module_total,
+                )
+
+        progress.finish_course(course_index)
 
     root_node.remove_children_nameclashes()

@@ -187,7 +187,7 @@ def test_login_fetches_provider_otp_only_at_otp_form(
     monkeypatch.setattr(rwth.requests, "Session", lambda: session)
     monkeypatch.setattr(rwth, "check_moodle_availability", lambda session, log: None)
     monkeypatch.setattr(rwth, "generate_totp", lambda secret: pytest.fail())
-    monkeypatch.setattr("builtins.input", lambda prompt: pytest.fail())
+    monkeypatch.setattr("builtins.input", lambda: pytest.fail())
     monkeypatch.setattr(rwth, "save_session", lambda path, cookies, session_key: None)
 
     rwth.login(ctx)
@@ -216,7 +216,7 @@ def test_login_uses_provider_otp_code_before_prompt_or_totp_secret(
     monkeypatch.setattr(rwth.requests, "Session", lambda: session)
     monkeypatch.setattr(rwth, "check_moodle_availability", lambda session, log: None)
     monkeypatch.setattr(rwth, "generate_totp", lambda secret: pytest.fail())
-    monkeypatch.setattr("builtins.input", lambda prompt: pytest.fail())
+    monkeypatch.setattr("builtins.input", lambda: pytest.fail())
     monkeypatch.setattr(rwth, "save_session", lambda path, cookies, session_key: None)
 
     rwth.login(ctx)
@@ -247,7 +247,7 @@ def test_generated_totp_is_not_echoed(
     monkeypatch.setattr(rwth.requests, "Session", lambda: session)
     monkeypatch.setattr(rwth, "check_moodle_availability", lambda session, log: None)
     monkeypatch.setattr(rwth, "generate_totp", lambda secret: "654321")
-    monkeypatch.setattr("builtins.input", lambda prompt: pytest.fail())
+    monkeypatch.setattr("builtins.input", lambda: pytest.fail())
     monkeypatch.setattr(rwth, "save_session", lambda path, cookies, session_key: None)
 
     rwth.login(ctx)
@@ -391,7 +391,6 @@ def test_login_prompts_for_missing_credentials_only_when_fresh_login_is_needed(
 ):
     session, posted_login, posted_totp_serial, posted_otp = fresh_login_session()
     prompt_answers = iter(["prompt-user", "prompt-totp-serial", "654321"])
-    prompts = []
     ctx = make_context(
         {
             "paths.cookie_file": str(tmp_path / "session"),
@@ -401,12 +400,13 @@ def test_login_prompts_for_missing_credentials_only_when_fresh_login_is_needed(
     monkeypatch.setattr(rwth.requests, "Session", lambda: session)
     monkeypatch.setattr(rwth, "check_moodle_availability", lambda session, log: None)
 
-    def answer(prompt):
-        prompts.append(prompt)
+    def answer():
         return next(prompt_answers)
 
     monkeypatch.setattr("builtins.input", answer)
-    monkeypatch.setattr(rwth.getpass, "getpass", lambda prompt: "prompt-password")
+    monkeypatch.setattr(
+        "syncmymoodle.output.getpass.getpass", lambda prompt: "prompt-password"
+    )
     monkeypatch.setattr(rwth, "save_session", lambda path, cookies, session_key: None)
 
     rwth.login(ctx)
@@ -420,9 +420,12 @@ def test_login_prompts_for_missing_credentials_only_when_fresh_login_is_needed(
     assert ctx.auth.totp_serial == "prompt-totp-serial"
     assert ctx.config.user is None
     assert ctx.config.totp_serial is None
-    assert "RWTH SSO TOTP serial id (for example, TOTP12345678): " in prompts
-    assert "Current 6-digit TOTP code for prompt-totp-serial: " in prompts
-    assert "Selecting TOTP method prompt-totp-serial..." in capsys.readouterr().out
+    captured = capsys.readouterr()
+    assert "RWTH SSO username: " in captured.out
+    assert "RWTH SSO password: " in captured.err
+    assert "RWTH SSO TOTP serial id (for example, TOTP12345678): " in captured.out
+    assert "Current 6-digit TOTP code for prompt-totp-serial: " in captured.out
+    assert "Selecting TOTP method prompt-totp-serial..." in captured.out
 
 
 def test_cached_session_status_returns_exact_remaining_time(monkeypatch, tmp_path):
