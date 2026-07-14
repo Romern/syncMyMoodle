@@ -61,6 +61,7 @@ def test_config_options_record_cli_overrides():
         "youtube": "links.youtube",
         "opencast": "links.opencast",
         "sciebo": "links.sciebo",
+        "emedia": "links.emedia",
         "quiz": "modules.quiz",
     }
 
@@ -553,6 +554,7 @@ def test_defaults_applied_for_empty_config(tmp_path, monkeypatch):
     assert cfg.module_assignment
     assert cfg.module_folder
     assert cfg.link_source_enabled("opencast")
+    assert cfg.link_source_enabled("emedia")
     # HTML is the safe quiz default: it archives attempts without a browser.
     assert cfg.quiz_mode == "html"
 
@@ -641,6 +643,7 @@ def test_legacy_used_modules_tree_disables_omitted_entries():
     assert cfg.link_youtube is False
     assert cfg.link_opencast is False
     assert cfg.link_sciebo is False
+    assert cfg.link_emedia is True
     assert cfg.quiz_mode == "off"
     # nolinks was a separate legacy toggle; the tree does not affect it.
     assert cfg.follow_links is True
@@ -655,6 +658,7 @@ def test_empty_legacy_used_modules_tree_keeps_historical_defaults():
     assert cfg.link_youtube is True
     assert cfg.link_opencast is True
     assert cfg.link_sciebo is True
+    assert cfg.link_emedia is True
     assert cfg.quiz_mode == "html"
 
 
@@ -1215,6 +1219,7 @@ def test_config_migrate_command_writes_secret_free_toml_and_tokens(
     migrated_values = canonicalize(migrated)
     assert migrated_values["downloads.conflict_handling"] == "rename"
     assert migrated_values["downloads.dry_run"] is False
+    assert migrated_values["links.emedia"] is True
     assert "courses.prefix_handling" not in migrated_values
     assert "downloads.update_files" not in migrated_values
     assert "# Relative paths in this file resolve" in migrated_text

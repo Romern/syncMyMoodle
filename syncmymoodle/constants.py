@@ -28,6 +28,11 @@ OPENCAST_EPISODE_URL_RE = re.compile(
 )
 SCIEBO_URL = "https://rwth-aachen.sciebo.de"
 SCIEBO_LINK_RE = re.compile(rf"{re.escape(SCIEBO_URL)}/s/[a-zA-Z0-9-]+")
+EMEDIA_URL = "https://emedia-medizin.rwth-aachen.de/"
+EMEDIA_API_URL = "https://cellia-medizin.rwth-aachen.de/veira_rest/video/readById.php"
+EMEDIA_LINK_RE = re.compile(
+    rf"{re.escape(EMEDIA_URL)}(?:web|app)/veira_fe/#/watch/(?P<video_id>\d+)"
+)
 MOODLE_URL = "https://moodle.rwth-aachen.de/"
 # Canonical host for same-origin checks (no port, lowercase).
 MOODLE_NETLOC = urllib.parse.urlparse(MOODLE_URL).netloc.lower()

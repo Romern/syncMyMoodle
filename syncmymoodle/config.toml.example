@@ -52,6 +52,7 @@ follow_links = true # Turning this off also disables every source below
 youtube = true # Include YouTube links and embeds
 opencast = true # Include Opencast links and embeds
 sciebo = true # Include Sciebo links
+emedia = true # Include emedia Medizin VEIRA videos
 
 [modules]
 assignment = true # Include assignments

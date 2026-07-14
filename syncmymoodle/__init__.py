@@ -20,6 +20,7 @@ Moodle API:
 
 Content sources / parsing:
     opencast        Opencast LTI launch and episode/track resolution
+    emedia         emedia Medizin VEIRA metadata and playlist resolution
     sciebo          Sciebo public-share WebDAV (PROPFIND) traversal
     links           scans HTML/text for embedded videos and shared files
 

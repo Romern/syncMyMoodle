@@ -251,6 +251,18 @@ def build_youtube_tree(link):
     return root, section, video
 
 
+def test_existing_youtube_download_is_marked_handled(tmp_path):
+    ctx = make_context({"paths.sync_directory": str(tmp_path)})
+    root, section, video = build_youtube_tree("https://youtu.be/abcdefghijk")
+    video_directory = node_path(ctx, section)
+    video_directory.mkdir(parents=True)
+    (video_directory / "Lecture-abcdefghijk.mp4").write_bytes(b"existing video")
+
+    downloader.download_node_tree(ctx, root)
+
+    assert video.is_handled
+
+
 # --------------------------------------------------------------------------
 # Actual download happy path (gap 2)
 # --------------------------------------------------------------------------
@@ -491,22 +503,20 @@ def test_dry_run_honors_youtube_size_limits(tmp_path, monkeypatch, capsys):
     }
 
 
-def test_youtube_estimated_size_sums_requested_formats():
-    assert downloader.youtube_estimated_size({"filesize": 100}) == 100
-    assert downloader.youtube_estimated_size({"filesize_approx": 200}) == 200
+def test_yt_dlp_estimated_size_sums_requested_formats():
+    assert downloader.yt_dlp_estimated_size({"filesize": 100}) == 100
+    assert downloader.yt_dlp_estimated_size({"filesize_approx": 200}) == 200
     assert (
-        downloader.youtube_estimated_size(
+        downloader.yt_dlp_estimated_size(
             {"requested_formats": [{"filesize": 100}, {"filesize_approx": 50}]}
         )
         == 150
     )
     # Unknown sizes must not trigger the limit.
-    assert downloader.youtube_estimated_size(None) is None
-    assert downloader.youtube_estimated_size({}) is None
+    assert downloader.yt_dlp_estimated_size(None) is None
+    assert downloader.yt_dlp_estimated_size({}) is None
     assert (
-        downloader.youtube_estimated_size(
-            {"requested_formats": [{"filesize": 100}, {}]}
-        )
+        downloader.yt_dlp_estimated_size({"requested_formats": [{"filesize": 100}, {}]})
         is None
     )
 

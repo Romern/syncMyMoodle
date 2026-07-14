@@ -13,6 +13,7 @@ from syncmymoodle.moodle_tokens import MoodleTokens
 from syncmymoodle.node import Node
 
 if TYPE_CHECKING:
+    from syncmymoodle.emedia import EmediaVideo
     from syncmymoodle.opencast import OpencastTrack
 
 
@@ -86,6 +87,7 @@ class SyncContext:
     browser_session_resolver: Callable[[], None] | None = field(
         default=None, repr=False, compare=False
     )
+    emedia_api_session: requests.Session | None = field(default=None, repr=False)
     root_node: Node | None = None
     course_caches: dict[Path, Node] = field(default_factory=dict)
     browser_bootstrap_error_logged: bool = False
@@ -96,6 +98,9 @@ class SyncContext:
     opencast_track_cache: dict[str, tuple[OpencastTrack, ...]] = field(
         default_factory=dict
     )
+    emedia_video_cache: dict[int, EmediaVideo | None] = field(default_factory=dict)
+    emedia_revision_cache: dict[str, str] = field(default_factory=dict)
+    emedia_output_suffix: str | None = None
     downloaded_paths: set[Path] = field(default_factory=set)
     filtered_items: set[FilteredItem] = field(default_factory=set)
     quiz_review_cache: dict[str, str] = field(default_factory=dict)

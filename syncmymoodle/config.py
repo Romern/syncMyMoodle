@@ -635,6 +635,16 @@ class Config:
             "include Sciebo links",
         ),
     )
+    link_emedia: bool = option(
+        True,
+        group="links",
+        key="emedia",
+        normalize=bool,
+        cli=cli_flag(
+            "emedia",
+            "include videos from the emedia Medizin VEIRA service",
+        ),
+    )
 
     # Moodle activity types. Keys omitted from a [modules] table keep these
     # defaults; legacy used_modules trees instead disable omitted entries
@@ -698,7 +708,7 @@ class Config:
         return PromptAuthSource()
 
     def link_source_enabled(self, name: str) -> bool:
-        """Whether a link-based content source is enabled (youtube/opencast/sciebo).
+        """Whether a configured link-based content source is enabled.
 
         All sources require link inspection (follow_links) to be on.
         """
@@ -706,6 +716,7 @@ class Config:
             "youtube": self.link_youtube,
             "opencast": self.link_opencast,
             "sciebo": self.link_sciebo,
+            "emedia": self.link_emedia,
         }
         return self.follow_links and flags.get(name, False)
 

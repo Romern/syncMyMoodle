@@ -17,7 +17,7 @@ It supports Linux, macOS, and Windows with Python 3.11 or newer.
 - Assignments, submissions, and feedback
 - File resources and Moodle folders
 - Pages and labels, including linked files and embedded media
-- Opencast, YouTube, and Sciebo content
+- Opencast, YouTube, Sciebo, and emedia Medizin VEIRA content
 - Quiz attempts as offline HTML, optionally also as PDF
 - H5P packages and supported LTI content
 
@@ -184,7 +184,7 @@ for rules shared by every course.
 
 File, link, domain, type, and size filters are also available. Size limits
 apply only when the remote size is known. Disabling `links.follow_links` also
-disables the YouTube, Opencast, and Sciebo link handlers beneath it.
+disables the YouTube, Opencast, Sciebo, and emedia link handlers beneath it.
 
 Intentional exclusions are summarized after each sync. Pass `--show-filtered`
 to list them by configuration key and explain which rule matched. Combine it

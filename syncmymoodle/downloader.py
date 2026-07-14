@@ -1,5 +1,6 @@
 import hashlib
 import logging
+import math
 import os
 import re
 import urllib.parse
@@ -875,10 +876,15 @@ def download_node_tree(  # noqa: C901 - legacy traversal awaiting decomposition
 ) -> None:
     if len(cur_node.children) == 0:
         if cur_node.url and not cur_node.is_handled:
-            if cur_node.type == "Youtube":
+            if cur_node.type in {"Youtube", "Emedia"}:
                 try:
-                    scan_and_download_youtube(ctx, cur_node, log)
-                    cur_node.mark_handled()
+                    handler = (
+                        scan_and_download_youtube
+                        if cur_node.type == "Youtube"
+                        else download_emedia_video
+                    )
+                    if handler(ctx, cur_node, log):
+                        cur_node.mark_handled()
                 except Exception:
                     log.exception(f"Failed to download the module {cur_node}")
                     log.error(
@@ -915,6 +921,68 @@ def download_node_tree(  # noqa: C901 - legacy traversal awaiting decomposition
         download_node_tree(ctx, child, log)
 
 
+def download_emedia_video(
+    ctx: SyncContext,
+    node: Node,
+    log: logging.Logger = logger,
+) -> bool:
+    """Download the best single stream from a VEIRA HLS playlist."""
+    if node.url is None:
+        return False
+    downloadpath = pathing.get_sanitized_node_path(
+        node, Path(ctx.config.sync_directory)
+    )
+    action = planned_download_action(ctx, node, downloadpath, log)
+    if action is None:
+        return True
+    if cached_yt_dlp_size_violates_limit(ctx, node, downloadpath, log):
+        return True
+    if ctx.config.dry_run and not size_limits_configured(ctx):
+        print(f"Would download {downloadpath} [Emedia]")
+        return True
+
+    suffix = downloadpath.suffix or ".mp4"
+    stem = (
+        downloadpath.name[: -len(suffix)] if downloadpath.suffix else downloadpath.name
+    )
+    temporary_path = pathing.with_windows_extended_length_prefix(
+        downloadpath.parent / f".{stem}.smmpart{suffix}"
+    )
+    ydl_opts = {
+        "format": "best",
+        "fragment_retries": 15,
+        "http_headers": dict(node.download_headers or {}),
+        "noplaylist": True,
+        "nooverwrites": True,
+        "outtmpl": os.fspath(temporary_path),
+        "retries": 15,
+    }
+    if suffix.casefold() == ".ts":
+        ydl_opts["fixup"] = "never"
+    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+        if yt_dlp_violates_size_limits(ctx, ydl, node, node.url, "emedia video"):
+            return True
+        if ctx.config.dry_run:
+            print(f"Would download {downloadpath} [Emedia]")
+            return True
+        downloadpath.parent.mkdir(parents=True, exist_ok=True)
+        temporary_path.unlink(missing_ok=True)
+        if ydl.download([node.url]) != 0 or not temporary_path.is_file():
+            log.warning("yt-dlp did not download VEIRA video %s", node.id)
+            return False
+
+    transfer = TransferPlan(
+        temporary_path,
+        temporary_path.with_name(temporary_path.name + ".etag"),
+        {},
+    )
+    if not install_downloaded_file(downloadpath, transfer, action, log):
+        return False
+    record_download_metadata(node, downloadpath, None)
+    ctx.downloaded_paths.add(downloadpath)
+    return True
+
+
 def scan_and_download_youtube(
     ctx: SyncContext,
     node: Node,
@@ -936,11 +1004,11 @@ def scan_and_download_youtube(
             and completed_name.search(file.name)
             for file in path.iterdir()
         ):
-            return False
+            return True
     if ctx.config.dry_run and not size_limits_configured(ctx):
         print(f"Would download YouTube video {link} to {path} [Youtube]")
         return True
-    if cached_youtube_size_violates_limit(ctx, node, path, log):
+    if cached_yt_dlp_size_violates_limit(ctx, node, path, log):
         return True
     outtmpl = pathing.with_windows_extended_length_prefix(
         path / "%(title)s-%(id)s.%(ext)s",
@@ -954,7 +1022,7 @@ def scan_and_download_youtube(
         "match_filter": yt_dlp.match_filter_func("!is_live"),
     }
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-        if youtube_violates_size_limits(ctx, ydl, node, link):
+        if yt_dlp_violates_size_limits(ctx, ydl, node, link, "YouTube video"):
             return True
         if ctx.config.dry_run:
             print(f"Would download YouTube video {link} to {path} [Youtube]")
@@ -964,7 +1032,7 @@ def scan_and_download_youtube(
     return True
 
 
-def cached_youtube_size_violates_limit(
+def cached_yt_dlp_size_violates_limit(
     ctx: SyncContext,
     node: Node,
     path: Path,
@@ -977,11 +1045,12 @@ def cached_youtube_size_violates_limit(
     return known_remote_size_violates_limit(ctx, node, path)
 
 
-def youtube_violates_size_limits(
+def yt_dlp_violates_size_limits(
     ctx: SyncContext,
     ydl: Any,
     node: Node,
     link: str,
+    description: str,
 ) -> bool:
     """Whether yt-dlp's pre-download size estimate falls outside the size limits.
 
@@ -993,19 +1062,19 @@ def youtube_violates_size_limits(
         info: dict[str, int] = ydl.extract_info(link, download=False)
     except Exception:
         return False
-    total_size = youtube_estimated_size(info)
+    total_size = yt_dlp_estimated_size(info)
     if total_size is None:
         return False
     node.remote_size = total_size
     return record_size_limit_filter(
         ctx,
-        f"YouTube video {redact_url_secrets(link)}",
+        f"{description} {redact_url_secrets(link)}",
         total_size,
         "estimated size",
     )
 
 
-def youtube_estimated_size(info: Any) -> int | None:
+def yt_dlp_estimated_size(info: Any) -> int | None:
     """Extract yt-dlp's size estimate from an info dict, if it reports one."""
     if not isinstance(info, dict):
         return None
@@ -1018,4 +1087,18 @@ def youtube_estimated_size(info: Any) -> int | None:
         sizes = [f.get("filesize") or f.get("filesize_approx") for f in formats]
         if all(sizes):
             return int(sum(sizes))
+    duration = info.get("duration")
+    total_bitrate = info.get("tbr")
+    if (
+        isinstance(duration, (int, float))
+        and not isinstance(duration, bool)
+        and math.isfinite(duration)
+        and duration > 0
+        and isinstance(total_bitrate, (int, float))
+        and not isinstance(total_bitrate, bool)
+        and math.isfinite(total_bitrate)
+        and total_bitrate > 0
+    ):
+        # yt-dlp reports total bitrate in kilobits per second.
+        return round(duration * total_bitrate * 1000 / 8)
     return None

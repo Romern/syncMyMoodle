@@ -6,10 +6,12 @@ from typing import Any, cast
 import requests
 from yt_dlp.extractor.youtube import YoutubeIE  # type: ignore[import-untyped]
 
+from syncmymoodle import emedia as emedia_api
 from syncmymoodle import filters
 from syncmymoodle import opencast as opencast_api
 from syncmymoodle import sciebo as sciebo_api
 from syncmymoodle.constants import (
+    EMEDIA_LINK_RE,
     HTTP_TIMEOUT_SECONDS,
     OPENCAST_LINK_RE,
     SCIEBO_LINK_RE,
@@ -113,11 +115,20 @@ def scan_for_links(  # noqa: C901 - legacy parser awaiting decomposition
         and SCIEBO_LINK_RE.fullmatch(text.split("?", 1)[0].split("#", 1)[0].rstrip("/"))
         is not None
     )
+    is_emedia_video = (
+        ctx.config.link_source_enabled("emedia")
+        and emedia_api.extract_video_id(text) is not None
+    )
     origin_is_unavailable = bool(
         link_origin and ctx.service_outages.should_skip(link_origin)
     )
     request_origin = link_origin
-    if single and not is_sciebo_share and not origin_is_unavailable:
+    if (
+        single
+        and not is_sciebo_share
+        and not is_emedia_video
+        and not origin_is_unavailable
+    ):
         try:
             text = text.replace("webservice/pluginfile.php", "pluginfile.php")
             if filters.should_skip_url(ctx, text, "link"):
@@ -273,6 +284,14 @@ def scan_for_links(  # noqa: C901 - legacy parser awaiting decomposition
                 vid_id,
                 log,
             )
+
+    # VEIRA videos on the separate emedia Medizin Moodle service
+    if ctx.config.link_source_enabled("emedia"):
+        for match in EMEDIA_LINK_RE.finditer(text):
+            link = match.group(0)
+            if filters.should_skip_url(ctx, link, "emedia link"):
+                continue
+            emedia_api.add_video_node(ctx, parent_node, link, module_title, log)
 
     # https://rwth-aachen.sciebo.de/s/XXX
     if ctx.config.link_source_enabled("sciebo"):
