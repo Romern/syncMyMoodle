@@ -281,6 +281,8 @@ def test_tty_sync_progress_combines_aggregate_detail_and_transfer(monkeypatch):
     terminal = TerminalOutput("never")
 
     with terminal.sync_progress as progress:
+        renderer = progress.renderer
+        assert renderer is not None
         progress.begin_courses(2)
         progress.start_course(1, "Operating Systems")
         progress.update_course(
@@ -292,14 +294,14 @@ def test_tty_sync_progress_combines_aggregate_detail_and_transfer(monkeypatch):
             current_module="Lecture recordings [lti]",
         )
         progress.module_status("resolving Opencast episode 2/5")
-        time.sleep(0.25)
+        renderer.refresh()
         progress.finish_course(1)
         progress.begin_items(2)
         progress.start_item(1, "Video: Operating Systems/lecture.mp4")
         terminal.action("Downloading", "/sync/lecture.mp4", "Video")
         with terminal.transfer("lecture.mp4", total=100) as transfer:
             transfer.advance(100)
-            time.sleep(0.15)
+            renderer.refresh()
         progress.finish_item(1)
 
     rendered = stderr.getvalue()
