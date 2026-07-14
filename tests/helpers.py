@@ -10,7 +10,8 @@ from typing import Any
 
 from syncmymoodle import downloader
 from syncmymoodle.config import Config
-from syncmymoodle.context import SyncContext
+from syncmymoodle.context import MoodleAccount, SyncContext
+from syncmymoodle.moodle_tokens import MoodleTokens
 from syncmymoodle.node import Node
 from syncmymoodle.pathing import get_sanitized_node_path
 
@@ -23,28 +24,8 @@ SNAPSHOTS = Path(__file__).parent / "snapshots"
 UPDATE_SNAPSHOTS = os.environ.get("SMM_UPDATE_SNAPSHOTS") not in (None, "", "0")
 
 
-DEFAULT_CONFIG = {
-    "paths.sync_directory": "./",
-    "courses.selected": [],
-    "courses.skip": [],
-    "courses.semesters": [],
-    "courses.prefix_handling": "keep",
-    "links.follow_links": True,
-    "links.youtube": True,
-    "links.opencast": True,
-    "links.sciebo": True,
-    "modules.assignment": True,
-    "modules.resource": True,
-    "modules.folder": True,
+TEST_CONFIG_OVERRIDES = {
     "modules.quiz": "off",
-    "filters.exclude_filetypes": [],
-    "filters.exclude_files": [],
-    "filters.exclude_links": [],
-    "filters.allowed_domains": [],
-    "filters.exclude_sections": [],
-    "filters.exclude_modules": [],
-    "downloads.update_files": False,
-    "downloads.conflict_handling": "rename",
 }
 
 
@@ -68,6 +49,7 @@ class FakeKeyring:
 @dataclass
 class FakeResponse:
     text: str = ""
+    content: bytes | None = None
     status_code: int = 200
     headers: dict[str, str] = field(default_factory=dict)
     url: str | None = None
@@ -94,6 +76,8 @@ class FakeSession:
     def __init__(self) -> None:
         self.routes: dict[tuple[str, str], RouteResult] = {}
         self.calls: list[tuple[str, str]] = []
+        self.headers: dict[str, str] = {}
+        self.cookies: Any = []
 
     def add(self, method: str, url: str, response: RouteResult) -> None:
         self.routes[(method.upper(), url)] = response
@@ -160,12 +144,18 @@ def assert_snapshot(name: str, actual: list[str]) -> None:
 
 
 def make_context(config: dict[str, Any] | None = None) -> SyncContext:
-    merged_config = DEFAULT_CONFIG.copy()
+    merged_config = TEST_CONFIG_OVERRIDES.copy()
     if config:
         merged_config.update(config)
     ctx = SyncContext(config=Config.from_dict(merged_config))
-    ctx.wstoken = "fake-webservice-token"
-    ctx.user_id = 10001
+    ctx.moodle_account = MoodleAccount(
+        MoodleTokens(
+            "fake-user",
+            "fake-webservice-token",
+            "fake-private-token",
+            moodle_user_id=10001,
+        ),
+    )
     ctx.session_key = "fake-sesskey"
     return ctx
 
@@ -176,6 +166,15 @@ def node_path(ctx: SyncContext, node: Node) -> Path:
 
 def download_file(ctx: SyncContext, node: Node) -> bool:
     return downloader.download_file(ctx, node)
+
+
+def node_at_path(root: Node, target_path: list[str]) -> Node:
+    node = root
+    for name in filter(None, target_path):
+        child = next((child for child in node.children if child.name == name), None)
+        assert child is not None, f"Node path not found: {'/'.join(target_path)}"
+        node = child
+    return node
 
 
 def install_moodle_fixtures(
@@ -201,6 +200,18 @@ def install_moodle_fixtures(
     monkeypatch.setattr(
         "syncmymoodle.moodle.get_folders_by_courses",
         lambda session, wstoken, course_id: (folders or {}).get(int(course_id), []),
+    )
+    monkeypatch.setattr(
+        "syncmymoodle.moodle.get_h5pactivities_by_course",
+        lambda session, wstoken, course_id: [],
+    )
+    monkeypatch.setattr(
+        "syncmymoodle.moodle.get_ltis_by_course",
+        lambda session, wstoken, course_id: [],
+    )
+    monkeypatch.setattr(
+        "syncmymoodle.moodle.get_quizzes_by_course",
+        lambda session, wstoken, course_id: [],
     )
     # The assignment handler fetches submission files via the moodle module
     # directly, so stub it there (leak-safe via monkeypatch).

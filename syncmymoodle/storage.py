@@ -140,7 +140,11 @@ def read_private_gzip_json(path: Path, description: str) -> Any:
         return None
 
 
-def cookies_to_data(cookie_jar: Any) -> dict[str, Any]:
+SESSION_CACHE_FORMAT = "syncmymoodle.session.v2"
+LEGACY_COOKIE_FORMAT = "syncmymoodle.cookies.v1"
+
+
+def session_to_data(cookie_jar: Any, session_key: str) -> dict[str, Any]:
     cookies = []
     for cookie in cookie_jar:
         cookies.append(
@@ -154,32 +158,77 @@ def cookies_to_data(cookie_jar: Any) -> dict[str, Any]:
                 "rest": getattr(cookie, "_rest", {}),
             }
         )
-    return {"format": "syncmymoodle.cookies.v1", "cookies": cookies}
+    return {
+        "format": SESSION_CACHE_FORMAT,
+        "session_key": session_key,
+        "cookies": cookies,
+    }
 
 
-def load_cookies_from_data(cookie_jar: Any, payload: Any) -> None:
-    if not isinstance(payload, dict):
-        return
-    if payload.get("format") != "syncmymoodle.cookies.v1":
-        logger.warning("Ignoring unsupported cookie file format")
-        return
-
-    for cookie_data in payload.get("cookies", []):
-        if not isinstance(cookie_data, dict):
-            continue
-        if not cookie_data.get("name"):
-            continue
-        cookie = requests.cookies.create_cookie(
-            name=cookie_data["name"],
-            value=cookie_data.get("value", ""),
-            domain=cookie_data.get("domain") or "",
-            path=cookie_data.get("path") or "/",
-            secure=bool(cookie_data.get("secure")),
-            expires=cookie_data.get("expires"),
-            rest=cookie_data.get("rest") or {},
+def cookie_from_data(cookie_data: Any) -> Any:
+    if not isinstance(cookie_data, dict):
+        raise ValueError("cookie entry is not an object")
+    name = cookie_data.get("name")
+    value = cookie_data.get("value", "")
+    domain = cookie_data.get("domain")
+    path = cookie_data.get("path")
+    secure = cookie_data.get("secure", False)
+    expires = cookie_data.get("expires")
+    raw_rest = cookie_data.get("rest")
+    rest = {} if raw_rest is None else raw_rest
+    if (
+        not isinstance(name, str)
+        or not name
+        or (value is not None and not isinstance(value, str))
+        or (domain is not None and not isinstance(domain, str))
+        or (path is not None and not isinstance(path, str))
+        or not isinstance(secure, bool)
+        or (
+            expires is not None
+            and (not isinstance(expires, int) or isinstance(expires, bool))
         )
+        or not isinstance(rest, dict)
+        or not all(
+            isinstance(key, str) and (rest_value is None or isinstance(rest_value, str))
+            for key, rest_value in rest.items()
+        )
+    ):
+        raise ValueError("cookie entry has invalid fields")
+    return requests.cookies.create_cookie(
+        name=name,
+        value=value,
+        domain=domain or "",
+        path=path or "/",
+        secure=secure,
+        expires=expires,
+        rest=rest,
+    )
+
+
+def load_session_from_data(cookie_jar: Any, payload: Any) -> str | None:
+    if not isinstance(payload, dict):
+        return None
+    cache_format = payload.get("format")
+    if cache_format not in {SESSION_CACHE_FORMAT, LEGACY_COOKIE_FORMAT}:
+        logger.warning("Ignoring unsupported cookie file format")
+        return None
+
+    cookie_data_items = payload.get("cookies", [])
+    if not isinstance(cookie_data_items, list):
+        logger.warning("Ignoring malformed cookie file")
+        return None
+
+    try:
+        cookies = [cookie_from_data(cookie_data) for cookie_data in cookie_data_items]
+    except (AttributeError, TypeError, ValueError):
+        logger.warning("Ignoring malformed cookie file")
+        return None
+
+    for cookie in cookies:
         cookie_jar.set_cookie(cookie)
+    session_key = payload.get("session_key")
+    return session_key if isinstance(session_key, str) and session_key else None
 
 
-def save_session_cookies(cookie_file: Path, cookie_jar: Any) -> None:
-    write_private_gzip_json(cookie_file, cookies_to_data(cookie_jar))
+def save_session(cookie_file: Path, cookie_jar: Any, session_key: str) -> None:
+    write_private_gzip_json(cookie_file, session_to_data(cookie_jar, session_key))

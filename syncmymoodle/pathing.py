@@ -32,6 +32,16 @@ def absolute_path(path: Path, base_dir: Path | None = None) -> Path:
     return Path(os.path.abspath(absolute_path(base_dir) / path))
 
 
+def path_identity(value: object) -> tuple[bool, str] | None:
+    """Return a normalized identity for detecting aliased managed paths."""
+    if not isinstance(value, (str, os.PathLike)) or not value:
+        return None
+    path = Path(value).expanduser()
+    is_absolute = path.is_absolute()
+    normalized = os.path.realpath(path) if is_absolute else os.path.normpath(path)
+    return is_absolute, os.path.normcase(os.fspath(normalized))
+
+
 def user_config_dir() -> Path:
     xdg_config_home = os.environ.get("XDG_CONFIG_HOME")
     if xdg_config_home:

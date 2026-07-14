@@ -2,10 +2,13 @@ import re
 import urllib.parse
 
 # Characters removed from any path segment derived from Moodle names/URLs.
-INVALID_CHARS = '~"#%&*:<>?/\\{|}'
+INVALID_CHARS = '~"#%*:<>?/\\{|}'
 
 # Chunk size for streamed HTTP reads.
 DEFAULT_BLOCK_SIZE = 1024
+
+# Bound every direct HTTP request so an unavailable service cannot hang a run.
+HTTP_TIMEOUT_SECONDS = 15
 
 # Hidden per-course metadata cache filename.
 COURSE_CACHE_FILENAME = ".syncmymoodle_cache"
@@ -18,21 +21,22 @@ CHECKSUM_LENGTHS_BY_ALGO = {
 YOUTUBE_LINK_RE = re.compile(
     r"(https?://(www\.)?(youtube\.com/(watch\?[a-zA-Z0-9_=&-]*v=|embed/)|youtu.be/).{11})"
 )
-OPENCAST_LINK_RE = re.compile(
-    r"https://engage\.streaming\.rwth-aachen\.de/play/[a-zA-Z0-9-]+"
+OPENCAST_URL = "https://engage.streaming.rwth-aachen.de"
+OPENCAST_LINK_RE = re.compile(rf"{re.escape(OPENCAST_URL)}/play/[a-zA-Z0-9-]+")
+OPENCAST_EPISODE_URL_RE = re.compile(
+    rf"^{re.escape(OPENCAST_URL)}/play/([a-zA-Z0-9-]{{36}})(?:[/?#].*)?$"
 )
-SCIEBO_LINK_RE = re.compile(r"https://rwth-aachen\.sciebo\.de/s/[a-zA-Z0-9-]+")
+SCIEBO_URL = "https://rwth-aachen.sciebo.de"
+SCIEBO_LINK_RE = re.compile(rf"{re.escape(SCIEBO_URL)}/s/[a-zA-Z0-9-]+")
 MOODLE_URL = "https://moodle.rwth-aachen.de/"
 # Canonical host for same-origin checks (no port, lowercase).
 MOODLE_NETLOC = urllib.parse.urlparse(MOODLE_URL).netloc.lower()
 RWTH_HOMEPAGE_URL = "https://www.rwth-aachen.de/"
+RWTH_TOTP_MANAGER_URL = "https://idm.rwth-aachen.de/selfservice/MFATokenManager"
 RWTH_STATUS_URL = "https://maintenance.itc.rwth-aachen.de/ticket/status/messages"
-RWTH_MOODLE_STATUS_URL = (
-    "https://maintenance.itc.rwth-aachen.de/ticket/status/messages/499?locale=en"
-)
-RWTH_SSO_STATUS_URL = (
-    "https://maintenance.itc.rwth-aachen.de/ticket/status/messages/462?locale=en"
-)
+RWTH_MOODLE_STATUS_URL = f"{RWTH_STATUS_URL}/499?locale=en"
+RWTH_SCIEBO_STATUS_URL = f"{RWTH_STATUS_URL}/484?locale=en"
+RWTH_SSO_STATUS_URL = f"{RWTH_STATUS_URL}/462?locale=en"
 RWTH_DISRUPTIVE_STATUS_CLASSES = {
     "statuslabel_stoerung",
     "statuslabel_teilstoerung",

@@ -1,45 +1,59 @@
 [auth]
-user = ""
-password = ""
-totp_serial = ""
-totp_secret = ""
-use_keyring = false
-keyring_store_totp_secret = false
+user = "" # RWTH SSO username
+
+[auth.tokens]
+store = "keyring" # keyring (recommended) or env-file
+env_file = "" # Protected environment file used only when store = "env-file"
+
+[auth.login]
+# prompt, keyring, env-file, 1password, bitwarden, pass, rbw, gopass, or command.
+# Reusable providers can sign in again during sync if Moodle tokens stop working.
+provider = "prompt"
+totp_serial = "" # The TOTP ID to use e.g. TOTP12345678; see https://idm.rwth-aachen.de/selfservice/MFATokenManager
+env_file = "" # Password and optional TOTP seed when provider = "env-file"
+password = "" # Password-manager reference, never a plaintext password
+otp = "" # Optional password-manager reference for the current TOTP code
+password_command = [] # Argument array used only when provider = "command"; no shell
+otp_command = [] # Optional current-TOTP argument array for provider = "command"
+# With provider = "keyring", optionally enable unattended TOTP:
+# keyring_store_totp_secret = true
+
 
 [paths]
 # Relative paths in this file resolve from this config file's directory.
-sync_directory = "./"
+sync_directory = "" # Directory for downloaded files; setup fills this interactively
 cookie_file = "" # Defaults to the user config directory, e.g. ~/.config/syncmymoodle/session on Linux
-browser = ""
+browser = "" # Optional Chrome/Chromium/Edge path for quiz PDFs; empty auto-detects
 
 [courses]
-selected = []
-skip = []
-semesters = []
-prefix_handling = "suffix"
+selected = [] # Course URLs or numeric IDs; overrides skip and semesters
+skip = [] # Course URLs or numeric IDs to exclude
+semesters = [] # Semester IDs such as 25ws or 26ss
+prefix_handling = "suffix" # keep, remove, or suffix
 
 [downloads]
-update_files = true
-conflict_handling = "rename"
+update_files = true # Redownload remote files reported as modified
+conflict_handling = "rename" # rename, keep, or overwrite local modifications
+dry_run = false # Report planned downloads without writing files or caches
 
 [filters]
-max_file_size = ""
-min_file_size = ""
-exclude_filetypes = []
-exclude_files = []
-exclude_links = []
-allowed_domains = []
-exclude_sections = []
-exclude_modules = []
+max_file_size = "" # e.g. "500M" or "2G"; applies when size is known
+min_file_size = "" # e.g. "10K"; applies when size is known
+exclude_filetypes = [] # File extensions such as ["mp4", "mkv"]
+exclude_files = [] # UNIX filename patterns such as ["Lecture*.mp4"]
+exclude_links = [] # UNIX URL patterns
+allowed_domains = [] # Allowlist for discovered HTTP(S) links
+exclude_sections = [] # Section names, IDs, or UNIX patterns
+exclude_modules = [] # Module names, types, IDs, URLs, or UNIX patterns
 
 [links]
-follow_links = true
-youtube = true
-opencast = true
-sciebo = true
+follow_links = true # Turning this off also disables every source below
+youtube = true # Include YouTube links and embeds
+opencast = true # Include Opencast links and embeds
+sciebo = true # Include Sciebo links
 
 [modules]
-assignment = true
-resource = true
-folder = true
-quiz = "html"
+assignment = true # Include assignments
+resource = true # Include file resources
+folder = true # Include Moodle folders
+quiz = "html" # off, html, pdf, or both

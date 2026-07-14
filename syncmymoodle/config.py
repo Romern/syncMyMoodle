@@ -6,12 +6,14 @@ validation rules via :func:`option`. The CLI parser, config validation,
 the canonical flat form and the TOML layout written by ``config migrate``
 are all derived from this schema.
 
-:func:`canonicalize` maps a config in the current format (grouped tables
-or flat ``"group.key"`` names) onto one flat canonical dict before any
-merging happens. Legacy JSON configs are translated into the current
-format first by :func:`convert_legacy_config` (see the legacy support
-section at the bottom of this module); legacy spellings are not accepted
-in TOML configs, but validation points from them to the current names.
+:func:`canonicalize` maps an in-memory config (grouped mappings or internal
+flat ``"group.key"`` names) onto one flat canonical dict before any merging
+happens. TOML files must use nested tables or unquoted dotted keys; literal
+dotted keys are rejected at the file boundary. Legacy JSON configs are
+translated into the current format first by :func:`convert_legacy_config`
+(see the legacy support section at the bottom of this module); legacy
+spellings are not accepted in TOML configs, but validation points from them
+to the current names.
 """
 
 from __future__ import annotations
@@ -25,13 +27,19 @@ from pathlib import Path
 from typing import Any, Callable, Literal, TypeAlias, cast
 
 from syncmymoodle import pathing
-from syncmymoodle.constants import COURSE_PREFIX_HANDLING_OPTIONS, QUIZ_MODES
+from syncmymoodle.constants import (
+    COURSE_PREFIX_HANDLING_OPTIONS,
+    QUIZ_MODES,
+    SECRET_PROVIDER_OPTIONS,
+)
 
 PatternConfig: TypeAlias = dict[str, list[str]]
 ConfigDict: TypeAlias = dict[str, Any]
 CliValueKind: TypeAlias = Literal["scalar", "csv", "flag"]
 
 CONFLICT_HANDLING_OPTIONS = ("rename", "keep", "overwrite")
+TOKEN_STORE_OPTIONS = ("keyring", "env-file")
+LOGIN_PROVIDER_OPTIONS = ("prompt", "keyring", "env-file", *SECRET_PROVIDER_OPTIONS)
 
 
 def identity(value: Any) -> Any:
@@ -46,6 +54,28 @@ def as_string_list(value: Any) -> list[str]:
     else:
         values = [value]
     return [str(item) for item in values if item is not None]
+
+
+def as_command_argv(value: Any) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    return [str(item) for item in value]
+
+
+def command_argv_error(value: Any) -> str | None:
+    if not isinstance(value, list):
+        return "must be an array of command arguments, not a shell string"
+    if not value:
+        return None
+    if not all(isinstance(item, str) and item for item in value):
+        return "must contain only non-empty string arguments"
+    return None
+
+
+def string_error(value: Any) -> str | None:
+    if not isinstance(value, str):
+        return f"must be a string, got {value!r}"
+    return None
 
 
 def normalize_pattern_config(value: Any) -> PatternConfig:
@@ -64,6 +94,7 @@ _FILE_SIZE_RE = re.compile(
     re.IGNORECASE,
 )
 _FILE_SIZE_UNITS = {"": 1, "k": 1024, "m": 1024**2, "g": 1024**3, "t": 1024**4}
+_MAX_FILE_SIZE = 2**63 - 1
 
 
 def parse_file_size(value: Any) -> int:
@@ -85,13 +116,18 @@ def parse_file_size(value: Any) -> int:
             raise ValueError(f"not a file size: {value!r}")
         if suffix.startswith("i") and not unit:
             raise ValueError(f"not a file size: {value!r}")
-        size = int(float(number) * _FILE_SIZE_UNITS[unit])
-    if size < 0:
+        whole, separator, fraction = number.partition(".")
+        numerator = int(whole + fraction) * _FILE_SIZE_UNITS[unit]
+        denominator = 10 ** len(fraction) if separator else 1
+        size = numerator // denominator
+    if size < 0 or size > _MAX_FILE_SIZE:
         raise ValueError(f"not a file size: {value!r}")
     return size
 
 
 def file_size_error(value: Any) -> str | None:
+    if value in (None, "", 0) and not isinstance(value, bool):
+        return None
     try:
         parse_file_size(value)
     except ValueError:
@@ -112,11 +148,10 @@ class CliOverride:
     arg_name: str
     value_kind: CliValueKind
     help: str
-    # Value a "flag" kind writes when given (--no-follow-links writes False into links.follow_links).
-    flag_value: bool = True
-    requires_keyring: bool = False
-    # Deprecated spellings that are still accepted but hidden from --help.
+    # Legacy spellings remain accepted but are hidden from --help.
     aliases: tuple[str, ...] = ()
+    # Boolean value represented by a legacy flag alias.
+    legacy_flag_value: bool = True
 
     @property
     def dest(self) -> str:
@@ -125,27 +160,27 @@ class CliOverride:
 
 
 def cli_arg(
-    arg_name: str, help_text: str, aliases: tuple[str, ...] = ()
+    arg_name: str,
+    help_text: str,
+    aliases: tuple[str, ...] = (),
 ) -> CliOverride:
-    return CliOverride(arg_name, "scalar", help_text, aliases=aliases)
+    return CliOverride(arg_name, "scalar", help_text, aliases)
 
 
 def cli_csv(
     arg_name: str, help_text: str, aliases: tuple[str, ...] = ()
 ) -> CliOverride:
-    return CliOverride(arg_name, "csv", help_text, aliases=aliases)
+    return CliOverride(arg_name, "csv", help_text, aliases)
 
 
 def cli_flag(
     arg_name: str,
     help_text: str,
-    flag_value: bool = True,
-    requires_keyring: bool = False,
     aliases: tuple[str, ...] = (),
+    *,
+    legacy_flag_value: bool = True,
 ) -> CliOverride:
-    return CliOverride(
-        arg_name, "flag", help_text, flag_value, requires_keyring, aliases
-    )
+    return CliOverride(arg_name, "flag", help_text, aliases, legacy_flag_value)
 
 
 def option(
@@ -160,6 +195,7 @@ def option(
     validate: Callable[[Any], str | None] | None = None,
     cli: CliOverride | None = None,
     resolve_relative_path: bool = False,
+    repr: bool = True,
 ) -> Any:
     """Declare a :class:`Config` field together with its option schema.
 
@@ -181,8 +217,45 @@ def option(
         }
     }
     if factory is not None:
-        return field(default_factory=factory, metadata=metadata)
-    return field(default=default, metadata=metadata)
+        return field(default_factory=factory, metadata=metadata, repr=repr)
+    return field(default=default, metadata=metadata, repr=repr)
+
+
+@dataclass(frozen=True)
+class PromptAuthSource:
+    pass
+
+
+@dataclass(frozen=True)
+class KeyringAuthSource:
+    store_totp_secret: bool
+
+
+@dataclass(frozen=True)
+class EnvFileAuthSource:
+    path: Path
+
+
+@dataclass(frozen=True)
+class ExternalAuthSource:
+    provider: str
+    password_reference: str
+    otp_reference: str | None
+
+
+@dataclass(frozen=True)
+class CommandAuthSource:
+    password_command: tuple[str, ...]
+    otp_command: tuple[str, ...]
+
+
+AuthSource: TypeAlias = (
+    PromptAuthSource
+    | KeyringAuthSource
+    | EnvFileAuthSource
+    | ExternalAuthSource
+    | CommandAuthSource
+)
 
 
 @dataclass
@@ -198,61 +271,102 @@ class Config:
     # Credentials / login
     user: str | None = option(
         group="auth",
+        validate=string_error,
         cli=cli_arg("user", "set your RWTH Single Sign-On username"),
     )
-    password: str | None = option(
-        group="auth",
-        cli=cli_arg("password", "set your RWTH Single Sign-On password"),
+    token_store: str = option(
+        "keyring",
+        group="auth.tokens",
+        key="store",
+        falsey_uses_default=True,
+        choices=TOKEN_STORE_OPTIONS,
+        validate=string_error,
+    )
+    token_env_file: str | None = option(
+        group="auth.tokens",
+        key="env_file",
+        falsey_uses_default=True,
+        validate=string_error,
+        resolve_relative_path=True,
+    )
+    login_provider: str = option(
+        "prompt",
+        group="auth.login",
+        key="provider",
+        falsey_uses_default=True,
+        choices=LOGIN_PROVIDER_OPTIONS,
+        validate=string_error,
     )
     totp_serial: str | None = option(
-        group="auth",
+        group="auth.login",
+        validate=string_error,
         cli=cli_arg(
             "totp-serial",
-            "set your RWTH Single Sign-On TOTP provider's serial number "
-            "(see https://idm.rwth-aachen.de/selfservice/MFATokenManager)",
+            "set the serial number of your RWTH TOTP method, e.g. "
+            "TOTP12345678 (not the current 6-digit code; find it in "
+            "the RWTH IDM Token Manager)",
             aliases=("totp",),
-        ),
-    )
-    totp_secret: str | None = option(
-        group="auth",
-        cli=cli_arg(
-            "totp-secret",
-            "(optional) set your RWTH Single Sign-On TOTP provider Secret",
-            aliases=("totpsecret",),
-        ),
-    )
-    use_keyring: bool = option(
-        False,
-        group="auth",
-        normalize=bool,
-        cli=cli_flag(
-            "use-keyring",
-            "Use system's keyring for storing and retrieving account credentials",
-            requires_keyring=True,
-            aliases=("secretservice",),
         ),
     )
     keyring_store_totp_secret: bool = option(
         False,
-        group="auth",
+        group="auth.login",
         normalize=bool,
         cli=cli_flag(
             "keyring-store-totp-secret",
-            "Save TOTP secret in keyring",
-            requires_keyring=True,
+            "store the TOTP seed when the configured RWTH sign-in method is "
+            "the system keyring",
             aliases=("secretservicetotpsecret",),
         ),
     )
-
+    login_env_file: str | None = option(
+        group="auth.login",
+        key="env_file",
+        falsey_uses_default=True,
+        validate=string_error,
+        resolve_relative_path=True,
+        cli=cli_arg(
+            "login-env-file",
+            "temporarily use a protected environment file for the RWTH password "
+            "and optional TOTP seed",
+        ),
+    )
+    secret_password_ref: str | None = option(
+        group="auth.login",
+        key="password",
+        falsey_uses_default=True,
+        validate=string_error,
+    )
+    secret_otp_ref: str | None = option(
+        group="auth.login",
+        key="otp",
+        falsey_uses_default=True,
+        validate=string_error,
+    )
+    secret_password_command: list[str] = option(
+        group="auth.login",
+        key="password_command",
+        factory=list,
+        normalize=as_command_argv,
+        validate=command_argv_error,
+    )
+    secret_otp_command: list[str] = option(
+        group="auth.login",
+        key="otp_command",
+        factory=list,
+        normalize=as_command_argv,
+        validate=command_argv_error,
+    )
     # Local paths
     sync_directory: str = option(
         "./",
         group="paths",
         falsey_uses_default=True,
+        validate=string_error,
         resolve_relative_path=True,
         cli=cli_arg(
             "sync-directory",
-            "specify the directory where all files will be synced",
+            "set the directory to sync Moodle files to",
             aliases=("basedir",),
         ),
     )
@@ -260,10 +374,11 @@ class Config:
         factory=default_cookie_file,
         group="paths",
         falsey_uses_default=True,
+        validate=string_error,
         resolve_relative_path=True,
         cli=cli_arg(
             "cookie-file",
-            "set the location of a cookie file",
+            "set the file used to cache the RWTH browser session",
             aliases=("cookiefile",),
         ),
     )
@@ -272,6 +387,7 @@ class Config:
     browser: str | None = option(
         group="paths",
         falsey_uses_default=True,
+        validate=string_error,
         resolve_relative_path=True,
         cli=cli_arg(
             "browser",
@@ -288,8 +404,8 @@ class Config:
         normalize=as_string_list,
         cli=cli_csv(
             "courses",
-            "specify the courses that should be synced using comma-separated links. "
-            "Defaults to all courses, if no additional restrictions e.g. semester are defined.",
+            "sync only these comma-separated Moodle course URLs or numeric IDs; "
+            "defaults to all courses unless --semesters is set",
         ),
     )
     skip_courses: list[str] = option(
@@ -299,7 +415,8 @@ class Config:
         normalize=as_string_list,
         cli=cli_csv(
             "skip-courses",
-            "exclude specific courses using comma-separated links. Defaults to None.",
+            "exclude these comma-separated Moodle course URLs or numeric IDs; "
+            "ignored when --courses is set",
             aliases=("skipcourses",),
         ),
     )
@@ -310,8 +427,8 @@ class Config:
         normalize=as_string_list,
         cli=cli_csv(
             "semesters",
-            "specify semesters to be synced e.g. `22s`, comma-separated. "
-            "Defaults to all semesters, if no additional restrictions e.g. courses are defined.",
+            "sync only these comma-separated semester IDs, e.g. 25ws,26ss; "
+            "ignored when --courses is set",
             aliases=("semester",),
         ),
     )
@@ -321,10 +438,11 @@ class Config:
         key="prefix_handling",
         falsey_uses_default=True,
         choices=COURSE_PREFIX_HANDLING_OPTIONS,
+        validate=string_error,
         cli=cli_arg(
             "course-prefix-handling",
             "handle leading two-character course prefixes in local folder "
-            "names: 'keep' (default), 'remove', or 'suffix'",
+            "names: 'keep', 'remove', or 'suffix' (used by setup)",
             aliases=("courseprefix",),
         ),
     )
@@ -336,8 +454,7 @@ class Config:
         normalize=bool,
         cli=cli_flag(
             "update-files",
-            "define whether modified files with the same name/path should be "
-            "redownloaded",
+            "redownload remote files that changed without changing name or path",
             aliases=("updatefiles",),
         ),
     )
@@ -346,9 +463,10 @@ class Config:
         group="downloads",
         falsey_uses_default=True,
         choices=CONFLICT_HANDLING_OPTIONS,
+        validate=string_error,
         cli=cli_arg(
             "conflict-handling",
-            "define how to handle locally modified files when updating: "
+            "choose how to handle locally modified files when updating: "
             "'rename' (default) moves the old file aside, 'keep' skips the "
             "update, 'overwrite' replaces the local file",
             aliases=("updatefilesconflict",),
@@ -387,7 +505,7 @@ class Config:
         validate=file_size_error,
         cli=cli_arg(
             "max-file-size",
-            "skip files larger than this size, e.g. '500M' or '2G'",
+            "skip files whose size is known to exceed this limit, e.g. '500M' or '2G'",
         ),
     )
     min_file_size: int | None = option(
@@ -397,7 +515,7 @@ class Config:
         validate=file_size_error,
         cli=cli_arg(
             "min-file-size",
-            "skip files smaller than this size, e.g. '10K'",
+            "skip files whose size is known to be below this limit, e.g. '10K'",
         ),
     )
     exclude_filetypes: list[str] = option(
@@ -406,8 +524,7 @@ class Config:
         normalize=as_string_list,
         cli=cli_csv(
             "exclude-filetypes",
-            "specify whether specific file types should be excluded, "
-            'comma-separated e.g. "mp4,mkv"',
+            "exclude these comma-separated file extensions, e.g. mp4,mkv",
             aliases=("excludefiletypes",),
         ),
     )
@@ -437,7 +554,7 @@ class Config:
         normalize=normalize_pattern_config,
         cli=cli_csv(
             "exclude-sections",
-            "exclude Moodle sections by comma-separated names, ids or patterns",
+            "exclude Moodle sections by comma-separated names, IDs, or patterns",
             aliases=("excludesections",),
         ),
     )
@@ -447,7 +564,7 @@ class Config:
         normalize=normalize_pattern_config,
         cli=cli_csv(
             "exclude-modules",
-            "exclude Moodle modules by comma-separated names, ids, types, "
+            "exclude Moodle modules by comma-separated names, IDs, types, "
             "URLs or patterns",
             aliases=("excludemodules",),
         ),
@@ -461,11 +578,11 @@ class Config:
         group="links",
         normalize=bool,
         cli=cli_flag(
-            "no-follow-links",
-            "do not inspect links found in moodle pages, disabling all link "
-            "sources e.g. youtube and opencast videos",
-            flag_value=False,
+            "follow-links",
+            "inspect links found in Moodle pages for linked content such as "
+            "YouTube and Opencast videos",
             aliases=("nolinks",),
+            legacy_flag_value=False,
         ),
     )
     link_youtube: bool = option(
@@ -474,9 +591,8 @@ class Config:
         key="youtube",
         normalize=bool,
         cli=cli_flag(
-            "no-youtube",
-            "do not include YouTube links and embeds",
-            flag_value=False,
+            "youtube",
+            "include YouTube links and embeds",
         ),
     )
     link_opencast: bool = option(
@@ -485,9 +601,8 @@ class Config:
         key="opencast",
         normalize=bool,
         cli=cli_flag(
-            "no-opencast",
-            "do not include Opencast links and embeds",
-            flag_value=False,
+            "opencast",
+            "include Opencast links and embeds",
         ),
     )
     link_sciebo: bool = option(
@@ -496,9 +611,8 @@ class Config:
         key="sciebo",
         normalize=bool,
         cli=cli_flag(
-            "no-sciebo",
-            "do not include Sciebo links",
-            flag_value=False,
+            "sciebo",
+            "include Sciebo links",
         ),
     )
 
@@ -517,17 +631,21 @@ class Config:
         group="modules",
         key="quiz",
         choices=QUIZ_MODES,
-        cli=cli_arg(
-            "quiz", "save quiz review attempts as 'off', 'html', 'pdf', or 'both'"
-        ),
+        validate=string_error,
+        cli=cli_arg("quiz", "save quiz attempts as 'off', 'html', 'pdf', or 'both'"),
     )
 
     @classmethod
-    def from_dict(cls, raw: Mapping[str, Any] | None) -> "Config":
+    def from_dict(
+        cls,
+        raw: Mapping[str, Any] | None,
+        *,
+        config_path: Path | None = None,
+    ) -> "Config":
         canonical = canonicalize(raw)
-        errors = config_validation_errors(canonical)
+        errors = config_validation_errors(canonical, config_path=config_path)
         if errors:
-            raise ConfigValidationError(None, errors)
+            raise ConfigValidationError(config_path, errors)
         kwargs: dict[str, Any] = {}
         for opt in CONFIG_OPTIONS:
             if opt.canonical_key not in canonical:
@@ -538,14 +656,26 @@ class Config:
             kwargs[opt.field_name] = opt.normalize(value)
         return cls(**kwargs)
 
-    def module_enabled(self, name: str) -> bool:
-        """Whether a Moodle activity type is enabled (assignment/resource/folder)."""
-        flags = {
-            "assignment": self.module_assignment,
-            "resource": self.module_resource,
-            "folder": self.module_folder,
-        }
-        return flags.get(name, False)
+    @property
+    def auth_source(self) -> AuthSource:
+        """Return the configured RWTH sign-in method."""
+        if self.login_provider == "keyring":
+            return KeyringAuthSource(self.keyring_store_totp_secret)
+        if self.login_provider == "env-file":
+            assert self.login_env_file is not None
+            return EnvFileAuthSource(Path(self.login_env_file))
+        if self.login_provider == "command":
+            return CommandAuthSource(
+                tuple(self.secret_password_command),
+                tuple(self.secret_otp_command),
+            )
+        if self.login_provider not in {"prompt", "keyring", "env-file"}:
+            return ExternalAuthSource(
+                self.login_provider,
+                str(self.secret_password_ref),
+                self.secret_otp_ref,
+            )
+        return PromptAuthSource()
 
     def link_source_enabled(self, name: str) -> bool:
         """Whether a link-based content source is enabled (youtube/opencast/sciebo).
@@ -577,6 +707,8 @@ class ConfigOption:
 def _build_config_options() -> tuple[ConfigOption, ...]:
     options = []
     for config_field in fields(Config):
+        if "config" not in config_field.metadata:
+            continue
         meta = cast(dict[str, Any], config_field.metadata["config"])
         group = cast(str, meta["group"])
         key = meta["key"] or config_field.name
@@ -600,6 +732,7 @@ def _build_config_options() -> tuple[ConfigOption, ...]:
 CONFIG_OPTIONS = _build_config_options()
 _CANONICAL_KEYS = frozenset(opt.canonical_key for opt in CONFIG_OPTIONS)
 _GROUP_PATHS = frozenset(opt.group for opt in CONFIG_OPTIONS)
+_SCHEMA_PATHS = _CANONICAL_KEYS | _GROUP_PATHS
 # key spelling inside a group table -> canonical key.
 _GROUP_MEMBER_KEYS: dict[str, dict[str, str]] = {}
 for _opt in CONFIG_OPTIONS:
@@ -620,6 +753,33 @@ def canonicalize(raw: Mapping[str, Any] | None) -> ConfigDict:
     flat: ConfigDict = {}
     _flatten_into(flat, raw or {}, "")
     return flat
+
+
+def literal_dotted_toml_key_errors(raw: Mapping[str, Any]) -> list[str]:
+    """Reject quoted TOML keys that imitate the internal flat config form.
+
+    TOML dotted keys such as ``auth.user`` parse into nested mappings and
+    are valid. Quoted keys such as ``"auth.user"`` remain one literal key;
+    accepting those would give config mutation commands two syntax trees for
+    the same canonical setting.
+    """
+    errors: list[str] = []
+
+    def collect(mapping: Mapping[str, Any], group: str) -> None:
+        for raw_key, value in mapping.items():
+            key = str(raw_key)
+            path = f"{group}.{key}" if group else key
+            if "." in key and path in _SCHEMA_PATHS:
+                errors.append(
+                    f"literal dotted TOML key {path!r} is not supported; "
+                    "use nested tables or unquoted dotted keys"
+                )
+                continue
+            if path in _GROUP_PATHS and isinstance(value, Mapping):
+                collect(value, path)
+
+    collect(raw, "")
+    return errors
 
 
 def _resolve_config_path_value(value: Any, base_dir: Path) -> Any:
@@ -665,13 +825,11 @@ class ConfigValidationError(ValueError):
         super().__init__(f"invalid config{location}:\n{details}")
 
 
-def validate_config(raw: Mapping[str, Any]) -> None:
-    errors = config_validation_errors(raw)
-    if errors:
-        raise ConfigValidationError(None, errors)
-
-
-def config_validation_errors(raw: Mapping[str, Any]) -> list[str]:
+def config_validation_errors(
+    raw: Mapping[str, Any],
+    *,
+    config_path: Path | None = None,
+) -> list[str]:
     canonical = canonicalize(raw)
     errors = [
         unknown_config_key_error(key)
@@ -680,6 +838,126 @@ def config_validation_errors(raw: Mapping[str, Any]) -> list[str]:
     for opt in CONFIG_OPTIONS:
         if opt.canonical_key in canonical:
             errors.extend(option_value_errors(opt, canonical[opt.canonical_key]))
+    errors.extend(size_limit_errors(canonical))
+    errors.extend(auth_source_errors(canonical))
+    errors.extend(managed_path_errors(canonical, config_path))
+    return errors
+
+
+def size_limit_errors(canonical: ConfigDict) -> list[str]:
+    limits: dict[str, int] = {}
+    for key in ("filters.min_file_size", "filters.max_file_size"):
+        value = canonical.get(key)
+        if value in (None, "", 0) and not isinstance(value, bool):
+            continue
+        try:
+            limits[key] = parse_file_size(value)
+        except ValueError:
+            continue
+    min_size = limits.get("filters.min_file_size")
+    max_size = limits.get("filters.max_file_size")
+    if min_size is None or max_size is None or min_size <= max_size:
+        return []
+    return ["filters.min_file_size must not exceed filters.max_file_size"]
+
+
+def managed_path_errors(
+    canonical: ConfigDict,
+    config_path: Path | None = None,
+) -> list[str]:
+    managed_paths: list[tuple[str, Any]] = []
+    if config_path is not None:
+        managed_paths.append(("configuration file", config_path))
+    managed_paths.append(
+        (
+            "paths.cookie_file",
+            canonical.get("paths.cookie_file") or default_cookie_file(),
+        )
+    )
+    if (canonical.get("auth.login.provider") or "prompt") == "env-file":
+        managed_paths.append(
+            ("auth.login.env_file", canonical.get("auth.login.env_file"))
+        )
+    if (canonical.get("auth.tokens.store") or "keyring") == "env-file":
+        managed_paths.append(
+            ("auth.tokens.env_file", canonical.get("auth.tokens.env_file"))
+        )
+
+    errors: list[str] = []
+    seen: dict[tuple[bool, str], str] = {}
+    for label, value in managed_paths:
+        identity = pathing.path_identity(value)
+        if identity is None:
+            continue
+        previous = seen.get(identity)
+        if previous is not None:
+            errors.append(
+                f"{label} must not resolve to the same path as {previous}; "
+                "configure separate files"
+            )
+        else:
+            seen[identity] = label
+    return errors
+
+
+def _login_reference_errors(canonical: ConfigDict, provider: Any) -> list[str]:
+    errors: list[str] = []
+    password_ref = canonical.get("auth.login.password")
+    otp_ref = canonical.get("auth.login.otp")
+    password_command = canonical.get("auth.login.password_command")
+    otp_command = canonical.get("auth.login.otp_command")
+    if provider == "command":
+        if not password_command:
+            errors.append(
+                "auth.login.password_command is required when "
+                "auth.login.provider is 'command'"
+            )
+        if password_ref or otp_ref:
+            errors.append(
+                "auth.login.password and auth.login.otp are not valid for "
+                "the command provider"
+            )
+    elif provider in SECRET_PROVIDER_OPTIONS[:-1]:
+        if not password_ref:
+            errors.append(
+                "auth.login.password is required for external secret providers"
+            )
+        if password_command or otp_command:
+            errors.append(
+                "auth.login.password_command and auth.login.otp_command are "
+                "only valid for the command provider"
+            )
+    elif password_ref or otp_ref or password_command or otp_command:
+        errors.append(
+            "auth.login password/OTP references require a password-manager or command provider"
+        )
+    return errors
+
+
+def auth_source_errors(canonical: ConfigDict) -> list[str]:
+    errors: list[str] = []
+    token_store = canonical.get("auth.tokens.store") or "keyring"
+    provider = canonical.get("auth.login.provider") or "prompt"
+
+    if token_store == "env-file" and not canonical.get("auth.tokens.env_file"):
+        errors.append(
+            "auth.tokens.env_file is required when auth.tokens.store is 'env-file'"
+        )
+    if provider == "env-file" and not canonical.get("auth.login.env_file"):
+        errors.append(
+            "auth.login.env_file is required when auth.login.provider is 'env-file'"
+        )
+    store_totp = canonical.get("auth.login.keyring_store_totp_secret")
+    if store_totp and provider != "keyring":
+        errors.append(
+            "auth.login.keyring_store_totp_secret requires auth.login.provider = 'keyring'"
+        )
+    if store_totp and not canonical.get("auth.login.totp_serial"):
+        errors.append(
+            "auth.login.totp_serial is required when "
+            "auth.login.keyring_store_totp_secret is enabled"
+        )
+    errors.extend(_login_reference_errors(canonical, provider))
     return errors
 
 
@@ -701,14 +979,14 @@ def option_value_errors(opt: ConfigOption, value: Any) -> list[str]:
         if isinstance(value, bool):
             return []
         return [f"{key} must be true or false, got {value!r}"]
-    if opt.falsey_uses_default and not value:
-        return []
-    if opt.choices and value not in opt.choices:
-        return [f"{key} must be one of {format_choices(opt.choices)}, got {value!r}"]
     if opt.validate is not None:
         error = opt.validate(value)
         if error:
             return [f"{key} {error}"]
+    if opt.falsey_uses_default and not value:
+        return []
+    if opt.choices and value not in opt.choices:
+        return [f"{key} must be one of {format_choices(opt.choices)}, got {value!r}"]
     return []
 
 
@@ -719,7 +997,10 @@ def group_config_for_toml(raw: Mapping[str, Any]) -> ConfigDict:
     for opt in CONFIG_OPTIONS:
         if opt.canonical_key not in canonical:
             continue
-        grouped.setdefault(opt.group, {})[opt.key] = canonical[opt.canonical_key]
+        table = grouped
+        for group_part in opt.group.split("."):
+            table = table.setdefault(group_part, {})
+        table[opt.key] = canonical[opt.canonical_key]
     for key, value in canonical.items():
         if key not in _CANONICAL_KEYS:
             grouped[key] = value
@@ -746,11 +1027,7 @@ FOLLOW_LINKS_KEY = "links.follow_links"
 # Legacy flat JSON spelling -> canonical key.
 LEGACY_KEY_MAP = {
     "user": "auth.user",
-    "password": "auth.password",
-    "totp": "auth.totp_serial",
-    "totpsecret": "auth.totp_secret",
-    "use_secret_service": "auth.use_keyring",
-    "secret_service_store_totp_secret": "auth.keyring_store_totp_secret",
+    "totp": "auth.login.totp_serial",
     "basedir": "paths.sync_directory",
     "cookie_file": "paths.cookie_file",
     "chromium_path": "paths.browser",
@@ -820,8 +1097,18 @@ def convert_legacy_config(raw: Mapping[str, Any] | None) -> ConfigDict:
             )
         elif key == LEGACY_MODULES_KEY and isinstance(value, Mapping):
             converted.update(_convert_legacy_used_modules(value))
+        elif key in {"password", "totpsecret"}:
+            # Released JSON secrets are consumed only by ``config migrate``;
+            # they must never enter the current TOML configuration model.
+            continue
+        elif key == "use_secret_service":
+            converted["auth.login.provider"] = "keyring" if value else "prompt"
+        elif key == "secret_service_store_totp_secret":
+            converted["auth.login.keyring_store_totp_secret"] = value
         elif key in LEGACY_KEY_MAP:
-            converted[LEGACY_KEY_MAP[key]] = value
+            converted[LEGACY_KEY_MAP[key]] = (
+                "keep" if key == "update_files_conflict" and value == "none" else value
+            )
         else:
             converted[key] = value
     return converted
@@ -836,6 +1123,8 @@ def _without_none(mapping: Mapping[str, Any]) -> dict[str, Any]:
 
 
 def _convert_legacy_used_modules(tree: Mapping[str, Any]) -> ConfigDict:
+    if not tree:
+        return {}
     flat: ConfigDict = {
         canonical: False
         for canonical in (
