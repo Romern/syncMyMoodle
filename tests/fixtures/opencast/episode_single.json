@@ -5,6 +5,7 @@
         "media": {
           "track": [
             {
+              "type": "presenter/delivery",
               "mimetype": "video/mp4",
               "url": "https://video.example.test/opencast/single-low.mp4",
               "checksum": {
@@ -18,6 +19,21 @@
               }
             },
             {
+              "type": "presentation/delivery",
+              "mimetype": "video/mp4",
+              "url": "https://video.example.test/opencast/presentation-high.mp4",
+              "checksum": {
+                "type": "md5",
+                "$": "44444444444444444444444444444444"
+              },
+              "size": 2500,
+              "duration": 120000,
+              "video": {
+                "resolution": "1920x1080"
+              }
+            },
+            {
+              "type": "presenter/delivery",
               "mimetype": "video/mp4",
               "url": "https://video.example.test/opencast/single-high.mp4",
               "checksum": {
@@ -31,6 +47,21 @@
               }
             },
             {
+              "type": "presentation/delivery",
+              "mimetype": "video/mp4",
+              "url": "https://video.example.test/opencast/presentation-low.mp4",
+              "checksum": {
+                "type": "md5",
+                "$": "33333333333333333333333333333333"
+              },
+              "size": 1500,
+              "duration": 120000,
+              "video": {
+                "resolution": "1280x720"
+              }
+            },
+            {
+              "type": "presentation/delivery",
               "mimetype": "video/mp4",
               "url": "https://video.example.test/opencast/single-stream.mp4",
               "transport": "hls",

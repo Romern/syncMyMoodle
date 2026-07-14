@@ -93,7 +93,9 @@ class SyncContext:
     sciebo_link_cache: dict[str, Node | None] = field(default_factory=dict)
     service_outages: ServiceOutageTracker = field(default_factory=ServiceOutageTracker)
     opencast_episode_auth_cache: set[tuple[Any, str]] = field(default_factory=set)
-    opencast_track_cache: dict[str, OpencastTrack] = field(default_factory=dict)
+    opencast_track_cache: dict[str, tuple[OpencastTrack, ...]] = field(
+        default_factory=dict
+    )
     downloaded_paths: set[Path] = field(default_factory=set)
     filtered_items: set[FilteredItem] = field(default_factory=set)
     quiz_review_cache: dict[str, str] = field(default_factory=dict)

@@ -12,6 +12,7 @@
               }
             },
             {
+              "type": "presenter/delivery",
               "mimetype": "video/mp4",
               "url": "https://video.example.test/opencast/series-b.mp4",
               "checksum": {

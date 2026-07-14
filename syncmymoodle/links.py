@@ -266,17 +266,12 @@ def scan_for_links(  # noqa: C901 - legacy parser awaiting decomposition
                 continue
             if not opencast_api.authenticate_episode(ctx, course_id, vid_id, log):
                 continue
-            track = opencast_api.resolve_track_from_episode(ctx, vid_id, log)
-            if track is None:
-                continue
-            if filters.should_skip_url(ctx, track.url, "Opencast video URL"):
-                continue
-
-            opencast_api.add_track_node(
+            opencast_api.add_episode_nodes(
+                ctx,
                 parent_node,
-                module_title or track.url.split("/")[-1],
+                module_title,
                 vid_id,
-                track,
+                log,
             )
 
     # https://rwth-aachen.sciebo.de/s/XXX

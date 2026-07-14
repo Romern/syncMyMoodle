@@ -399,22 +399,12 @@ def handle_embedded_link_module(  # noqa: C901 - legacy handler awaiting decompo
                             ctx, course_id, vid_id, log
                         ):
                             continue
-                        track = opencast_api.resolve_track_from_episode(
-                            ctx, vid_id, log
-                        )
-                        if track is None:
-                            continue
-
-                        if filters.should_skip_url(
-                            ctx, track.url, "Opencast video URL"
-                        ):
-                            continue
-
-                        opencast_api.add_track_node(
+                        opencast_api.add_episode_nodes(
+                            ctx,
                             section_node,
                             module["name"],
                             vid_id,
-                            track,
+                            log,
                         )
 
                 if scan_page_links:
@@ -531,16 +521,12 @@ def handle_opencast_lti_module(  # noqa: C901 - legacy handler awaiting decompos
         series_node = cast(Node, course_node.add_child(name, series_id, "Section"))
 
         for episode_id, episode_title in episodes:
-            track = opencast_api.resolve_track_from_episode(ctx, episode_id, log)
-            if track is None:
-                continue
-            if filters.should_skip_url(ctx, track.url, "Opencast video URL"):
-                continue
-            opencast_api.add_track_node(
+            opencast_api.add_episode_nodes(
+                ctx,
                 series_node,
                 episode_title,
                 episode_id,
-                track,
+                log,
             )
     else:
         if not engage_single_id:
@@ -557,16 +543,12 @@ def handle_opencast_lti_module(  # noqa: C901 - legacy handler awaiting decompos
                 endpoint=endpoint,
             ):
                 return
-            track = opencast_api.resolve_track_from_episode(ctx, engage_single_id, log)
-            if track is None:
-                return
-            if filters.should_skip_url(ctx, track.url, "Opencast video URL"):
-                return
-            opencast_api.add_track_node(
+            opencast_api.add_episode_nodes(
+                ctx,
                 section_node,
                 name,
                 engage_single_id,
-                track,
+                log,
             )
 
 

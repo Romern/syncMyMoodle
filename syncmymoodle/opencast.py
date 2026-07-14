@@ -1,11 +1,13 @@
+import hashlib
 import logging
 import re
 import urllib.parse
 from dataclasses import dataclass
-from typing import Any, cast
+from typing import Any, Iterator, cast
 
 import requests
 
+from syncmymoodle import filters
 from syncmymoodle.constants import (
     CHECKSUM_LENGTHS_BY_ALGO,
     HTTP_TIMEOUT_SECONDS,
@@ -38,6 +40,7 @@ class OpencastTrack:
     checksum: str | None = None
     size: int | None = None
     duration: int | None = None
+    flavor_type: str | None = None
 
     @property
     def remote_marker(self) -> str | None:
@@ -52,22 +55,45 @@ class OpencastTrack:
         return RemoteMarkerKind.CONTENT_HASH if self.checksum else None
 
 
-def add_track_node(
-    parent_node: Node,
-    name: str,
-    episode_id: Any,
+def _track_node_name(
+    name: Any,
     track: OpencastTrack,
-) -> Node | None:
-    """Add a downloadable Opencast track with its remote metadata."""
-    return parent_node.add_child(
-        name,
-        episode_id,
-        "Opencast",
-        url=track.url,
-        etag=track.remote_marker,
-        etag_kind=track.remote_marker_kind,
-        remote_size=track.size,
+) -> str:
+    flavor_label = track.flavor_type or (
+        f"video-{hashlib.sha256(track.url.encode()).hexdigest()[:8]}"
     )
+    base_name = (
+        str(name) if name else urllib.parse.urlparse(track.url).path.rsplit("/", 1)[-1]
+    )
+    base_name = base_name or flavor_label
+    extension = base_name[-4:] if base_name.casefold().endswith(".mp4") else ""
+    stem = base_name[: -len(extension)] if extension else base_name
+    return f"{stem} ({flavor_label}){extension}"
+
+
+def add_episode_nodes(
+    ctx: SyncContext,
+    parent_node: Node,
+    name: Any,
+    episode_id: str,
+    log: logging.Logger = logger,
+) -> None:
+    tracks = resolve_tracks_from_episode(ctx, episode_id, log)
+    if tracks is None:
+        return
+
+    for track in tracks:
+        if filters.should_skip_url(ctx, track.url, "Opencast video URL"):
+            continue
+        parent_node.add_child(
+            _track_node_name(name, track),
+            episode_id,
+            "Opencast",
+            url=track.url,
+            etag=track.remote_marker,
+            etag_kind=track.remote_marker_kind,
+            remote_size=track.size,
+        )
 
 
 def log_backend_issue(
@@ -390,28 +416,23 @@ def opencast_track_from_api(track: dict[str, Any]) -> OpencastTrack | None:
         return None
 
     checksum_type, checksum = extract_checksum(track)
+    raw_flavor = track.get("type")
+    flavor_type = (
+        raw_flavor.partition("/")[0].strip().casefold()
+        if isinstance(raw_flavor, str)
+        else ""
+    )
     return OpencastTrack(
         url=url,
         checksum_type=checksum_type,
         checksum=checksum,
         size=optional_int(track.get("size")),
         duration=optional_int(track.get("duration")),
+        flavor_type=flavor_type or None,
     )
 
 
-def resolve_track_from_episode(  # noqa: C901 - legacy resolver awaiting decomposition
-    ctx: SyncContext,
-    episode_id: str,
-    log: logging.Logger = logger,
-) -> OpencastTrack | None:
-    if episode_id in ctx.opencast_track_cache:
-        return ctx.opencast_track_cache[episode_id]
-
-    episode_url = f"{OPENCAST_SEARCH_URL}?id={episode_id}"
-    tracks: list[tuple[int, OpencastTrack]] = []
-    entries = fetch_result_list(ctx, episode_url, f"episode {episode_id}", log)
-    if entries is None:
-        return None
+def _episode_track_data(entries: list[Any]) -> Iterator[dict[str, Any]]:
     for entry in entries:
         if not isinstance(entry, dict):
             continue
@@ -419,23 +440,55 @@ def resolve_track_from_episode(  # noqa: C901 - legacy resolver awaiting decompo
         media = mediapackage.get("media") if isinstance(mediapackage, dict) else None
         track_data = media.get("track") if isinstance(media, dict) else None
         if isinstance(track_data, dict):
-            track_data = [track_data]
-        if not isinstance(track_data, list):
-            continue
-        for track in track_data:
-            if not isinstance(track, dict):
-                continue
-            opencast_track = opencast_track_from_api(track)
-            if opencast_track is None:
-                continue
-            video = cast(dict[str, Any], track["video"])
-            tracks.append((resolution_width(video.get("resolution")), opencast_track))
+            yield track_data
+        elif isinstance(track_data, list):
+            yield from (track for track in track_data if isinstance(track, dict))
 
-    if not tracks:
+
+def resolve_tracks_from_episode(
+    ctx: SyncContext,
+    episode_id: str,
+    log: logging.Logger = logger,
+) -> tuple[OpencastTrack, ...] | None:
+    if episode_id in ctx.opencast_track_cache:
+        return ctx.opencast_track_cache[episode_id]
+
+    episode_url = f"{OPENCAST_SEARCH_URL}?id={episode_id}"
+    selected: dict[
+        tuple[str, str], tuple[tuple[int, int, int, str], OpencastTrack]
+    ] = {}
+    entries = fetch_result_list(ctx, episode_url, f"episode {episode_id}", log)
+    if entries is None:
+        return None
+    for track_data in _episode_track_data(entries):
+        track = opencast_track_from_api(track_data)
+        if track is None:
+            continue
+        video = cast(dict[str, Any], track_data["video"])
+        quality = (
+            resolution_width(video.get("resolution")),
+            optional_int(video.get("bitrate")) or 0,
+            track.size or 0,
+            track.url,
+        )
+        # Multiple encodings of a known logical flavor are renditions of the
+        # same track. Without flavor metadata, retain every distinct URL rather
+        # than silently treating unrelated videos as one generic track.
+        track_key = (
+            ("flavor", track.flavor_type)
+            if track.flavor_type is not None
+            else ("url", track.url)
+        )
+        current = selected.get(track_key)
+        if current is None or quality > current[0]:
+            selected[track_key] = (quality, track)
+
+    if not selected:
         log.warning("Opencast: no downloadable mp4 track found for %s", episode_id)
         return None
 
-    # Prefer the highest resolution plain HTTPS mp4 track.
-    selected_track = max(tracks, key=lambda track: track[0])[1]
-    ctx.opencast_track_cache[episode_id] = selected_track
-    return selected_track
+    # Select the best plain MP4 rendition per known logical flavor and keep
+    # untyped tracks distinct. Sorting makes node order independent of the API.
+    tracks = tuple(selected[track_key][1] for track_key in sorted(selected))
+    ctx.opencast_track_cache[episode_id] = tracks
+    return tracks

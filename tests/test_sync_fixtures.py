@@ -153,11 +153,14 @@ def test_assignment_intro_opencast_embed_is_added_to_assignment_node(monkeypatch
     )
     monkeypatch.setattr(
         opencast,
-        "resolve_track_from_episode",
-        lambda ctx, episode_id, *a, **k: opencast.OpencastTrack(
-            f"https://video.example.test/{episode_id}/presentation.mp4",
-            checksum_type="md5",
-            checksum="11111111111111111111111111111111",
+        "resolve_tracks_from_episode",
+        lambda ctx, episode_id, *a, **k: (
+            opencast.OpencastTrack(
+                f"https://video.example.test/{episode_id}/presentation.mp4",
+                checksum_type="md5",
+                checksum="11111111111111111111111111111111",
+                flavor_type="presentation",
+            ),
         ),
     )
 
@@ -317,6 +320,78 @@ def test_opencast_malformed_results_open_shared_service_circuit(caplog):
         "this sync. Check the RWTH ITC status page: "
         f"{opencast.RWTH_MOODLE_STATUS_URL}"
     )
+
+
+def test_opencast_track_name_does_not_depend_on_sibling_count(monkeypatch):
+    syncer = make_context()
+    presenter = opencast.OpencastTrack(
+        "https://video.example.test/presenter.mp4",
+        flavor_type="presenter",
+    )
+    presentation = opencast.OpencastTrack(
+        "https://video.example.test/presentation.mp4",
+        flavor_type="presentation",
+    )
+    resolved_tracks = (presenter,)
+    monkeypatch.setattr(
+        opencast,
+        "resolve_tracks_from_episode",
+        lambda *args, **kwargs: resolved_tracks,
+    )
+
+    single_parent = Node("Single", 1, "Section", None)
+    opencast.add_episode_nodes(syncer, single_parent, "Lecture.mp4", "episode")
+    resolved_tracks = (presentation, presenter)
+    multi_parent = Node("Multiple", 2, "Section", None)
+    opencast.add_episode_nodes(syncer, multi_parent, "Lecture.mp4", "episode")
+
+    single_name = single_parent.children[0].name
+    multi_name = next(
+        child.name for child in multi_parent.children if child.url == presenter.url
+    )
+    assert single_name == multi_name == "Lecture (presenter).mp4"
+
+
+def test_opencast_keeps_distinct_tracks_without_flavor_metadata(monkeypatch):
+    episode_id = "untyped-episode"
+    urls = [
+        "https://video.example.test/camera-a.mp4",
+        "https://video.example.test/camera-b.mp4",
+    ]
+    syncer = make_context()
+    monkeypatch.setattr(
+        opencast,
+        "fetch_result_list",
+        lambda *args, **kwargs: [
+            {
+                "mediapackage": {
+                    "media": {
+                        "track": [
+                            {
+                                "mimetype": "video/mp4",
+                                "url": url,
+                                "video": {"resolution": resolution},
+                            }
+                            for url, resolution in zip(
+                                urls, ["1280x720", "1920x1080"], strict=True
+                            )
+                        ]
+                    }
+                }
+            }
+        ],
+    )
+
+    tracks = opencast.resolve_tracks_from_episode(syncer, episode_id)
+
+    assert tracks is not None
+    assert [track.url for track in tracks] == urls
+    assert all(track.flavor_type is None for track in tracks)
+
+    parent = Node("Section", 1, "Section", None)
+    opencast.add_episode_nodes(syncer, parent, "Lecture.mp4", episode_id)
+    assert len({child.name for child in parent.children}) == 2
+    assert all(child.name.startswith("Lecture (video-") for child in parent.children)
 
 
 def test_sharing_token_from_link_extracts_url_segment():
@@ -831,12 +906,15 @@ def test_mixed_course_sync_tree_covers_common_module_surfaces(monkeypatch):
     )
     monkeypatch.setattr(
         opencast,
-        "resolve_track_from_episode",
-        lambda ctx, episode_id, *a, **k: opencast.OpencastTrack(
-            f"https://video.example.test/{episode_id}/presentation.mp4",
-            checksum_type="md5",
-            checksum="33333333333333333333333333333333",
-            size=5678,
+        "resolve_tracks_from_episode",
+        lambda ctx, episode_id, *a, **k: (
+            opencast.OpencastTrack(
+                f"https://video.example.test/{episode_id}/presentation.mp4",
+                checksum_type="md5",
+                checksum="33333333333333333333333333333333",
+                size=5678,
+                flavor_type="presentation",
+            ),
         ),
     )
 
@@ -852,7 +930,8 @@ def test_mixed_course_sync_tree_covers_common_module_surfaces(monkeypatch):
         syncer.root_node, ["26ss", "Comprehensive Sync", "Materials", "direct.pdf"]
     )
     opencast_node = node_at_path(
-        syncer.root_node, ["26ss", "Comprehensive Sync", "Materials", "Page module"]
+        syncer.root_node,
+        ["26ss", "Comprehensive Sync", "Materials", "Page module (presentation)"],
     )
     assert direct_node.remote_size == 1234
     assert opencast_node.remote_size == 5678
