@@ -144,13 +144,10 @@ def request_node_url(
         ctx.require_session(),
         "GET",
         node.url,
-        lambda url: (
-            not filters.should_skip_url(
-                ctx.config,
-                url,
-                f"redirected {node.type} file",
-                log,
-            )
+        lambda url: filters.require_url_allowed(
+            ctx,
+            url,
+            f"redirected {node.type} file",
         ),
         **kwargs,
     )
@@ -176,7 +173,9 @@ def _report_download_request_failure(
             reason,
             log,
         )
-    if failure_kind is HttpFailureKind.RESOURCE:
+    if failure_kind is HttpFailureKind.RESOURCE and not isinstance(
+        error, filters.FilteredRequestError
+    ):
         log.warning("Skipping download request: %s", reason)
 
 
@@ -394,13 +393,34 @@ def decide_download(
 
 
 def should_skip_before_decision(
-    ctx: SyncContext, node: Node, downloadpath: Path, log: logging.Logger = logger
+    ctx: SyncContext, node: Node, downloadpath: Path
 ) -> bool:
-    if filters.should_skip_url(ctx.config, node.url, f"{node.type} file", log):
+    if filters.should_skip_url(ctx, node.url, f"{node.type} file"):
         return True
-    if node.name.split(".")[-1] in ctx.config.exclude_filetypes:
+    extension = node.name.split(".")[-1]
+    if extension in ctx.config.exclude_filetypes:
+        ctx.record_filtered(
+            "filters.exclude_filetypes",
+            "file",
+            str(downloadpath),
+            f"extension {extension!r} is excluded",
+        )
         return True
-    if any(fnmatchcase(node.name, pattern) for pattern in ctx.config.exclude_files):
+    pattern = next(
+        (
+            pattern
+            for pattern in ctx.config.exclude_files
+            if fnmatchcase(node.name, pattern)
+        ),
+        None,
+    )
+    if pattern is not None:
+        ctx.record_filtered(
+            "filters.exclude_files",
+            "file",
+            str(downloadpath),
+            f"matches {pattern!r}",
+        )
         return True
     return downloadpath in ctx.downloaded_paths
 
@@ -445,35 +465,55 @@ def human_readable_size(size: int) -> str:
     raise AssertionError("unreachable")
 
 
-def size_limit_violation(ctx: SyncContext, size: int) -> str | None:
+def size_limit_violation(ctx: SyncContext, size: int) -> tuple[str, str] | None:
     """Which of filters.max_file_size/min_file_size ``size`` violates, if any."""
     max_size = ctx.config.max_file_size
     if max_size and size > max_size:
-        return f"exceeds max_file_size ({human_readable_size(max_size)})"
+        return (
+            "filters.max_file_size",
+            f"exceeds the configured limit ({human_readable_size(max_size)})",
+        )
     min_size = ctx.config.min_file_size
     if min_size and size < min_size:
-        return f"is below min_file_size ({human_readable_size(min_size)})"
+        return (
+            "filters.min_file_size",
+            f"is below the configured limit ({human_readable_size(min_size)})",
+        )
     return None
+
+
+def record_size_limit_filter(
+    ctx: SyncContext,
+    item: str,
+    size: int,
+    size_kind: str,
+) -> bool:
+    violation = size_limit_violation(ctx, size)
+    if violation is None:
+        return False
+    config_key, reason = violation
+    ctx.record_filtered(
+        config_key,
+        "file",
+        item,
+        f"{size_kind} ({human_readable_size(size)}) {reason}",
+    )
+    return True
 
 
 def known_remote_size_violates_limit(
     ctx: SyncContext,
     node: Node,
     downloadpath: Path,
-    log: logging.Logger = logger,
 ) -> bool:
     if not size_limits_configured(ctx) or node.remote_size is None:
         return False
-    violation = size_limit_violation(ctx, node.remote_size)
-    if violation is None:
-        return False
-    log.warning(
-        "Skipping download of %s because its known size (%s) %s",
-        downloadpath,
-        human_readable_size(node.remote_size),
-        violation,
+    return record_size_limit_filter(
+        ctx,
+        str(downloadpath),
+        node.remote_size,
+        "known size",
     )
-    return True
 
 
 def download_violates_size_limits(
@@ -482,7 +522,6 @@ def download_violates_size_limits(
     response: Any,
     resume_size: int,
     downloadpath: Path,
-    log: logging.Logger = logger,
 ) -> bool:
     """Whether the response reports a size outside the configured size limits.
 
@@ -494,16 +533,7 @@ def download_violates_size_limits(
     node.remote_size = total_size
     if not size_limits_configured(ctx):
         return False
-    violation = size_limit_violation(ctx, total_size)
-    if violation is None:
-        return False
-    log.warning(
-        "Skipping download of %s because its size (%s) %s",
-        downloadpath,
-        human_readable_size(total_size),
-        violation,
-    )
-    return True
+    return record_size_limit_filter(ctx, str(downloadpath), total_size, "size")
 
 
 def planned_download_action(
@@ -513,9 +543,9 @@ def planned_download_action(
     log: logging.Logger = logger,
 ) -> ConflictAction | None:
     """Return the transfer action, or None when policy handles the node."""
-    if should_skip_before_decision(ctx, node, downloadpath, log):
+    if should_skip_before_decision(ctx, node, downloadpath):
         return None
-    if known_remote_size_violates_limit(ctx, node, downloadpath, log):
+    if known_remote_size_violates_limit(ctx, node, downloadpath):
         return None
 
     decision = decide_download(ctx, node, downloadpath, log)
@@ -710,9 +740,7 @@ def process_download_response(
     resume_size = transfer.resume_size if transfer is not None else 0
     if not download_response_is_usable(node, response, downloadpath, log):
         return True if ctx.config.dry_run else False
-    if download_violates_size_limits(
-        ctx, node, response, resume_size, downloadpath, log
-    ):
+    if download_violates_size_limits(ctx, node, response, resume_size, downloadpath):
         return True
 
     if ctx.config.dry_run:
@@ -897,7 +925,7 @@ def scan_and_download_youtube(
         return False
     path = pathing.get_sanitized_node_path(node.parent, Path(ctx.config.sync_directory))
     link = node.url
-    if filters.should_skip_url(ctx.config, link, "YouTube link", log):
+    if filters.should_skip_url(ctx, link, "YouTube link"):
         return True
     video_id = links.youtube_video_id_from_node(node)
     if path.exists():
@@ -926,7 +954,7 @@ def scan_and_download_youtube(
         "match_filter": yt_dlp.match_filter_func("!is_live"),
     }
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-        if youtube_violates_size_limits(ctx, ydl, node, link, log):
+        if youtube_violates_size_limits(ctx, ydl, node, link):
             return True
         if ctx.config.dry_run:
             print(f"Would download YouTube video {link} to {path} [Youtube]")
@@ -946,7 +974,7 @@ def cached_youtube_size_violates_limit(
     if old_node is None or not old_node.is_handled or old_node.remote_size is None:
         return False
     node.remote_size = old_node.remote_size
-    return known_remote_size_violates_limit(ctx, node, path, log)
+    return known_remote_size_violates_limit(ctx, node, path)
 
 
 def youtube_violates_size_limits(
@@ -954,7 +982,6 @@ def youtube_violates_size_limits(
     ydl: Any,
     node: Node,
     link: str,
-    log: logging.Logger = logger,
 ) -> bool:
     """Whether yt-dlp's pre-download size estimate falls outside the size limits.
 
@@ -970,16 +997,12 @@ def youtube_violates_size_limits(
     if total_size is None:
         return False
     node.remote_size = total_size
-    violation = size_limit_violation(ctx, total_size)
-    if violation is None:
-        return False
-    log.warning(
-        "Skipping YouTube video %s because its estimated size (%s) %s",
-        link,
-        human_readable_size(total_size),
-        violation,
+    return record_size_limit_filter(
+        ctx,
+        f"YouTube video {redact_url_secrets(link)}",
+        total_size,
+        "estimated size",
     )
-    return True
 
 
 def youtube_estimated_size(info: Any) -> int | None:

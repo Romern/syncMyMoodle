@@ -15,6 +15,7 @@ from argparse import (
 from collections.abc import Callable, Mapping, MutableMapping, Sequence
 from dataclasses import dataclass, field
 from importlib import metadata, resources
+from itertools import groupby
 from pathlib import Path
 from typing import Any
 
@@ -185,6 +186,11 @@ def build_parser() -> ArgumentParser:
         const=logging.INFO,
         default=logging.WARNING,
         help="show information useful for debugging",
+    )
+    parser.add_argument(
+        "--show-filtered",
+        action="store_true",
+        help="list files, courses, and other items excluded by configured filters",
     )
 
     subparsers = parser.add_subparsers(dest="command")
@@ -1787,6 +1793,8 @@ def validate_command_option_scope(args: Namespace, parser: ArgumentParser) -> No
         for option in CONFIG_OPTIONS
         if option.cli is not None and getattr(args, option.cli.dest, None) is not None
     ]
+    if args.show_filtered:
+        sync_options.append("--show-filtered")
     if sync_options:
         parser.error(
             f"sync options cannot be used with `{args.command}`: "
@@ -1868,7 +1876,7 @@ def main(argv: Sequence[str] | None = None) -> None:
         if legacy_path is not None:
             parser.error(legacy_json_migration_message(legacy_path))
         parser.error("no global config found; run `syncmymoodle setup` first")
-    run(context_from_args(args, parser))
+    run(context_from_args(args, parser), show_filtered=args.show_filtered)
 
 
 def load_stored_moodle_tokens(
@@ -1949,7 +1957,25 @@ def resolve_moodle_tokens_for_run(
     return tokens, validation
 
 
-def run(ctx: SyncContext) -> None:
+def report_filtered_items(ctx: SyncContext, show_details: bool) -> None:
+    items = sorted(ctx.filtered_items)
+    if not items:
+        return
+    count = len(items)
+    if not show_details:
+        noun = "item" if count == 1 else "items"
+        print(f"Filtered {count} {noun}; use --show-filtered for details.")
+        return
+
+    print(f"Filtered items ({count}):")
+    for config_key, group in groupby(items, key=lambda item: item.config_key):
+        grouped_items = list(group)
+        print(f"  {config_key} ({len(grouped_items)}):")
+        for item in grouped_items:
+            print(f"    {item.category}: {item.item} - {item.reason}")
+
+
+def run(ctx: SyncContext, *, show_filtered: bool = False) -> None:
     """Execute a full sync run against an already-configured context."""
     tokens, validation = resolve_moodle_tokens_for_run(ctx)
 
@@ -1976,6 +2002,7 @@ def run(ctx: SyncContext) -> None:
     if not ctx.config.dry_run:
         print("Saving root node as cache...")
         course_cache.cache_root_node(ctx, logger)
+    report_filtered_items(ctx, show_filtered)
 
 
 if __name__ == "__main__":

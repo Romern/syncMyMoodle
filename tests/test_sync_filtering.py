@@ -1,4 +1,6 @@
-from syncmymoodle import sync
+import logging
+
+from syncmymoodle import filters, sync
 
 from .helpers import FakeSession, make_context, node_rows
 
@@ -7,6 +9,13 @@ FILTER_COURSES = [
     {"id": 202, "shortname": "Selected Old Semester", "idnumber": "25ws-selected"},
     {"id": 203, "shortname": "Skipped Current Semester", "idnumber": "26ss-skipped"},
 ]
+
+
+def filtered_rows(syncer):
+    return [
+        (item.config_key, item.category, item.item, item.reason)
+        for item in sorted(syncer.filtered_items)
+    ]
 
 
 def install_filter_fixtures(monkeypatch, synced_course_ids, courses):
@@ -40,6 +49,39 @@ def test_selected_courses_override_semester_filter(monkeypatch):
         "Semester | 25ws |  |  |",
         "Course | 25ws/Selected Old Semester |  |  |",
     ]
+    assert filtered_rows(syncer) == [
+        (
+            "courses.selected",
+            "course",
+            "Current Semester (201)",
+            "not in the configured selection",
+        ),
+        (
+            "courses.selected",
+            "course",
+            "Skipped Current Semester (203)",
+            "not in the configured selection",
+        ),
+    ]
+
+
+def test_sync_does_not_log_raw_moodle_payloads(monkeypatch, caplog):
+    courses = [
+        {
+            "id": 201,
+            "shortname": "Course",
+            "idnumber": "26ss-current",
+            "diagnostic": "private-course-payload",
+        }
+    ]
+    syncer = make_context()
+    install_filter_fixtures(monkeypatch, [], courses)
+    syncer.session = FakeSession()
+    caplog.set_level(logging.INFO, logger="syncmymoodle.sync")
+
+    sync.sync(syncer)
+
+    assert "private-course-payload" not in caplog.text
 
 
 def test_skip_courses_and_semester_filter_limit_synced_courses(monkeypatch):
@@ -60,6 +102,65 @@ def test_skip_courses_and_semester_filter_limit_synced_courses(monkeypatch):
         "Semester | 26ss |  |  |",
         "Course | 26ss/Current Semester |  |  |",
     ]
+    assert filtered_rows(syncer) == [
+        (
+            "courses.semesters",
+            "course",
+            "Selected Old Semester (202)",
+            "semester '25ws' is not selected",
+        ),
+        (
+            "courses.skip",
+            "course",
+            "Skipped Current Semester (203)",
+            "matches 'https://moodle.rwth-aachen.de/course/view.php?id=203'",
+        ),
+    ]
+
+
+def test_section_and_module_filters_record_the_matching_patterns():
+    syncer = make_context(
+        {
+            "filters.exclude_sections": {"12": ["Hidden*"]},
+            "filters.exclude_modules": {"12": ["Skip Module"]},
+        }
+    )
+
+    assert filters.should_skip_section(syncer, {"id": 3, "name": "Hidden Week"}, 12)
+    assert filters.should_skip_module(
+        syncer,
+        {"id": 4, "name": "Skip Module", "modname": "resource"},
+        12,
+    )
+
+    assert filtered_rows(syncer) == [
+        (
+            "filters.exclude_modules",
+            "module",
+            "Skip Module (4) in course 12",
+            "matches 'Skip Module'",
+        ),
+        (
+            "filters.exclude_sections",
+            "section",
+            "Hidden Week (3) in course 12",
+            "matches 'Hidden*'",
+        ),
+    ]
+
+
+def test_filtered_urls_are_deduplicated_and_secrets_are_redacted():
+    syncer = make_context({"filters.exclude_links": ["*private.pdf*"]})
+    url = "https://files.example.test/private.pdf?token=super-secret"
+
+    assert filters.should_skip_url(syncer, url, "resource link")
+    assert filters.should_skip_url(syncer, url, "resource link")
+
+    assert len(syncer.filtered_items) == 1
+    (item,) = syncer.filtered_items
+    assert item.config_key == "filters.exclude_links"
+    assert "token=[REDACTED]" in item.item
+    assert "super-secret" not in item.item
 
 
 # Course ids that are substrings of one another, to pin down exact-id matching.

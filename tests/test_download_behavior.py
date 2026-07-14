@@ -295,6 +295,36 @@ def test_download_is_skipped_for_excluded_filetypes(tmp_path):
     assert download_file(syncer, file_node) is True
     assert not download_path.exists()
     assert syncer.session.calls == []
+    assert {
+        (item.config_key, item.item, item.reason) for item in syncer.filtered_items
+    } == {
+        (
+            "filters.exclude_filetypes",
+            str(download_path),
+            "extension 'pdf' is excluded",
+        )
+    }
+
+
+def test_download_is_skipped_for_excluded_filename_pattern(tmp_path):
+    config = {
+        "paths.sync_directory": str(tmp_path),
+        "filters.exclude_files": ["slide*.pdf"],
+    }
+    syncer, file_node = make_run_syncer(config, timemodified=1710000500)
+    download_path = node_path(syncer, file_node)
+
+    assert download_file(syncer, file_node) is True
+    assert not download_path.exists()
+    assert {
+        (item.config_key, item.item, item.reason) for item in syncer.filtered_items
+    } == {
+        (
+            "filters.exclude_files",
+            str(download_path),
+            "matches 'slide*.pdf'",
+        )
+    }
 
 
 def test_download_is_skipped_when_max_file_size_is_exceeded(tmp_path, caplog):
@@ -314,9 +344,16 @@ def test_download_is_skipped_when_max_file_size_is_exceeded(tmp_path, caplog):
     assert download_file(syncer, file_node) is True
     assert not download_path.exists()
     assert file_node.remote_size == 2048
-    assert "known size" not in caplog.text
-    assert "size (2 KiB) exceeds max_file_size (1 KiB)" in caplog.text
-    assert "2048 bytes" not in caplog.text
+    assert caplog.messages == []
+    assert {
+        (item.config_key, item.item, item.reason) for item in syncer.filtered_items
+    } == {
+        (
+            "filters.max_file_size",
+            str(download_path),
+            "size (2 KiB) exceeds the configured limit (1 KiB)",
+        )
+    }
 
 
 def test_download_uses_known_remote_size_before_get(tmp_path):
@@ -348,6 +385,12 @@ def test_download_is_skipped_when_below_min_file_size(tmp_path):
     assert download_file(syncer, file_node) is True
     assert not download_path.exists()
     assert file_node.remote_size == 10
+    assert {(item.config_key, item.reason) for item in syncer.filtered_items} == {
+        (
+            "filters.min_file_size",
+            "size (10 B) is below the configured limit (1 KiB)",
+        )
+    }
 
 
 def test_max_file_size_skips_large_youtube_videos(tmp_path, monkeypatch):
@@ -443,6 +486,9 @@ def test_dry_run_honors_youtube_size_limits(tmp_path, monkeypatch, capsys):
     assert "Would download" not in capsys.readouterr().out
     assert not node_path(syncer, section).exists()
     assert video_node.remote_size == 5 * 1024**2
+    assert {item.config_key for item in syncer.filtered_items} == {
+        "filters.max_file_size"
+    }
 
 
 def test_youtube_estimated_size_sums_requested_formats():
@@ -523,7 +569,7 @@ def test_repeated_download_503_opens_origin_circuit(caplog, tmp_path):
     ]
 
 
-def test_download_rejects_redirect_outside_allowed_domains(tmp_path):
+def test_download_rejects_redirect_outside_allowed_domains(tmp_path, caplog):
     syncer, file_node = make_run_syncer(
         {
             "paths.sync_directory": str(tmp_path),
@@ -537,10 +583,21 @@ def test_download_rejects_redirect_outside_allowed_domains(tmp_path):
         URL,
         FakeResponse(status_code=302, headers={"Location": external_url}),
     )
+    caplog.set_level(logging.WARNING, logger="syncmymoodle.downloader")
 
     assert download_file(syncer, file_node) is False
     assert syncer.session.calls == [("GET", URL)]
     assert not node_path(syncer, file_node).exists()
+    assert caplog.messages == []
+    assert {
+        (item.config_key, item.item, item.reason) for item in syncer.filtered_items
+    } == {
+        (
+            "filters.allowed_domains",
+            f"redirected Linked file [application/pdf] file: {external_url}",
+            "host 'files.example.test' is not allowed",
+        )
+    }
 
 
 def test_cross_origin_redirect_strips_download_credentials(tmp_path):

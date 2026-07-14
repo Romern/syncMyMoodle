@@ -79,7 +79,7 @@ def scan_html_text_for_links(
             if videojs and videojs.get("src"):
                 video_src = cast(str, videojs["src"])
                 link = urllib.parse.urljoin(str(base_url or ""), video_src)
-                if not filters.should_skip_url(ctx.config, link, "embedded video", log):
+                if not filters.should_skip_url(ctx, link, "embedded video"):
                     parent_node.add_child(
                         video_src.split("/")[-1],
                         None,
@@ -120,15 +120,14 @@ def scan_for_links(  # noqa: C901 - legacy parser awaiting decomposition
     if single and not is_sciebo_share and not origin_is_unavailable:
         try:
             text = text.replace("webservice/pluginfile.php", "pluginfile.php")
-            if filters.should_skip_url(ctx.config, text, "link", log):
+            if filters.should_skip_url(ctx, text, "link"):
                 return
 
             def url_allowed(url: str) -> bool:
-                return not filters.should_skip_url(
-                    ctx.config,
+                return filters.require_url_allowed(
+                    ctx,
                     url,
                     "redirected link",
-                    log,
                 )
 
             response = request_following_safe_redirects(
@@ -227,7 +226,9 @@ def scan_for_links(  # noqa: C901 - legacy parser awaiting decomposition
                     reason,
                     log,
                 )
-            if failure_kind is not HttpFailureKind.TRANSIENT:
+            if failure_kind is not HttpFailureKind.TRANSIENT and not isinstance(
+                error, filters.FilteredRequestError
+            ):
                 log.warning("Skipping link request: %s", reason)
     if not ctx.config.follow_links:
         return
@@ -240,7 +241,7 @@ def scan_for_links(  # noqa: C901 - legacy parser awaiting decomposition
             for match in YOUTUBE_LINK_RE.finditer(text)
         ]
         for link in youtube_links:
-            if filters.should_skip_url(ctx.config, link, "YouTube link", log):
+            if filters.should_skip_url(ctx, link, "YouTube link"):
                 continue
             video_id = youtube_video_id(link)
             if video_id is None:
@@ -257,7 +258,7 @@ def scan_for_links(  # noqa: C901 - legacy parser awaiting decomposition
     if ctx.config.link_source_enabled("opencast"):
         opencast_links = OPENCAST_LINK_RE.findall(text)
         for vid in opencast_links:
-            if filters.should_skip_url(ctx.config, vid, "Opencast link", log):
+            if filters.should_skip_url(ctx, vid, "Opencast link"):
                 continue
             vid_id = opencast_api.extract_episode_id(vid)
             if not vid_id:
@@ -268,9 +269,7 @@ def scan_for_links(  # noqa: C901 - legacy parser awaiting decomposition
             track = opencast_api.resolve_track_from_episode(ctx, vid_id, log)
             if track is None:
                 continue
-            if filters.should_skip_url(
-                ctx.config, track.url, "Opencast video URL", log
-            ):
+            if filters.should_skip_url(ctx, track.url, "Opencast video URL"):
                 continue
 
             opencast_api.add_track_node(

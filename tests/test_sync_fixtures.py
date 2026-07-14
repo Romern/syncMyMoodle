@@ -565,7 +565,7 @@ def test_youtube_links_use_canonical_video_identity():
     assert links.youtube_video_id(child.url) == "abcdefghijk"
 
 
-def test_direct_link_redirect_cannot_bypass_allowed_domains():
+def test_direct_link_redirect_cannot_bypass_allowed_domains(caplog):
     original_url = "https://files.allowed.test/document"
     external_url = "https://files.example.test/private.pdf"
     syncer = make_context(
@@ -585,11 +585,16 @@ def test_direct_link_redirect_cannot_bypass_allowed_domains():
     )
     syncer.session = session
     parent = Node("Section", 1, "Section", None)
+    caplog.set_level(logging.WARNING, logger="syncmymoodle.links")
 
     links.scan_for_links(syncer, original_url, parent, 101, single=True)
 
     assert session.calls == [("HEAD", original_url)]
     assert parent.children == []
+    assert caplog.messages == []
+    assert {item.config_key for item in syncer.filtered_items} == {
+        "filters.allowed_domains"
+    }
 
 
 def test_generic_link_resource_errors_are_quiet_and_not_scanned(caplog):

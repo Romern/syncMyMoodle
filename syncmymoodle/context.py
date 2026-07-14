@@ -64,6 +64,16 @@ class AuthState:
         )
 
 
+@dataclass(frozen=True, order=True)
+class FilteredItem:
+    """One item deliberately excluded by the configured sync policy."""
+
+    config_key: str
+    category: str
+    item: str
+    reason: str
+
+
 @dataclass
 class SyncContext:
     config: Config
@@ -85,6 +95,7 @@ class SyncContext:
     opencast_episode_auth_cache: set[tuple[Any, str]] = field(default_factory=set)
     opencast_track_cache: dict[str, OpencastTrack] = field(default_factory=dict)
     downloaded_paths: set[Path] = field(default_factory=set)
+    filtered_items: set[FilteredItem] = field(default_factory=set)
     quiz_review_cache: dict[str, str] = field(default_factory=dict)
     lti_instance_cache: dict[int, dict[str, Any]] = field(default_factory=dict)
     h5p_activity_cache: dict[int, dict[str, Any]] = field(default_factory=dict)
@@ -92,6 +103,15 @@ class SyncContext:
 
     def __post_init__(self) -> None:
         self.auth = AuthState.from_config(self.config)
+
+    def record_filtered(
+        self,
+        config_key: str,
+        category: str,
+        item: str,
+        reason: str,
+    ) -> None:
+        self.filtered_items.add(FilteredItem(config_key, category, item, reason))
 
     def require_session(self) -> requests.Session:
         """Return the token-capable general HTTP session."""

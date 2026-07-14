@@ -234,7 +234,7 @@ def handle_assignment_module(
             assignment_id,
         )
         for c in ass:
-            if filters.should_skip_url(ctx.config, c.get("fileurl"), "assignment file"):
+            if filters.should_skip_url(ctx, c.get("fileurl"), "assignment file"):
                 continue
             moodle_files.add_moodle_file_node(
                 assignment_node,
@@ -272,7 +272,7 @@ def handle_resource_like_module(
         file_url = c.get("fileurl")
         if not file_url:
             continue
-        if filters.should_skip_url(ctx.config, file_url, "resource link"):
+        if filters.should_skip_url(ctx, file_url, "resource link"):
             continue
         if moodle_files.is_direct_moodle_file_content(module, c):
             moodle_files.add_moodle_content_file_node(section_node, c)
@@ -309,7 +309,7 @@ def handle_folder_module(
             links_api.scan_for_links(ctx, folder_info["intro"], folder_node, course_id)
 
         for c in module.get("contents", []):
-            if filters.should_skip_url(ctx.config, c.get("fileurl"), "folder file"):
+            if filters.should_skip_url(ctx, c.get("fileurl"), "folder file"):
                 continue
             moodle_files.add_moodle_file_node(
                 folder_node,
@@ -360,7 +360,7 @@ def handle_embedded_link_module(  # noqa: C901 - legacy handler awaiting decompo
             if index_content is not None
             else module.get("url") or f"{MOODLE_URL}mod/page/view.php?id={module['id']}"
         )
-        scan_page_links = not filters.should_skip_url(ctx.config, html_url, "page link")
+        scan_page_links = not filters.should_skip_url(ctx, html_url, "page link")
         if opencast_enabled or scan_page_links:
             try:
                 response = ctx.require_session().get(
@@ -406,7 +406,7 @@ def handle_embedded_link_module(  # noqa: C901 - legacy handler awaiting decompo
                             continue
 
                         if filters.should_skip_url(
-                            ctx.config, track.url, "Opencast video URL"
+                            ctx, track.url, "Opencast video URL"
                         ):
                             continue
 
@@ -534,7 +534,7 @@ def handle_opencast_lti_module(  # noqa: C901 - legacy handler awaiting decompos
             track = opencast_api.resolve_track_from_episode(ctx, episode_id, log)
             if track is None:
                 continue
-            if filters.should_skip_url(ctx.config, track.url, "Opencast video URL"):
+            if filters.should_skip_url(ctx, track.url, "Opencast video URL"):
                 continue
             opencast_api.add_track_node(
                 series_node,
@@ -560,7 +560,7 @@ def handle_opencast_lti_module(  # noqa: C901 - legacy handler awaiting decompos
             track = opencast_api.resolve_track_from_episode(ctx, engage_single_id, log)
             if track is None:
                 return
-            if filters.should_skip_url(ctx.config, track.url, "Opencast video URL"):
+            if filters.should_skip_url(ctx, track.url, "Opencast video URL"):
                 return
             opencast_api.add_track_node(
                 section_node,

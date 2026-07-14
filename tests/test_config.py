@@ -21,7 +21,7 @@ from syncmymoodle.config import (
 )
 from syncmymoodle.context import AuthState
 
-from .helpers import FakeKeyring
+from .helpers import FakeKeyring, make_context
 
 
 def validate_config(raw):
@@ -116,6 +116,69 @@ def test_cli_help_groups_config_options():
     assert "Moodle course URLs or" in help_text
     assert "numeric IDs" in help_text
     assert "whose size is known" in help_text
+    assert "--show-filtered" in help_text
+
+
+def test_filtered_report_is_summarized_by_default(capsys):
+    ctx = make_context()
+    ctx.record_filtered(
+        "filters.exclude_files",
+        "file",
+        "/sync/Course/notes.tmp",
+        "matches '*.tmp'",
+    )
+
+    cli.report_filtered_items(ctx, show_details=False)
+
+    assert capsys.readouterr().out == (
+        "Filtered 1 item; use --show-filtered for details.\n"
+    )
+
+
+def test_show_filtered_report_is_grouped_and_deduplicated(capsys):
+    ctx = make_context()
+    ctx.record_filtered(
+        "filters.exclude_files",
+        "file",
+        "/sync/Course/notes.tmp",
+        "matches '*.tmp'",
+    )
+    ctx.record_filtered(
+        "courses.skip",
+        "course",
+        "Skipped Course (123)",
+        "matches '123'",
+    )
+    ctx.record_filtered(
+        "filters.exclude_files",
+        "file",
+        "/sync/Course/notes.tmp",
+        "matches '*.tmp'",
+    )
+
+    cli.report_filtered_items(ctx, show_details=True)
+
+    assert capsys.readouterr().out == (
+        "Filtered items (2):\n"
+        "  courses.skip (1):\n"
+        "    course: Skipped Course (123) - matches '123'\n"
+        "  filters.exclude_files (1):\n"
+        "    file: /sync/Course/notes.tmp - matches '*.tmp'\n"
+    )
+
+
+def test_show_filtered_is_forwarded_to_sync_run(tmp_path, monkeypatch):
+    calls = []
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "empty-xdg"))
+    monkeypatch.setattr(
+        cli,
+        "run",
+        lambda ctx, *, show_filtered=False: calls.append(show_filtered),
+    )
+
+    cli.main(["--sync-directory", str(tmp_path), "--show-filtered"])
+
+    assert calls == [True]
 
 
 def test_setup_help_explains_what_will_be_configured(capsys):
@@ -135,6 +198,7 @@ def test_setup_help_explains_what_will_be_configured(capsys):
         (["--user", "user", "setup"], "--user"),
         (["--courses", "123", "config", "example"], "--courses"),
         (["--no-update-files", "clean", "conflicts"], "--update-files"),
+        (["--show-filtered", "config", "example"], "--show-filtered"),
     ],
 )
 def test_management_commands_reject_sync_options(argv, option, capsys):

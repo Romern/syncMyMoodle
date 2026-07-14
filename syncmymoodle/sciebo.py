@@ -76,7 +76,7 @@ def scan_public_shares(
         if ctx.service_outages.should_skip(SCIEBO_URL):
             return
         log.info(f"Found Sciebo Link: {link}")
-        if filters.should_skip_url(ctx.config, link, "Sciebo link", log):
+        if filters.should_skip_url(ctx, link, "Sciebo link"):
             continue
         if _reuse_cached_share(ctx, link, parent_node):
             continue

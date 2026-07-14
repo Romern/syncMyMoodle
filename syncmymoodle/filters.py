@@ -9,12 +9,18 @@ from syncmymoodle.constants import (
     COURSE_PREFIX_RE,
     MOODLE_URL,
 )
+from syncmymoodle.context import SyncContext
+from syncmymoodle.http_utils import RequestPolicyError, redact_url_secrets
 
 logger = logging.getLogger(__name__)
 
 
-def course_id_in_filter(course_id: Any, entries: list[str]) -> bool:
-    """Return True if ``course_id`` is referenced by a configured entry.
+class FilteredRequestError(RequestPolicyError):
+    """A request intentionally blocked by a configured URL filter."""
+
+
+def matching_course_filter_entry(course_id: Any, entries: list[str]) -> str | None:
+    """Return the configured entry referencing ``course_id``, if any.
 
     Entries are course URLs (``.../course/view.php?id=NNN``). The ``id``
     query parameter is compared exactly, so e.g. ``id=12`` does not also
@@ -24,10 +30,10 @@ def course_id_in_filter(course_id: Any, entries: list[str]) -> bool:
     for entry in entries:
         parsed = urllib.parse.urlparse(entry)
         if course_id in urllib.parse.parse_qs(parsed.query).get("id", []):
-            return True
+            return entry
         if entry.strip() == course_id:
-            return True
-    return False
+            return entry
+    return None
 
 
 def pattern_list(value: PatternConfig, course_id: Any = None) -> list[str]:
@@ -61,15 +67,15 @@ def format_course_name(
     return f"{name} ({prefix})"
 
 
-def matches_any_pattern(values: list[Any], patterns: list[str]) -> bool:
+def matching_pattern(values: list[Any], patterns: list[str]) -> str | None:
     for value in values:
         if value is None:
             continue
         value = str(value)
         for pattern in patterns:
             if value == pattern or fnmatchcase(value, pattern):
-                return True
-    return False
+                return pattern
+    return None
 
 
 def domain_matches(netloc: str, allowed_domain: str) -> bool:
@@ -87,17 +93,23 @@ def domain_matches(netloc: str, allowed_domain: str) -> bool:
 
 
 def should_skip_url(
-    config: Config,
+    ctx: SyncContext,
     url: str | None,
     context: str = "link",
-    log: logging.Logger = logger,
 ) -> bool:
     if not url:
         return False
 
+    config = ctx.config
     url = str(url).replace("&amp;", "&")
-    if matches_any_pattern([url], pattern_list(config.exclude_links)):
-        log.info("Skipping %s %s because it matches exclude_links", context, url)
+    pattern = matching_pattern([url], pattern_list(config.exclude_links))
+    if pattern is not None:
+        ctx.record_filtered(
+            "filters.exclude_links",
+            "link",
+            f"{context}: {redact_url_secrets(url)}",
+            f"matches {redact_url_secrets(pattern)!r}",
+        )
         return True
 
     allowed_domains = pattern_list(config.allowed_domains)
@@ -107,44 +119,54 @@ def should_skip_url(
             if not any(
                 domain_matches(parsed_url.netloc, domain) for domain in allowed_domains
             ):
-                log.info(
-                    "Skipping %s %s because it is outside allowed_domains",
-                    context,
-                    url,
+                ctx.record_filtered(
+                    "filters.allowed_domains",
+                    "link",
+                    f"{context}: {redact_url_secrets(url)}",
+                    f"host {parsed_url.hostname or parsed_url.netloc!r} is not allowed",
                 )
                 return True
 
     return False
 
 
+def require_url_allowed(ctx: SyncContext, url: str, context: str) -> bool:
+    if should_skip_url(ctx, url, context):
+        raise FilteredRequestError(
+            f"request excluded by configured filters: {redact_url_secrets(url)}"
+        )
+    return True
+
+
 def should_skip_section(
-    config: Config,
+    ctx: SyncContext,
     section: dict[str, Any],
     course_id: Any,
-    log: logging.Logger = logger,
 ) -> bool:
+    config = ctx.config
     patterns = pattern_list(config.exclude_sections, course_id=course_id)
     if not patterns:
         return False
 
     values = [section.get("name"), section.get("id")]
-    if matches_any_pattern(values, patterns):
-        log.info(
-            "Skipping section %s (%s) in course %s because it matches exclude_sections",
-            section.get("name"),
-            section.get("id"),
-            course_id,
+    pattern = matching_pattern(values, patterns)
+    if pattern is not None:
+        ctx.record_filtered(
+            "filters.exclude_sections",
+            "section",
+            f"{section.get('name')} ({section.get('id')}) in course {course_id}",
+            f"matches {pattern!r}",
         )
         return True
     return False
 
 
 def should_skip_module(
-    config: Config,
+    ctx: SyncContext,
     module: dict[str, Any],
     course_id: Any,
-    log: logging.Logger = logger,
 ) -> bool:
+    config = ctx.config
     patterns = pattern_list(config.exclude_modules, course_id=course_id)
     if not patterns:
         return False
@@ -164,12 +186,13 @@ def should_skip_module(
         )
 
     values = [module_id, module_name, modname, *module_urls]
-    if matches_any_pattern(values, patterns):
-        log.info(
-            "Skipping module %s (%s) in course %s because it matches exclude_modules",
-            module_name,
-            module_id,
-            course_id,
+    pattern = matching_pattern(values, patterns)
+    if pattern is not None:
+        ctx.record_filtered(
+            "filters.exclude_modules",
+            "module",
+            f"{module_name} ({module_id}) in course {course_id}",
+            f"matches {redact_url_secrets(pattern)!r}",
         )
         return True
     return False

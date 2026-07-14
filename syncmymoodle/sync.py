@@ -4,6 +4,7 @@ from typing import cast
 from syncmymoodle import filters, sync_handlers
 from syncmymoodle import moodle as moodle_api
 from syncmymoodle.context import SyncContext
+from syncmymoodle.http_utils import redact_url_secrets
 from syncmymoodle.node import Node
 
 logger = logging.getLogger(__name__)
@@ -32,10 +33,29 @@ def sync(ctx: SyncContext) -> None:  # noqa: C901 - legacy sync awaiting decompo
         if selected_courses:
             # selected_courses is an explicit allowlist that overrides
             # skip_courses (and, below, only_sync_semester).
-            if not filters.course_id_in_filter(course_id, selected_courses):
+            if (
+                filters.matching_course_filter_entry(course_id, selected_courses)
+                is None
+            ):
+                ctx.record_filtered(
+                    "courses.selected",
+                    "course",
+                    f"{course_name} ({course_id})",
+                    "not in the configured selection",
+                )
                 continue
-        elif filters.course_id_in_filter(course_id, config.skip_courses):
-            continue
+        else:
+            skip_entry = filters.matching_course_filter_entry(
+                course_id, config.skip_courses
+            )
+            if skip_entry is not None:
+                ctx.record_filtered(
+                    "courses.skip",
+                    "course",
+                    f"{course_name} ({course_id})",
+                    f"matches {redact_url_secrets(skip_entry)!r}",
+                )
+                continue
 
         semestername = (course.get("idnumber") or "")[:4] or "unknown-semester"
         # Skip not selected semesters (selected_courses overrides this)
@@ -44,6 +64,12 @@ def sync(ctx: SyncContext) -> None:  # noqa: C901 - legacy sync awaiting decompo
             and config.only_sync_semester
             and semestername not in config.only_sync_semester
         ):
+            ctx.record_filtered(
+                "courses.semesters",
+                "course",
+                f"{course_name} ({course_id})",
+                f"semester {semestername!r} is not selected",
+            )
             continue
 
         print(f"Syncing {course_name}...")
@@ -90,7 +116,7 @@ def sync(ctx: SyncContext) -> None:  # noqa: C901 - legacy sync awaiting decompo
             if isinstance(section, str):
                 logger.error("Moodle returned an invalid section for %s", course_name)
                 continue
-            if filters.should_skip_section(config, section, course_id, logger):
+            if filters.should_skip_section(ctx, section, course_id):
                 continue
             section_node = cast(
                 Node,
@@ -107,7 +133,7 @@ def sync(ctx: SyncContext) -> None:  # noqa: C901 - legacy sync awaiting decompo
             )
             for module in section["modules"]:
                 try:
-                    if filters.should_skip_module(config, module, course_id, logger):
+                    if filters.should_skip_module(ctx, module, course_id):
                         continue
 
                     sync_handlers.handle_module(module_context, module)
