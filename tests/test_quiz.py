@@ -1,7 +1,7 @@
 import subprocess
 from types import SimpleNamespace
 
-from syncmymoodle import quiz
+from syncmymoodle import quiz, sync_handlers
 from syncmymoodle.node import Node
 
 from .helpers import FakeResponse, FakeSession, make_context
@@ -83,6 +83,7 @@ def quiz_context(tmp_path, mode):
         FakeResponse(headers={"Content-Type": "font/woff2"}, chunks=[b"font-awesome"]),
     )
     ctx.session = session
+    ctx.quiz_review_cache[QUIZ_URL] = QUIZ_HTML
     return ctx
 
 
@@ -93,12 +94,103 @@ def quiz_node():
     return node
 
 
+def test_quiz_api_review_preserves_grade_and_feedback_titles(monkeypatch, tmp_path):
+    ctx = make_context(
+        {
+            "paths.sync_directory": str(tmp_path),
+            "modules.quiz": "html",
+        }
+    )
+    ctx.session = FakeSession()
+    course_node = Node("Course", 1, "Course", None)
+    section_node = course_node.add_child("Section", 2, "Section")
+    assert section_node is not None
+    module_context = sync_handlers.ModuleContext(
+        ctx,
+        1,
+        course_node,
+        section_node,
+        {},
+        {},
+    )
+    monkeypatch.setattr(
+        sync_handlers.moodle_api,
+        "get_quizzes_by_course",
+        lambda session, wstoken, course_id: [{"coursemodule": 42, "id": 7}],
+    )
+    monkeypatch.setattr(
+        sync_handlers.moodle_api,
+        "get_quiz_attempts",
+        lambda session, wstoken, quiz_id: [{"id": 5}],
+    )
+    monkeypatch.setattr(
+        sync_handlers.moodle_api,
+        "get_quiz_attempt_review",
+        lambda session, wstoken, attempt_id: {
+            "grade": "9.00 < 10.00",
+            "questions": [{"html": "<div>Question body</div>"}],
+            "additionaldata": [
+                {"title": "Overall <feedback>", "content": "<p>Great</p>"}
+            ],
+        },
+    )
+
+    sync_handlers.handle_quiz_module(
+        module_context,
+        {"id": 42, "instance": 7, "modname": "quiz", "name": "My Quiz"},
+    )
+
+    review = ctx.quiz_review_cache[QUIZ_URL]
+    assert "<h2>Grade</h2><p>9.00 &lt; 10.00</p>" in review
+    assert "<div>Question body</div>" in review
+    assert "<h2>Overall &lt;feedback&gt;</h2><p>Great</p>" in review
+
+
+def test_quiz_node_keeps_remote_name_until_path_materialization(monkeypatch):
+    ctx = make_context({"modules.quiz": "html"})
+    ctx.session = FakeSession()
+    course_node = Node("Course", 1, "Course", None)
+    section_node = course_node.add_child("Section", 2, "Section")
+    assert section_node is not None
+    module_context = sync_handlers.ModuleContext(
+        ctx,
+        1,
+        course_node,
+        section_node,
+        {},
+        {},
+    )
+    monkeypatch.setattr(
+        sync_handlers.moodle_api,
+        "get_quizzes_by_course",
+        lambda session, wstoken, course_id: [{"coursemodule": 42, "id": 7}],
+    )
+    monkeypatch.setattr(
+        sync_handlers.moodle_api,
+        "get_quiz_attempts",
+        lambda session, wstoken, quiz_id: [{"id": 5}],
+    )
+    monkeypatch.setattr(
+        sync_handlers.moodle_api,
+        "get_quiz_attempt_review",
+        lambda session, wstoken, attempt_id: {"questions": []},
+    )
+
+    sync_handlers.handle_quiz_module(
+        module_context,
+        {"id": 42, "instance": 7, "modname": "quiz", "name": "R&amp;D"},
+    )
+
+    assert section_node.children[0].name == "R&amp;D, Versuch 1"
+
+
 def test_build_quiz_snapshot_is_self_contained_and_network_silent(tmp_path):
     ctx = quiz_context(tmp_path, "html")
 
     snapshot = quiz.build_quiz_snapshot(QUIZ_HTML, ctx.session, QUIZ_URL)
 
     assert "Content-Security-Policy" in snapshot
+    assert 'charset="utf-8"' in snapshot
     assert "default-src 'none'" in snapshot
     assert "data:image/png;base64," in snapshot
     assert "data:font/woff2;base64," in snapshot
@@ -123,6 +215,26 @@ def test_build_quiz_snapshot_is_self_contained_and_network_silent(tmp_path):
     assert ctx.session.count("GET", CSS_ONLY_ASSET_URL) == 0
     assert ctx.session.count("GET", FONT_URL) == 1
     assert ctx.session.count("GET", TEXT_FONT_URL) == 0
+
+
+def test_quiz_asset_redirect_cannot_escape_moodle_origin():
+    external_url = "https://example.test/tracker.css"
+    session = FakeSession()
+    session.add(
+        "GET",
+        CSS_URL,
+        FakeResponse(status_code=302, headers={"Location": external_url}),
+    )
+    html = (
+        "<html><head>"
+        '<link rel="stylesheet" href="/theme/styles.css">'
+        "</head><body>Quiz</body></html>"
+    )
+
+    snapshot = quiz.build_quiz_snapshot(html, session, QUIZ_URL)
+
+    assert session.calls == [("GET", CSS_URL)]
+    assert external_url not in snapshot
 
 
 def test_quiz_latex_conversion_skips_stylesheets(tmp_path):
@@ -184,8 +296,8 @@ def test_html_mode_is_idempotent(tmp_path, capsys):
     capsys.readouterr()
     assert quiz.download_quiz(ctx, node) is True
     assert capsys.readouterr().out == ""
-    # The page is fetched only on the first run; the second is a no-op.
-    assert ctx.session.count("GET", QUIZ_URL) == 1
+    # The token-derived review is consumed only on the first run; the second is a no-op.
+    assert ctx.session.count("GET", QUIZ_URL) == 0
 
 
 def test_pdf_mode_removes_html_on_success(tmp_path, monkeypatch, capsys):
@@ -231,7 +343,7 @@ def test_both_mode_retries_pdf_without_refetching(tmp_path, monkeypatch):
     assert quiz.download_quiz(ctx, node) is False
     html_path = tmp_path / "root" / "My Quiz, Versuch 1.html"
     assert html_path.exists()
-    assert ctx.session.count("GET", QUIZ_URL) == 1
+    assert ctx.session.count("GET", QUIZ_URL) == 0
 
     # Second run: a browser is now available. The PDF must be produced by
     # rendering the existing snapshot, without re-fetching the page or assets.
@@ -245,34 +357,19 @@ def test_both_mode_retries_pdf_without_refetching(tmp_path, monkeypatch):
     assert quiz.download_quiz(ctx, node) is True
     assert (tmp_path / "root" / "My Quiz, Versuch 1.pdf").exists()
     # No additional page fetch, no additional asset fetches.
-    assert ctx.session.count("GET", QUIZ_URL) == 1
+    assert ctx.session.count("GET", QUIZ_URL) == 0
     assert ctx.session.count("GET", CSS_URL) == 1
     assert ctx.session.count("GET", IMG_URL) == 1
 
 
-def test_snapshot_declares_utf8_charset(tmp_path):
-    # The source QUIZ_HTML has no charset meta, so one must be injected.
+def test_download_quiz_rejects_missing_token_derived_review(tmp_path):
     ctx = quiz_context(tmp_path, "html")
-    snapshot = quiz.build_quiz_snapshot(QUIZ_HTML, ctx.session, QUIZ_URL)
-    assert 'charset="utf-8"' in snapshot
-
-
-def test_download_quiz_rejects_non_quiz_redirect(tmp_path):
-    ctx = quiz_context(tmp_path, "html")
+    ctx.quiz_review_cache.clear()
     ctx.session.routes.clear()
-    ctx.session.add(
-        "GET",
-        QUIZ_URL,
-        FakeResponse(
-            text="<html>login</html>",
-            status_code=200,
-            headers={"Content-Type": "text/html"},
-            url="https://moodle.rwth-aachen.de/login/index.php",
-        ),
-    )
     node = quiz_node()
 
     assert quiz.download_quiz(ctx, node) is False
+    assert ctx.session.count("GET", QUIZ_URL) == 0
     assert not (tmp_path / "root").exists()
 
 
@@ -290,6 +387,38 @@ def test_both_mode_writes_html_and_pdf(tmp_path, monkeypatch):
     assert quiz.download_quiz(ctx, node) is True
     assert (tmp_path / "root" / "My Quiz, Versuch 1.html").exists()
     assert (tmp_path / "root" / "My Quiz, Versuch 1.pdf").exists()
+
+
+def test_both_mode_dry_run_reports_each_missing_artifact(tmp_path, capsys):
+    ctx = quiz_context(tmp_path, "both")
+    ctx.config.dry_run = True
+    node = quiz_node()
+    html_path = tmp_path / "root" / "My Quiz, Versuch 1.html"
+    pdf_path = tmp_path / "root" / "My Quiz, Versuch 1.pdf"
+
+    assert quiz.download_quiz(ctx, node) is True
+
+    assert capsys.readouterr().out == (
+        f"Would download {html_path} [Quiz]\nWould render {pdf_path} [Quiz PDF]\n"
+    )
+    assert not (tmp_path / "root").exists()
+    assert ctx.session.count("GET", QUIZ_URL) == 0
+
+
+def test_both_mode_dry_run_reports_only_missing_pdf(tmp_path, capsys):
+    ctx = quiz_context(tmp_path, "both")
+    ctx.config.dry_run = True
+    node = quiz_node()
+    html_path = tmp_path / "root" / "My Quiz, Versuch 1.html"
+    html_path.parent.mkdir()
+    html_path.write_text("existing", encoding="utf-8")
+    pdf_path = tmp_path / "root" / "My Quiz, Versuch 1.pdf"
+
+    assert quiz.download_quiz(ctx, node) is True
+
+    assert capsys.readouterr().out == f"Would render {pdf_path} [Quiz PDF]\n"
+    assert html_path.read_text(encoding="utf-8") == "existing"
+    assert not pdf_path.exists()
 
 
 def test_off_mode_does_nothing(tmp_path):

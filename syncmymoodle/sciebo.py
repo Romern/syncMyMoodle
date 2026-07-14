@@ -2,15 +2,29 @@ import base64
 import logging
 from typing import Any, cast
 
+import requests
+
 from syncmymoodle import filters
-from syncmymoodle.constants import SCIEBO_LINK_RE
+from syncmymoodle.constants import (
+    HTTP_TIMEOUT_SECONDS,
+    RWTH_SCIEBO_STATUS_URL,
+    SCIEBO_LINK_RE,
+    SCIEBO_URL,
+)
 from syncmymoodle.context import SyncContext
-from syncmymoodle.http_utils import get_input_value, parse_html, parse_xml
+from syncmymoodle.http_utils import (
+    HttpFailureKind,
+    classify_http_failure,
+    get_input_value,
+    parse_html,
+    parse_xml,
+    record_service_failure,
+    safe_request_error,
+)
 from syncmymoodle.node import Node, RemoteMarkerKind
 
 logger = logging.getLogger(__name__)
 
-SCIEBO_URL = "https://rwth-aachen.sciebo.de"
 WEBDAV_LOCATION = "/public.php/webdav/"
 
 
@@ -35,88 +49,164 @@ PROPFIND_BODY = """<?xml version="1.0" encoding="UTF-8"?>
 </d:propfind>"""
 
 
+def _record_failure(
+    ctx: SyncContext,
+    kind: HttpFailureKind,
+    reason: str,
+    log: logging.Logger,
+) -> None:
+    record_service_failure(
+        ctx.service_outages,
+        SCIEBO_URL,
+        "Sciebo",
+        kind,
+        reason,
+        log,
+        f"Check the RWTH ITC status page: {RWTH_SCIEBO_STATUS_URL}",
+    )
+
+
 def scan_public_shares(
     ctx: SyncContext,
     text: str,
     parent_node: Node,
     log: logging.Logger = logger,
 ) -> None:
-    for link in set(SCIEBO_LINK_RE.findall(text)):
+    for link in sorted(set(SCIEBO_LINK_RE.findall(text))):
+        if ctx.service_outages.should_skip(SCIEBO_URL):
+            return
         log.info(f"Found Sciebo Link: {link}")
         if filters.should_skip_url(ctx.config, link, "Sciebo link", log):
             continue
-        cached_sciebo_root = ctx.sciebo_link_cache.get(link)
-        if cached_sciebo_root is not None:
-            if any(
-                child.name == cached_sciebo_root.name
-                and child.type == cached_sciebo_root.type
-                for child in parent_node.children
-            ):
-                continue
-            parent_node.children.append(cached_sciebo_root.clone(parent_node))
+        if _reuse_cached_share(ctx, link, parent_node):
             continue
+        _scan_new_share(ctx, link, parent_node, log)
 
-        # get the download page
-        try:
-            response = ctx.require_session().get(link)
-        except Exception:
-            log.exception(f"Failed to fetch Sciebo link {link}")
-            continue
 
-        # parse html code
-        soup = parse_html(response.text)
+def _reuse_cached_share(
+    ctx: SyncContext,
+    link: str,
+    parent_node: Node,
+) -> bool:
+    if link not in ctx.sciebo_link_cache:
+        return False
+    cached_root = ctx.sciebo_link_cache[link]
+    if cached_root is None:
+        return True
+    if not any(
+        child.name == cached_root.name and child.type == cached_root.type
+        for child in parent_node.children
+    ):
+        parent_node.children.append(cached_root.clone(parent_node))
+    return True
 
-        # get the requesttoken
-        requestToken = cast(
-            str | None,
-            soup.head.get("data-requesttoken") if soup.head is not None else None,
+
+def _share_auth_headers(
+    ctx: SyncContext,
+    link: str,
+    log: logging.Logger,
+) -> tuple[str, dict[str, str]] | None:
+    try:
+        response = ctx.require_session().get(
+            link,
+            timeout=HTTP_TIMEOUT_SECONDS,
         )
-        if not requestToken:
-            log.warning("Sciebo: missing request token for link %s, skipping", link)
-            continue
-        log.info(f"Sciebo request token: {requestToken}")
-
-        # Newer Sciebo/Nextcloud share pages no longer render the token as a
-        # hidden input. It matches the /s/<token> segment of the share URL,
-        # which is what the public WebDAV endpoint expects, so fall back to
-        # deriving it from the link instead of skipping the share.
-        sharingToken = get_input_value(soup, "sharingToken") or sharing_token_from_link(
-            link
+    except requests.RequestException as error:
+        _record_failure(
+            ctx,
+            HttpFailureKind.TRANSIENT,
+            f"share page request failed: {safe_request_error(error)}",
+            log,
         )
-        if not sharingToken:
-            log.warning("Sciebo: missing sharingToken for link %s, skipping", link)
-            continue
-        log.info(f"Sciebo sharingToken: {sharingToken}")
+        return None
 
-        # get baseauthentication secret
-        baseAuthSecret = base64.b64encode(f"{sharingToken}:null".encode()).decode()
-        log.info("Sciebo base auth secret derived")
-
-        # get auth header
-        auth_header = {
-            "Authorization": f"Basic {baseAuthSecret}",
-            "requesttoken": requestToken,
-        }
-
-        sciebo_root = parent_node.add_child(
-            f"sciebo-{sharingToken}", None, "Sciebo Folder"
+    failure_kind = classify_http_failure(response.status_code)
+    if failure_kind is not None:
+        _record_failure(
+            ctx,
+            failure_kind,
+            f"share page returned HTTP {response.status_code}",
+            log,
         )
-        if sciebo_root is None:
-            # Duplicate folder/link, nothing more to do here
-            continue
+        if failure_kind is HttpFailureKind.RESOURCE:
+            log.warning(
+                "Sciebo share page returned HTTP %s; skipping this share",
+                response.status_code,
+            )
+        return None
 
-        _add_sciebo_files(ctx, WEBDAV_LOCATION, sciebo_root, sharingToken, auth_header)
+    soup = parse_html(response.text)
+    request_token = cast(
+        str | None,
+        soup.head.get("data-requesttoken") if soup.head is not None else None,
+    )
+    if not request_token:
+        _record_failure(
+            ctx,
+            HttpFailureKind.TRANSIENT,
+            "share page returned an unexpected response without a request token",
+            log,
+        )
+        return None
+
+    # Newer Sciebo/Nextcloud share pages no longer render the token as a
+    # hidden input. It matches the /s/<token> segment of the share URL,
+    # which is what the public WebDAV endpoint expects.
+    sharing_token = get_input_value(soup, "sharingToken") or sharing_token_from_link(
+        link
+    )
+    if not sharing_token:
+        ctx.service_outages.record_available(SCIEBO_URL)
+        log.warning("Sciebo link did not contain a share token; skipping this share")
+        return None
+
+    base_auth_secret = base64.b64encode(f"{sharing_token}:null".encode()).decode()
+    return sharing_token, {
+        "Authorization": f"Basic {base_auth_secret}",
+        "requesttoken": request_token,
+    }
+
+
+def _scan_new_share(
+    ctx: SyncContext,
+    link: str,
+    parent_node: Node,
+    log: logging.Logger,
+) -> None:
+    share_auth = _share_auth_headers(ctx, link, log)
+    if share_auth is None:
+        ctx.sciebo_link_cache[link] = None
+        return
+    sharing_token, auth_headers = share_auth
+
+    sciebo_root = parent_node.add_child(
+        f"sciebo-{sharing_token}", None, "Sciebo Folder"
+    )
+    if sciebo_root is None:
+        return
+
+    if _add_sciebo_files(
+        ctx,
+        WEBDAV_LOCATION,
+        sciebo_root,
+        sharing_token,
+        auth_headers,
+        log,
+    ):
+        ctx.service_outages.record_available(SCIEBO_URL)
         ctx.sciebo_link_cache[link] = sciebo_root.clone()
+        return
+
+    parent_node.children.remove(sciebo_root)
+    ctx.sciebo_link_cache[link] = None
 
 
-def _add_sciebo_files(
+def _fetch_webdav_listing(
     ctx: SyncContext,
     href: str,
-    parent_node: Node,
-    sharing_token: str,
     auth_header: dict[str, str],
-    log: logging.Logger = logger,
-) -> None:
+    log: logging.Logger,
+) -> Any | None:
     # request the URL with the PROPFIND method and a body that also asks
     # Sciebo/Nextcloud to include content checksums (oc:checksums) for each
     # item. These checksums are stable content hashes (e.g. SHA1) and allow us
@@ -133,26 +223,56 @@ def _add_sciebo_files(
             SCIEBO_URL + href,
             headers=headers,
             data=PROPFIND_BODY,
+            timeout=HTTP_TIMEOUT_SECONDS,
         )
-    except Exception:
-        log.exception(
-            "Sciebo PROPFIND failed for href %s (share %s)",
-            href,
-            sharing_token,
+    except requests.RequestException as error:
+        _record_failure(
+            ctx,
+            HttpFailureKind.TRANSIENT,
+            f"WebDAV request failed: {safe_request_error(error)}",
+            log,
         )
-        return
+        return None
 
-    if not (200 <= propfind_response.status_code < 300):
-        log.warning(
-            "Sciebo PROPFIND returned status %s for href %s (share %s)",
-            propfind_response.status_code,
-            href,
-            sharing_token,
+    failure_kind = classify_http_failure(propfind_response.status_code)
+    if failure_kind is not None:
+        _record_failure(
+            ctx,
+            failure_kind,
+            f"WebDAV returned HTTP {propfind_response.status_code}",
+            log,
         )
-        return
+        if failure_kind is HttpFailureKind.RESOURCE:
+            log.warning(
+                "Sciebo WebDAV returned HTTP %s; skipping this share",
+                propfind_response.status_code,
+            )
+        return None
 
-    # parse the response
+    # A maintenance proxy can return an HTML error document with HTTP 200.
     soup_xml = parse_xml(propfind_response.text)
+    if soup_xml.find("d:multistatus") is None or soup_xml.find("d:response") is None:
+        _record_failure(
+            ctx,
+            HttpFailureKind.TRANSIENT,
+            "WebDAV returned an unexpected response instead of a DAV listing",
+            log,
+        )
+        return None
+    return soup_xml
+
+
+def _add_sciebo_files(
+    ctx: SyncContext,
+    href: str,
+    parent_node: Node,
+    sharing_token: str,
+    auth_header: dict[str, str],
+    log: logging.Logger = logger,
+) -> bool:
+    soup_xml = _fetch_webdav_listing(ctx, href, auth_header, log)
+    if soup_xml is None:
+        return False
 
     for resp in soup_xml.find_all("d:response"):
         # get the href of the response
@@ -198,9 +318,10 @@ def _add_sciebo_files(
             if folder_node is None:
                 continue
             # recursive call to get all files in the folder
-            _add_sciebo_files(
+            if not _add_sciebo_files(
                 ctx, new_href, folder_node, sharing_token, auth_header, log
-            )
+            ):
+                return False
         else:
             # create a new node for the file
             parent_node.add_child(
@@ -213,6 +334,8 @@ def _add_sciebo_files(
                 etag_kind=etag_kind,
                 remote_size=remote_size,
             )
+
+    return True
 
 
 def _extract_remote_marker(response_tag: Any) -> tuple[str, RemoteMarkerKind] | None:

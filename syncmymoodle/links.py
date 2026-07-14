@@ -1,20 +1,36 @@
 import logging
 import urllib.parse
+from contextlib import closing
 from typing import Any, cast
 
+import requests
 from yt_dlp.extractor.youtube import YoutubeIE  # type: ignore[import-untyped]
 
 from syncmymoodle import filters
 from syncmymoodle import opencast as opencast_api
 from syncmymoodle import sciebo as sciebo_api
-from syncmymoodle.constants import OPENCAST_LINK_RE, YOUTUBE_LINK_RE, YOUTUBE_WATCH_URL
+from syncmymoodle.constants import (
+    HTTP_TIMEOUT_SECONDS,
+    OPENCAST_LINK_RE,
+    SCIEBO_LINK_RE,
+    YOUTUBE_LINK_RE,
+    YOUTUBE_WATCH_URL,
+)
 from syncmymoodle.context import SyncContext
 from syncmymoodle.http_utils import (
     HTML_CONTENT_TYPES,
+    HttpFailureKind,
+    classify_http_failure,
+    classify_request_failure,
     content_length,
     content_type_without_parameters,
     filename_from_url,
+    normalized_http_origin,
     parse_html,
+    record_service_failure,
+    redact_url_secrets,
+    request_following_safe_redirects,
+    safe_request_error,
 )
 from syncmymoodle.node import Node, RemoteMarkerKind
 
@@ -81,7 +97,7 @@ def scan_html_text_for_links(
     )
 
 
-def scan_for_links(
+def scan_for_links(  # noqa: C901 - legacy parser awaiting decomposition
     ctx: SyncContext,
     text: str,
     parent_node: Node,
@@ -91,51 +107,128 @@ def scan_for_links(
     log: logging.Logger = logger,
 ) -> None:
     # A single link is supplied and the contents of it are checked
-    if single:
+    link_origin = normalized_http_origin(text) if single else None
+    is_sciebo_share = (
+        ctx.config.link_source_enabled("sciebo")
+        and SCIEBO_LINK_RE.fullmatch(text.split("?", 1)[0].split("#", 1)[0].rstrip("/"))
+        is not None
+    )
+    origin_is_unavailable = bool(
+        link_origin and ctx.service_outages.should_skip(link_origin)
+    )
+    request_origin = link_origin
+    if single and not is_sciebo_share and not origin_is_unavailable:
         try:
             text = text.replace("webservice/pluginfile.php", "pluginfile.php")
             if filters.should_skip_url(ctx.config, text, "link", log):
                 return
-            response = ctx.require_session().head(text, allow_redirects=True)
-            content_type = content_type_without_parameters(response)
-            if "youtube.com" in text or "youtu.be" in text:
-                # workaround for youtube providing bad headers when using HEAD
-                pass
-            elif (
-                200 <= response.status_code < 300
-                and content_type
-                and content_type not in HTML_CONTENT_TYPES
-            ):
-                # non html links, assume the filename is in the path
-                filename = filename_from_url(text)
-                parent_node.add_child(
-                    filename,
-                    None,
-                    f"Linked file [{response.headers['Content-Type']}]",
-                    url=text,
-                    etag=response.headers.get("ETag"),
-                    etag_kind=(
-                        RemoteMarkerKind.OPAQUE
-                        if response.headers.get("ETag")
-                        else None
-                    ),
-                    remote_size=content_length(response),
+
+            def url_allowed(url: str) -> bool:
+                return not filters.should_skip_url(
+                    ctx.config,
+                    url,
+                    "redirected link",
+                    log,
                 )
-                # instantly return as it was a direct link
-                return
-            elif ctx.config.follow_links:
-                response = ctx.require_session().get(text)
-                scan_html_text_for_links(
-                    ctx,
-                    response.text,
-                    response.url or text,
-                    parent_node,
-                    course_id,
-                    module_title=module_title,
+
+            response = request_following_safe_redirects(
+                ctx.require_session(),
+                "HEAD",
+                text,
+                url_allowed,
+                timeout=HTTP_TIMEOUT_SECONDS,
+            )
+            with closing(response):
+                final_url = response.url or text
+                request_origin = normalized_http_origin(final_url) or link_origin
+                content_type = content_type_without_parameters(response)
+                if "youtube.com" in text or "youtu.be" in text:
+                    # workaround for youtube providing bad headers when using HEAD
+                    pass
+                elif (
+                    200 <= response.status_code < 300
+                    and content_type
+                    and content_type not in HTML_CONTENT_TYPES
+                ):
+                    if request_origin:
+                        ctx.service_outages.record_available(request_origin)
+                    # non html links, assume the filename is in the path
+                    filename = filename_from_url(final_url)
+                    parent_node.add_child(
+                        filename,
+                        None,
+                        f"Linked file [{content_type}]",
+                        url=final_url,
+                        etag=response.headers.get("ETag"),
+                        etag_kind=(
+                            RemoteMarkerKind.OPAQUE
+                            if response.headers.get("ETag")
+                            else None
+                        ),
+                        remote_size=content_length(response),
+                    )
+                    # instantly return as it was a direct link
+                    return
+            target_is_unavailable = bool(
+                request_origin and ctx.service_outages.should_skip(request_origin)
+            )
+            if ctx.config.follow_links and not target_is_unavailable:
+                response = request_following_safe_redirects(
+                    ctx.require_session(),
+                    "GET",
+                    final_url,
+                    url_allowed,
+                    timeout=HTTP_TIMEOUT_SECONDS,
                 )
-        except Exception:
-            # Maybe the url is down?
-            log.exception(f"Error while downloading url {text}")
+                with closing(response):
+                    response_origin = (
+                        normalized_http_origin(response.url or final_url)
+                        or request_origin
+                    )
+                    if request_origin and response_origin != request_origin:
+                        ctx.service_outages.record_available(request_origin)
+                    request_origin = response_origin
+                    failure_kind = classify_http_failure(response.status_code)
+                    if failure_kind is None:
+                        if request_origin:
+                            ctx.service_outages.record_available(request_origin)
+                        scan_html_text_for_links(
+                            ctx,
+                            response.text,
+                            response.url or final_url,
+                            parent_node,
+                            course_id,
+                            module_title=module_title,
+                        )
+                    else:
+                        if request_origin:
+                            assert failure_kind is not None
+                            record_service_failure(
+                                ctx.service_outages,
+                                request_origin,
+                                f"Link origin {request_origin}",
+                                failure_kind,
+                                f"GET {redact_url_secrets(response.url or final_url)} "
+                                f"returned HTTP {response.status_code}",
+                                log,
+                            )
+        except requests.RequestException as error:
+            reason = (
+                f"request for {redact_url_secrets(text)} failed: "
+                f"{safe_request_error(error)}"
+            )
+            failure_kind = classify_request_failure(error)
+            if request_origin:
+                record_service_failure(
+                    ctx.service_outages,
+                    request_origin,
+                    f"Link origin {request_origin}",
+                    failure_kind,
+                    reason,
+                    log,
+                )
+            if failure_kind is not HttpFailureKind.TRANSIENT:
+                log.warning("Skipping link request: %s", reason)
     if not ctx.config.follow_links:
         return
 
@@ -180,14 +273,11 @@ def scan_for_links(
             ):
                 continue
 
-            parent_node.add_child(
+            opencast_api.add_track_node(
+                parent_node,
                 module_title or track.url.split("/")[-1],
                 vid_id,
-                "Opencast",
-                url=track.url,
-                etag=track.remote_marker,
-                etag_kind=track.remote_marker_kind,
-                remote_size=track.size,
+                track,
             )
 
     # https://rwth-aachen.sciebo.de/s/XXX

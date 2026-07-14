@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import Any
 
 import latex2mathml.converter
+import requests
 
 from syncmymoodle import pathing
 from syncmymoodle.config import Config
@@ -26,8 +27,7 @@ from syncmymoodle.constants import (
     CHROMIUM_KNOWN_PATHS,
     CHROMIUM_PDF_TIMEOUT_MS,
     CHROMIUM_PROCESS_TIMEOUT_SECONDS,
-    DEFAULT_BLOCK_SIZE,
-    MOODLE_NETLOC,
+    HTTP_TIMEOUT_SECONDS,
     MOODLE_URL,
     QUIZ_ASSET_MAX_BYTES,
     QUIZ_SNAPSHOT_MAX_ASSET_BYTES,
@@ -38,6 +38,9 @@ from syncmymoodle.http_utils import (
     content_type_without_parameters,
     parse_html,
     parse_xml,
+    read_capped_body,
+    request_following_safe_redirects,
+    same_origin,
 )
 
 logger = logging.getLogger(__name__)
@@ -76,6 +79,10 @@ QUIZ_URL_ATTRS = {
 }
 
 
+def _is_moodle_asset_url(url: str) -> bool:
+    return same_origin(url, MOODLE_URL)
+
+
 def _quiz_asset_url(raw_url: Any, base_url: str) -> str | None:
     raw = str(raw_url or "").strip()
     if not raw:
@@ -93,53 +100,9 @@ def _quiz_asset_url(raw_url: Any, base_url: str) -> str | None:
         return None
 
     url = urllib.parse.urljoin(base_url, raw)
-    parsed = urllib.parse.urlparse(url)
-    if parsed.scheme not in {"http", "https"}:
-        return None
-    if parsed.netloc.lower() != MOODLE_NETLOC:
+    if not _is_moodle_asset_url(url):
         return None
     return url
-
-
-def _response_body_bytes(response: Any) -> bytes:
-    content = getattr(response, "content", None)
-    if content is not None:
-        return bytes(content)
-
-    chunks = list(response.iter_content(DEFAULT_BLOCK_SIZE))
-    if chunks:
-        return b"".join(chunks)
-
-    text = getattr(response, "text", "")
-    return str(text).encode("utf-8")
-
-
-def _read_capped_body(response: Any, cap: int) -> bytes | None:
-    """Read a response body incrementally, returning None once it exceeds cap.
-
-    Streaming means an asset that omits Content-Length cannot buffer an
-    unbounded amount into memory before we notice it is too large.
-    """
-    if cap < 0:
-        return None
-    total = 0
-    chunks: list[bytes] = []
-    streamed = False
-    for chunk in response.iter_content(DEFAULT_BLOCK_SIZE):
-        streamed = True
-        if not chunk:
-            continue
-        total += len(chunk)
-        if total > cap:
-            return None
-        chunks.append(chunk)
-    if streamed:
-        return b"".join(chunks)
-
-    # No streamed content (e.g. a fake exposing only .text/.content); fall back
-    # to the buffered body but still honor the cap.
-    body = _response_body_bytes(response)
-    return body if len(body) <= cap else None
 
 
 def _response_content_type(
@@ -180,7 +143,16 @@ def _fetch_quiz_body(
     response_encoding)`` or ``None`` when the resource must be skipped.
     """
     try:
-        with closing(session.get(url, timeout=15, stream=True)) as response:
+        with closing(
+            request_following_safe_redirects(
+                session,
+                "GET",
+                url,
+                _is_moodle_asset_url,
+                timeout=HTTP_TIMEOUT_SECONDS,
+                stream=True,
+            )
+        ) as response:
             if not (200 <= response.status_code < 300):
                 log.info(
                     "Skipping quiz snapshot %s %s because Moodle returned HTTP %s",
@@ -204,10 +176,10 @@ def _fetch_quiz_body(
                 return None
 
             encoding = getattr(response, "encoding", None)
-            body = _read_capped_body(
+            body = read_capped_body(
                 response, min(QUIZ_ASSET_MAX_BYTES, remaining_bytes[0])
             )
-    except Exception:
+    except (OSError, ValueError, requests.RequestException):
         log.info(
             "Skipping quiz snapshot %s %s because it could not be fetched",
             description,
@@ -805,46 +777,34 @@ def render_pdf_with_chromium(
     return True
 
 
-def quiz_response_is_usable(
-    response: Any,
-    requested_url: str,
+def render_quiz_pdf(
+    ctx: SyncContext,
+    node: Any,
+    html_path: Path,
+    pdf_path: Path,
+    mode: str,
     log: logging.Logger = logger,
 ) -> bool:
-    if not (200 <= response.status_code < 300):
+    browser = find_chromium(ctx.config, log)
+    if browser is None:
         log.warning(
-            "Skipping quiz snapshot for %s because Moodle returned HTTP %s",
-            requested_url,
-            response.status_code,
+            "No Chromium-family browser found to render the quiz PDF for %s; "
+            "keeping the HTML snapshot instead. Install Chrome, Chromium or "
+            "Edge, or set 'browser' in the [paths] table of your config.",
+            node.name,
         )
         return False
 
-    content_type = content_type_without_parameters(response)
-    if content_type and content_type not in HTML_CONTENT_TYPES:
+    print(f"Rendering {pdf_path} [Quiz PDF]")
+    pdf_ok = render_pdf_with_chromium(browser, html_path, pdf_path, log)
+    if not pdf_ok:
         log.warning(
-            "Skipping quiz snapshot for %s because Moodle returned %s",
-            requested_url,
-            content_type,
+            "Keeping the HTML snapshot for %s after PDF rendering failed.",
+            node.name,
         )
-        return False
-
-    final_url = response.url or requested_url
-    parsed = urllib.parse.urlparse(final_url)
-    if parsed.netloc and parsed.netloc.lower() != MOODLE_NETLOC:
-        log.warning(
-            "Skipping quiz snapshot for %s because it redirected to %s",
-            requested_url,
-            final_url,
-        )
-        return False
-    if parsed.path and not parsed.path.endswith("/mod/quiz/review.php"):
-        log.warning(
-            "Skipping quiz snapshot for %s because the response URL is not a "
-            "quiz review page: %s",
-            requested_url,
-            final_url,
-        )
-        return False
-    return True
+    elif mode == "pdf":
+        html_path.unlink(missing_ok=True)
+    return pdf_ok
 
 
 def download_quiz(ctx: SyncContext, node: Any, log: logging.Logger = logger) -> bool:
@@ -873,7 +833,10 @@ def download_quiz(ctx: SyncContext, node: Any, log: logging.Logger = logger) -> 
         return True
 
     if ctx.config.dry_run:
-        print(f"Would download {html_path if want_html else pdf_path} [Quiz]")
+        if not html_path.exists():
+            print(f"Would download {html_path} [Quiz]")
+        if want_pdf and not pdf_path.exists():
+            print(f"Would render {pdf_path} [Quiz PDF]")
         return True
 
     # Only (re)build the snapshot when it is not already on disk. When just the
@@ -882,20 +845,17 @@ def download_quiz(ctx: SyncContext, node: Any, log: logging.Logger = logger) -> 
     # and re-inlining every asset.
     if not html_path.exists():
         print(f"Downloading {html_path} [Quiz]")
-        try:
-            response = ctx.require_session().get(node.url)
-        except Exception:
-            log.exception("Failed to fetch quiz page %s", node.url)
-            return False
-        if not quiz_response_is_usable(response, node.url, log):
+        review_html = ctx.quiz_review_cache.get(node.url)
+        if review_html is None:
+            log.warning("No token-derived quiz review is available for %s", node.url)
             return False
 
         path.mkdir(parents=True, exist_ok=True)
         html_path.write_text(
             build_quiz_snapshot(
-                response.text,
+                review_html,
                 ctx.require_session(),
-                response.url or node.url,
+                node.url,
                 log,
             ),
             encoding="utf-8",
@@ -904,27 +864,4 @@ def download_quiz(ctx: SyncContext, node: Any, log: logging.Logger = logger) -> 
     if not want_pdf or pdf_path.exists():
         return True
 
-    browser = find_chromium(ctx.config, log)
-    if browser is None:
-        log.warning(
-            "No Chromium-family browser found to render the quiz PDF for %s; "
-            "keeping the HTML snapshot instead. Install Chrome, Chromium or "
-            "Edge, or set 'browser' in the [paths] table of your config.",
-            node.name,
-        )
-        pdf_ok = False
-    else:
-        print(f"Rendering {pdf_path} [Quiz PDF]")
-        pdf_ok = render_pdf_with_chromium(browser, html_path, pdf_path, log)
-        if not pdf_ok:
-            log.warning(
-                "Keeping the HTML snapshot for %s after PDF rendering failed.",
-                node.name,
-            )
-
-    # In pure "pdf" mode the HTML was only a means to the PDF; drop it on
-    # success but keep it as a fallback when rendering was not possible.
-    if mode == "pdf" and pdf_ok:
-        html_path.unlink(missing_ok=True)
-
-    return not want_pdf or pdf_ok
+    return render_quiz_pdf(ctx, node, html_path, pdf_path, mode, log)

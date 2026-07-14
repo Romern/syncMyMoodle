@@ -1,4 +1,3 @@
-import json
 import logging
 from typing import cast
 
@@ -10,18 +9,13 @@ from syncmymoodle.node import Node
 logger = logging.getLogger(__name__)
 
 
-def sync(ctx: SyncContext) -> None:
+def sync(ctx: SyncContext) -> None:  # noqa: C901 - legacy sync awaiting decomposition
     """Retrieve the file tree for all courses into ``ctx.root_node``."""
     config = ctx.config
-    if not ctx.session:
-        raise Exception("You need to login() first.")
-    if not ctx.wstoken:
-        raise Exception("You need to get_moodle_wstoken() first.")
-    if not ctx.user_id:
-        raise Exception("You need to get_userid() first.")
     session = ctx.require_session()
-    wstoken = ctx.wstoken
-    user_id = ctx.user_id
+    account = ctx.require_moodle_account()
+    wstoken = account.wstoken
+    user_id = account.user_id
     root_node = Node("", -1, "Root", None)
     ctx.root_node = root_node
 
@@ -52,6 +46,11 @@ def sync(ctx: SyncContext) -> None:
         ):
             continue
 
+        print(f"Syncing {course_name}...")
+        course_sections = moodle_api.get_course(session, wstoken, course_id)
+        if course_sections is None:
+            continue
+
         semester_nodes = [s for s in root_node.children if s.name == semestername]
         if len(semester_nodes) == 0:
             semester_node = cast(
@@ -64,8 +63,6 @@ def sync(ctx: SyncContext) -> None:
             Node, semester_node.add_child(course_name, course_id, "Course")
         )
 
-        print(f"Syncing {course_name}...")
-        course_sections = moodle_api.get_course(session, wstoken, course_id)
         module_names = {
             module.get("modname")
             for section in course_sections
@@ -74,7 +71,7 @@ def sync(ctx: SyncContext) -> None:
         }
 
         assignments = None
-        if config.module_enabled("assignment") and ("assign" in module_names):
+        if config.module_assignment and ("assign" in module_names):
             assignments = moodle_api.get_assignment(session, wstoken, course_id)
         assignments_by_cmid = {
             assignment["cmid"]: assignment
@@ -83,29 +80,18 @@ def sync(ctx: SyncContext) -> None:
         }
 
         folders = []
-        if config.module_enabled("folder") and ("folder" in module_names):
+        if config.module_folder and ("folder" in module_names):
             folders = moodle_api.get_folders_by_courses(session, wstoken, course_id)
         folders_by_coursemodule = {
             folder.get("coursemodule"): folder for folder in folders
         }
 
-        logger.info("-----------------------")
-        logger.info(f"------{semestername} - {course_name}------")
-        logger.info("------COURSE-DATA------")
-        logger.info(json.dumps(course))
-        logger.info("------ASSIGNMENT-DATA------")
-        logger.info(json.dumps(assignments))
-        logger.info("------FOLDER-DATA------")
-        logger.info(json.dumps(folders))
-
         for section in course_sections:
             if isinstance(section, str):
-                logger.error(f"Error syncing section in {course_name}: {section}")
+                logger.error("Moodle returned an invalid section for %s", course_name)
                 continue
             if filters.should_skip_section(config, section, course_id, logger):
                 continue
-            logger.info("------SECTION-DATA------")
-            logger.info(json.dumps(section))
             section_node = cast(
                 Node,
                 course_node.add_child(section["name"], section["id"], "Section"),
@@ -127,6 +113,10 @@ def sync(ctx: SyncContext) -> None:
                     sync_handlers.handle_module(module_context, module)
 
                 except Exception:
-                    logger.exception(f"Failed to download the module {module}")
+                    logger.exception(
+                        "Failed to process Moodle module %s (%s)",
+                        module.get("id"),
+                        module.get("modname"),
+                    )
 
     root_node.remove_children_nameclashes()

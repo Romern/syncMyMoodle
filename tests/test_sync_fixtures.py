@@ -1,4 +1,11 @@
-from syncmymoodle import links, opencast, sciebo, sync
+import io
+import logging
+import zipfile
+
+import requests
+
+from syncmymoodle import links, opencast, sciebo, sync, sync_handlers
+from syncmymoodle.constants import HTTP_TIMEOUT_SECONDS
 from syncmymoodle.node import Node
 
 from .helpers import (
@@ -9,8 +16,96 @@ from .helpers import (
     load_fixture,
     load_json_fixture,
     make_context,
+    node_at_path,
     node_rows,
 )
+
+H5P_PACKAGE_URL = "https://moodle.rwth-aachen.de/pluginfile.php/activity.h5p"
+
+
+def run_h5p_handler(monkeypatch, response):
+    ctx = make_context()
+    session = FakeSession()
+    session.add("GET", H5P_PACKAGE_URL, response)
+    ctx.session = session
+    monkeypatch.setattr(
+        sync_handlers.moodle_api,
+        "get_h5pactivities_by_course",
+        lambda session, wstoken, course_id: [
+            {
+                "coursemodule": 317,
+                "package": [{"fileurl": H5P_PACKAGE_URL}],
+            }
+        ],
+    )
+    course_node = Node("Course", 1, "Course", None)
+    section_node = course_node.add_child("Section", 2, "Section")
+    assert section_node is not None
+    module_context = sync_handlers.ModuleContext(
+        ctx, 1, course_node, section_node, {}, {}
+    )
+
+    sync_handlers.handle_embedded_link_module(
+        module_context,
+        {"id": 317, "modname": "h5pactivity", "name": "Interactive video"},
+    )
+
+    return section_node
+
+
+def test_h5p_package_download_is_streamed_and_capped(monkeypatch, caplog):
+    monkeypatch.setattr(sync_handlers, "H5P_PACKAGE_MAX_BYTES", 8)
+
+    def package_response(url, kwargs):
+        assert kwargs == {"stream": True, "timeout": HTTP_TIMEOUT_SECONDS}
+        return FakeResponse(chunks=[b"1234", b"56789"])
+
+    section_node = run_h5p_handler(monkeypatch, package_response)
+
+    assert section_node.children == []
+    assert "H5P package for module 317 is too large" in caplog.text
+
+
+def test_h5p_content_is_bounded_after_decompression(monkeypatch, caplog):
+    monkeypatch.setattr(sync_handlers, "H5P_CONTENT_MAX_BYTES", 32)
+    package = io.BytesIO()
+    with zipfile.ZipFile(package, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+        archive.writestr(
+            "content/content.json",
+            "https://www.youtube.com/watch?v=abcdefghijk",
+        )
+
+    section_node = run_h5p_handler(
+        monkeypatch,
+        FakeResponse(content=package.getvalue()),
+    )
+
+    assert section_node.children == []
+    assert "H5P content for module 317 is too large" in caplog.text
+
+
+def test_large_h5p_package_is_spooled_and_inspected(monkeypatch):
+    monkeypatch.setattr(sync_handlers, "H5P_PACKAGE_MEMORY_BYTES", 64)
+    package = io.BytesIO()
+    with zipfile.ZipFile(package, "w") as archive:
+        archive.writestr(
+            "content/content.json",
+            "https://www.youtube.com/watch?v=abcdefghijk",
+        )
+        archive.writestr("content/video.mp4", b"x" * 1024)
+
+    section_node = run_h5p_handler(
+        monkeypatch,
+        FakeResponse(
+            content=package.getvalue(),
+            headers={"Content-Length": str(125 * 1024**2)},
+        ),
+    )
+
+    assert len(section_node.children) == 1
+    assert section_node.children[0].url == (
+        "https://www.youtube.com/watch?v=abcdefghijk"
+    )
 
 
 def test_nested_moodle_folder_paths_are_preserved(monkeypatch):
@@ -100,7 +195,7 @@ def test_skip_rules_apply_to_sections_modules_links_and_domains(monkeypatch):
     assert_snapshot("skip_rules_tree.txt", node_rows(syncer.root_node))
 
 
-def test_sciebo_public_share_is_cached_per_sync_run():
+def test_sciebo_public_share_is_cached_per_sync_run(caplog):
     link = "https://rwth-aachen.sciebo.de/s/share-token-123"
     public_root = "https://rwth-aachen.sciebo.de/public.php/webdav/"
     public_slides = "https://rwth-aachen.sciebo.de/public.php/webdav/slides/"
@@ -129,6 +224,7 @@ def test_sciebo_public_share_is_cached_per_sync_run():
         FakeResponse(text=load_fixture("sciebo", "propfind_slides.xml")),
     )
     syncer.session = session
+    caplog.set_level(logging.INFO, logger="syncmymoodle.sciebo")
 
     root = Node("", -1, "Root", None)
     first_parent = root.add_child("First occurrence", 1, "Section")
@@ -157,6 +253,70 @@ def test_sciebo_public_share_is_cached_per_sync_run():
         "https://rwth-aachen.sciebo.de/public.php/webdav/slides/deck.pdf |  | "
         "2222222222222222222222222222222222222222",
     ]
+    assert "fake-request-token" not in caplog.text
+    assert "Sciebo sharingToken:" not in caplog.text
+
+
+def test_opencast_error_response_body_is_not_logged(caplog):
+    url = "https://engage.streaming.rwth-aachen.de/search/private.json"
+    syncer = make_context()
+    session = FakeSession()
+    session.add(
+        "GET",
+        url,
+        FakeResponse(status_code=500, text="private-opencast-response"),
+    )
+    syncer.session = session
+    caplog.set_level(logging.INFO, logger="syncmymoodle.opencast")
+
+    assert opencast.fetch_result_list(syncer, url, "episode") is None
+
+    assert "private-opencast-response" not in caplog.text
+
+
+def test_opencast_repeated_503_opens_shared_service_circuit(caplog):
+    url = "https://engage.streaming.rwth-aachen.de/search/episode.json"
+    syncer = make_context()
+    session = FakeSession()
+    session.add("GET", url, FakeResponse(status_code=503))
+    syncer.session = session
+    caplog.set_level(logging.WARNING, logger="syncmymoodle.opencast")
+
+    for _ in range(4):
+        assert opencast.fetch_result_list(syncer, url, "episode") is None
+
+    assert session.count("GET", url) == 3
+    assert [
+        message
+        for message in caplog.messages
+        if message.startswith("Opencast unavailable")
+    ] == [
+        "Opencast unavailable after 3 consecutive transient failures: episode from "
+        f"{url} returned HTTP 503; skipping remaining requests for this sync. "
+        "Check the RWTH ITC status page: "
+        f"{opencast.RWTH_MOODLE_STATUS_URL}"
+    ]
+
+
+def test_opencast_malformed_results_open_shared_service_circuit(caplog):
+    url = "https://engage.streaming.rwth-aachen.de/search/episode.json"
+    syncer = make_context()
+    session = FakeSession()
+    session.add("GET", url, FakeResponse(json_payload={}))
+    syncer.session = session
+    caplog.set_level(logging.WARNING, logger="syncmymoodle.opencast")
+
+    for _ in range(3):
+        assert opencast.fetch_result_list(syncer, url, "episode") is None
+    assert opencast.fetch_result_list(syncer, url, "episode") is None
+
+    assert session.count("GET", url) == 3
+    assert caplog.messages[-1] == (
+        "Opencast unavailable after 3 consecutive transient failures: episode "
+        "response did not contain a result list; skipping remaining requests for "
+        "this sync. Check the RWTH ITC status page: "
+        f"{opencast.RWTH_MOODLE_STATUS_URL}"
+    )
 
 
 def test_sharing_token_from_link_extracts_url_segment():
@@ -222,6 +382,168 @@ def test_sciebo_share_without_token_input_uses_url_token():
     ]
 
 
+def _assert_sciebo_share_outage(
+    caplog, response_factory, scan_share, logger_name, reason
+):
+    share_links = [
+        f"https://rwth-aachen.sciebo.de/s/share-{index}" for index in range(4)
+    ]
+    syncer = make_context({"links.sciebo": True})
+    session = FakeSession()
+    for link in share_links[:3]:
+        session.add("GET", link, response_factory())
+    syncer.session = session
+    parent = Node("Section", 1, "Section", None)
+    caplog.set_level(logging.WARNING, logger=logger_name)
+
+    for link in share_links:
+        scan_share(syncer, link, parent)
+
+    assert session.calls == [("GET", link) for link in share_links[:3]]
+    assert caplog.messages == [
+        f"Sciebo transient failure: {reason}",
+        f"Sciebo transient failure: {reason}",
+        f"Sciebo unavailable after 3 consecutive transient failures: {reason}; "
+        "skipping remaining requests for this sync. Check the RWTH ITC status page: "
+        f"{sciebo.RWTH_SCIEBO_STATUS_URL}",
+    ]
+    assert parent.children == []
+    assert syncer.service_outages.should_skip(sciebo.SCIEBO_URL)
+
+
+def test_sciebo_503_opens_shared_service_circuit(caplog):
+    _assert_sciebo_share_outage(
+        caplog,
+        lambda: FakeResponse(status_code=503),
+        lambda syncer, link, parent: links.scan_for_links(
+            syncer, link, parent, 101, single=True
+        ),
+        "syncmymoodle.links",
+        "share page returned HTTP 503",
+    )
+
+
+def test_sciebo_200_maintenance_pages_open_shared_service_circuit(caplog):
+    _assert_sciebo_share_outage(
+        caplog,
+        lambda: FakeResponse(text="<html><head></head><body>maintenance</body></html>"),
+        sciebo.scan_public_shares,
+        "syncmymoodle.sciebo",
+        "share page returned an unexpected response without a request token",
+    )
+
+
+def test_sciebo_200_html_webdav_responses_do_not_cache_empty_shares(caplog):
+    share_links = [
+        f"https://rwth-aachen.sciebo.de/s/share-{index}" for index in range(4)
+    ]
+    public_root = "https://rwth-aachen.sciebo.de/public.php/webdav/"
+    syncer = make_context({"links.sciebo": True})
+    session = FakeSession()
+    for link in share_links[:3]:
+        session.add(
+            "GET",
+            link,
+            FakeResponse(text=load_fixture("sciebo", "public_share.html")),
+        )
+    session.add(
+        "PROPFIND",
+        public_root,
+        FakeResponse(text="<html><body>maintenance</body></html>"),
+    )
+    syncer.session = session
+    parent = Node("Section", 1, "Section", None)
+    caplog.set_level(logging.WARNING, logger="syncmymoodle.sciebo")
+
+    for link in share_links:
+        sciebo.scan_public_shares(syncer, link, parent)
+
+    assert session.calls == [
+        call
+        for link in share_links[:3]
+        for call in (("GET", link), ("PROPFIND", public_root))
+    ]
+    assert caplog.messages == [
+        "Sciebo transient failure: WebDAV returned an unexpected response instead "
+        "of a DAV listing",
+        "Sciebo transient failure: WebDAV returned an unexpected response instead "
+        "of a DAV listing",
+        "Sciebo unavailable after 3 consecutive transient failures: WebDAV returned "
+        "an unexpected response instead of a DAV listing; skipping remaining "
+        "requests for this sync. Check the RWTH ITC status page: "
+        f"{sciebo.RWTH_SCIEBO_STATUS_URL}",
+    ]
+    assert parent.children == []
+    assert not any(syncer.sciebo_link_cache.values())
+
+
+def test_sciebo_webdav_503_does_not_cache_an_empty_share(caplog):
+    share_links = [
+        f"https://rwth-aachen.sciebo.de/s/share-{index}" for index in range(4)
+    ]
+    public_root = "https://rwth-aachen.sciebo.de/public.php/webdav/"
+    syncer = make_context({"links.sciebo": True})
+    session = FakeSession()
+    for link in share_links[:3]:
+        session.add(
+            "GET",
+            link,
+            FakeResponse(text=load_fixture("sciebo", "public_share.html")),
+        )
+    session.add("PROPFIND", public_root, FakeResponse(status_code=503))
+    syncer.session = session
+    parent = Node("Section", 1, "Section", None)
+    caplog.set_level(logging.WARNING, logger="syncmymoodle.sciebo")
+
+    for link in share_links:
+        sciebo.scan_public_shares(syncer, link, parent)
+
+    assert session.calls == [
+        call
+        for link in share_links[:3]
+        for call in (("GET", link), ("PROPFIND", public_root))
+    ]
+    assert caplog.messages == [
+        "Sciebo transient failure: WebDAV returned HTTP 503",
+        "Sciebo transient failure: WebDAV returned HTTP 503",
+        "Sciebo unavailable after 3 consecutive transient failures: WebDAV returned "
+        "HTTP 503; skipping remaining requests for this sync. Check the RWTH ITC "
+        f"status page: {sciebo.RWTH_SCIEBO_STATUS_URL}",
+    ]
+    assert parent.children == []
+    assert not any(syncer.sciebo_link_cache.values())
+
+
+def test_sciebo_timeouts_open_shared_service_circuit_without_tracebacks(caplog):
+    share_links = [
+        f"https://rwth-aachen.sciebo.de/s/share-{index}" for index in range(4)
+    ]
+    syncer = make_context({"links.sciebo": True})
+    session = FakeSession()
+
+    def time_out(url, kwargs):
+        raise requests.ReadTimeout("read timed out")
+
+    for link in share_links[:3]:
+        session.add("GET", link, time_out)
+    syncer.session = session
+    parent = Node("Section", 1, "Section", None)
+    caplog.set_level(logging.WARNING, logger="syncmymoodle.sciebo")
+
+    for link in share_links:
+        sciebo.scan_public_shares(syncer, link, parent)
+
+    assert session.calls == [("GET", link) for link in share_links[:3]]
+    assert caplog.messages == [
+        "Sciebo transient failure: share page request failed: read timed out",
+        "Sciebo transient failure: share page request failed: read timed out",
+        "Sciebo unavailable after 3 consecutive transient failures: share page request "
+        "failed: read timed out; skipping remaining requests for this sync. Check the "
+        f"RWTH ITC status page: {sciebo.RWTH_SCIEBO_STATUS_URL}",
+    ]
+    assert parent.children == []
+
+
 def test_youtube_links_use_canonical_video_identity():
     syncer = make_context({"links.youtube": True})
     root = Node("", -1, "Root", None)
@@ -243,13 +565,198 @@ def test_youtube_links_use_canonical_video_identity():
     assert links.youtube_video_id(child.url) == "abcdefghijk"
 
 
+def test_direct_link_redirect_cannot_bypass_allowed_domains():
+    original_url = "https://files.allowed.test/document"
+    external_url = "https://files.example.test/private.pdf"
+    syncer = make_context(
+        {
+            "links.follow_links": True,
+            "links.youtube": False,
+            "links.opencast": False,
+            "links.sciebo": False,
+            "filters.allowed_domains": ["files.allowed.test"],
+        }
+    )
+    session = FakeSession()
+    session.add(
+        "HEAD",
+        original_url,
+        FakeResponse(status_code=302, headers={"Location": external_url}),
+    )
+    syncer.session = session
+    parent = Node("Section", 1, "Section", None)
+
+    links.scan_for_links(syncer, original_url, parent, 101, single=True)
+
+    assert session.calls == [("HEAD", original_url)]
+    assert parent.children == []
+
+
+def test_generic_link_resource_errors_are_quiet_and_not_scanned(caplog):
+    caplog.set_level(logging.WARNING, logger="syncmymoodle.links")
+
+    for status_code in (403, 404):
+        url = f"https://files.example.test/error-{status_code}"
+        syncer = make_context(
+            {
+                "links.follow_links": True,
+                "links.youtube": True,
+                "links.opencast": False,
+                "links.sciebo": False,
+                "filters.allowed_domains": ["files.example.test"],
+            }
+        )
+        session = FakeSession()
+        session.add("HEAD", url, FakeResponse(status_code=status_code))
+        session.add(
+            "GET",
+            url,
+            FakeResponse(
+                status_code=status_code,
+                text="https://youtu.be/abcdefghijk",
+            ),
+        )
+        syncer.session = session
+        parent = Node("Section", 1, "Section", None)
+
+        links.scan_for_links(syncer, url, parent, 101, single=True)
+
+        assert session.calls == [("HEAD", url), ("GET", url)]
+        assert parent.children == []
+
+    assert caplog.messages == []
+
+
+def test_generic_link_error_pages_open_origin_circuit_without_being_scanned(caplog):
+    urls = [f"https://files.example.test/outage-{index}" for index in range(4)]
+    syncer = make_context(
+        {
+            "links.follow_links": True,
+            "links.youtube": True,
+            "links.opencast": False,
+            "links.sciebo": False,
+            "filters.allowed_domains": ["files.example.test"],
+        }
+    )
+    session = FakeSession()
+    for url in urls[:3]:
+        session.add("HEAD", url, FakeResponse(status_code=503))
+        session.add(
+            "GET",
+            url,
+            FakeResponse(status_code=503, text="https://youtu.be/abcdefghijk"),
+        )
+    syncer.session = session
+    parent = Node("Section", 1, "Section", None)
+    caplog.set_level(logging.WARNING, logger="syncmymoodle.links")
+
+    for url in urls:
+        links.scan_for_links(syncer, url, parent, 101, single=True)
+
+    assert session.calls == [
+        call for url in urls[:3] for call in (("HEAD", url), ("GET", url))
+    ]
+    assert parent.children == []
+    assert caplog.messages == [
+        "Link origin https://files.example.test transient failure: GET "
+        "https://files.example.test/outage-0 returned HTTP 503",
+        "Link origin https://files.example.test transient failure: GET "
+        "https://files.example.test/outage-1 returned HTTP 503",
+        "Link origin https://files.example.test unavailable after 3 consecutive "
+        "transient failures: GET https://files.example.test/outage-2 returned HTTP "
+        "503; skipping remaining requests for this sync",
+    ]
+
+
+def test_opencast_series_fetches_every_page(monkeypatch):
+    syncer = make_context()
+    requested_urls = []
+
+    def fetch_result_list(ctx, url, context, log):
+        requested_urls.append(url)
+        offset = 100 if "offset=100" in url else 0
+        count = 1 if offset else 100
+        return [
+            {
+                "mediapackage": {
+                    "id": f"episode-{offset + index}",
+                    "title": f"Episode {offset + index}",
+                }
+            }
+            for index in range(count)
+        ]
+
+    monkeypatch.setattr(opencast, "fetch_result_list", fetch_result_list)
+
+    episodes = sync_handlers._opencast_series_episodes(
+        syncer,
+        "series-123",
+        logging.getLogger("test"),
+    )
+
+    assert episodes is not None
+    assert len(episodes) == 101
+    assert requested_urls == [
+        f"{opencast.OPENCAST_SEARCH_URL}?limit=100&offset=0&sid=series-123",
+        f"{opencast.OPENCAST_SEARCH_URL}?limit=100&offset=100&sid=series-123",
+    ]
+
+
+def test_opencast_series_stops_when_backend_repeats_page(monkeypatch, caplog):
+    syncer = make_context()
+    requested_urls = []
+    page = [
+        {
+            "mediapackage": {
+                "id": f"episode-{index}",
+                "title": f"Episode {index}",
+            }
+        }
+        for index in range(100)
+    ]
+
+    def fetch_result_list(ctx, url, context, log):
+        requested_urls.append(url)
+        if len(requested_urls) > 2:
+            raise AssertionError("pagination did not stop after a repeated page")
+        return page
+
+    monkeypatch.setattr(opencast, "fetch_result_list", fetch_result_list)
+
+    episodes = sync_handlers._opencast_series_episodes(
+        syncer,
+        "series-123",
+        logging.getLogger("test"),
+    )
+
+    assert episodes == [
+        (f"episode-{index}", f"Episode {index}") for index in range(100)
+    ]
+    assert requested_urls == [
+        f"{opencast.OPENCAST_SEARCH_URL}?limit=100&offset=0&sid=series-123",
+        f"{opencast.OPENCAST_SEARCH_URL}?limit=100&offset=100&sid=series-123",
+    ]
+    assert "made no pagination progress at offset 100" in caplog.text
+
+
 def test_mixed_course_sync_tree_covers_common_module_surfaces(monkeypatch):
     courses = load_json_fixture("moodle", "mixed_courses.json")
+    course = load_json_fixture("moodle", "mixed_course.json")
+    assignments = load_json_fixture("moodle", "mixed_assignments.json")
+    submission_files = load_json_fixture("moodle", "mixed_submission_files.json")
+    course[0]["modules"][1]["contents"][0]["filesize"] = 1001
+    assignments["assignments"][0]["introattachments"][0]["filesize"] = 1002
+    submission_files[0]["filesize"] = 1003
     direct_pdf = "https://files.example.test/direct.pdf"
     html_overview = "https://files.example.test/overview.html"
-    page_url = "https://moodle.rwth-aachen.de/mod/page/view.php?id=315"
-    h5p_url = "https://moodle.rwth-aachen.de/mod/h5pactivity/view.php?id=317"
-    h5p_iframe_url = "https://moodle.rwth-aachen.de/h5p/embed/317"
+    page_url = (
+        "https://moodle.rwth-aachen.de/pluginfile.php/104/"
+        "mod_page/content/315/index.html"
+    )
+    h5p_package_url = (
+        "https://moodle.rwth-aachen.de/pluginfile.php/104/"
+        "mod_h5pactivity/package/317/activity.h5p"
+    )
     syncer = make_context(
         {
             "modules.assignment": True,
@@ -263,11 +770,26 @@ def test_mixed_course_sync_tree_covers_common_module_surfaces(monkeypatch):
     install_moodle_fixtures(
         monkeypatch,
         courses,
-        {104: load_json_fixture("moodle", "mixed_course.json")},
-        {104: load_json_fixture("moodle", "mixed_assignments.json")},
-        {412: load_json_fixture("moodle", "mixed_submission_files.json")},
+        {104: course},
+        {104: assignments},
+        {412: submission_files},
         {104: load_json_fixture("moodle", "mixed_folders.json")},
     )
+    monkeypatch.setattr(
+        "syncmymoodle.moodle.get_h5pactivities_by_course",
+        lambda session, wstoken, course_id: [
+            {
+                "id": 317,
+                "coursemodule": 317,
+                "package": [{"fileurl": h5p_package_url}],
+            }
+        ],
+    )
+    package = io.BytesIO()
+    with zipfile.ZipFile(package, "w") as archive:
+        archive.writestr(
+            "content/content.json", load_fixture("html", "h5p_iframe.html")
+        )
     session = FakeSession()
     session.add(
         "HEAD",
@@ -295,14 +817,7 @@ def test_mixed_course_sync_tree_covers_common_module_surfaces(monkeypatch):
         page_url,
         FakeResponse(text=load_fixture("html", "page_module.html")),
     )
-    session.add(
-        "GET", h5p_url, FakeResponse(text=load_fixture("html", "h5p_view.html"))
-    )
-    session.add(
-        "GET",
-        h5p_iframe_url,
-        FakeResponse(text=load_fixture("html", "h5p_iframe.html")),
-    )
+    session.add("GET", h5p_package_url, FakeResponse(content=package.getvalue()))
     syncer.session = session
     monkeypatch.setattr(
         opencast,
@@ -327,27 +842,29 @@ def test_mixed_course_sync_tree_covers_common_module_surfaces(monkeypatch):
     assert session.count("HEAD", html_overview) == 1
     assert session.count("GET", html_overview) == 1
     assert session.count("GET", page_url) == 1
-    assert session.count("GET", h5p_url) == 1
-    assert session.count("GET", h5p_iframe_url) == 1
-    direct_node = syncer.root_node.go_to_path(
-        ["26ss", "Comprehensive Sync", "Materials", "direct.pdf"]
+    assert session.count("GET", h5p_package_url) == 1
+    direct_node = node_at_path(
+        syncer.root_node, ["26ss", "Comprehensive Sync", "Materials", "direct.pdf"]
     )
-    opencast_node = syncer.root_node.go_to_path(
-        ["26ss", "Comprehensive Sync", "Materials", "Page module"]
+    opencast_node = node_at_path(
+        syncer.root_node, ["26ss", "Comprehensive Sync", "Materials", "Page module"]
     )
     assert direct_node.remote_size == 1234
     assert opencast_node.remote_size == 5678
+    base_path = ["26ss", "Comprehensive Sync", "Materials"]
+    expected_sizes = {
+        ("Data folder", "Data", "Raw", "measurements.csv"): 1001,
+        ("Essay upload", "essay-template.docx"): 1002,
+        ("Essay upload", "Feedback", "feedback.txt"): 1003,
+    }
+    for suffix, expected_size in expected_sizes.items():
+        node = node_at_path(syncer.root_node, [*base_path, *suffix])
+        assert node.remote_size == expected_size
     assert_snapshot("mixed_course_tree.txt", node_rows(syncer.root_node))
 
 
 def test_opencast_lti_single_and_series_use_lti_and_api_routes(monkeypatch):
     courses = [load_json_fixture("moodle", "courses.json")[0]]
-    single_lti_url = (
-        "https://moodle.rwth-aachen.de/mod/lti/launch.php?id=501&triggerview=0"
-    )
-    series_lti_url = (
-        "https://moodle.rwth-aachen.de/mod/lti/launch.php?id=502&triggerview=0"
-    )
     lti_submit_url = "https://engage.streaming.rwth-aachen.de/lti"
     single_episode = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee"
     series_id = "series-1111-2222"
@@ -372,17 +889,34 @@ def test_opencast_lti_single_and_series_use_lti_and_api_routes(monkeypatch):
         courses,
         {101: load_json_fixture("moodle", "opencast_lti_course.json")},
     )
+    monkeypatch.setattr(
+        "syncmymoodle.moodle.get_ltis_by_course",
+        lambda session, wstoken, course_id: [
+            {"id": 9001, "coursemodule": 501},
+            {"id": 9002, "coursemodule": 502},
+        ],
+    )
+    launch_calls = []
+
+    def launch_data(session, wstoken, tool_id):
+        launch_calls.append(tool_id)
+        custom_name, custom_value, title = (
+            ("custom_id", single_episode, "Single recording")
+            if tool_id == 9001
+            else ("custom_series", series_id, "Series recordings")
+        )
+        return {
+            "endpoint": lti_submit_url,
+            "parameters": [
+                {"name": custom_name, "value": custom_value},
+                {"name": "resource_link_title", "value": title},
+                {"name": "oauth_consumer_key", "value": "fake-consumer"},
+                {"name": "oauth_signature", "value": "fake-signature"},
+            ],
+        }
+
+    monkeypatch.setattr("syncmymoodle.moodle.get_lti_launch_data", launch_data)
     session = FakeSession()
-    session.add(
-        "GET",
-        single_lti_url,
-        FakeResponse(text=load_fixture("opencast", "lti_single.html")),
-    )
-    session.add(
-        "GET",
-        series_lti_url,
-        FakeResponse(text=load_fixture("opencast", "lti_series.html")),
-    )
     session.add("POST", lti_submit_url, FakeResponse(text="ok"))
     session.add(
         "GET",
@@ -415,7 +949,6 @@ def test_opencast_lti_single_and_series_use_lti_and_api_routes(monkeypatch):
 
     sync.sync(syncer)
 
-    assert session.count("GET", single_lti_url) == 1
-    assert session.count("GET", series_lti_url) == 1
+    assert launch_calls == [9001, 9002]
     assert session.count("POST", lti_submit_url) == 2
     assert_snapshot("opencast_lti_tree.txt", node_rows(syncer.root_node))

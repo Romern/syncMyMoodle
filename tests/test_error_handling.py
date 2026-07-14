@@ -1,12 +1,18 @@
+import json
+import logging
 import sys
-from types import SimpleNamespace
 
 import pytest
+import requests
 
 import syncmymoodle.cli as cli
 from syncmymoodle import moodle
+from syncmymoodle.config import Config, ConfigValidationError
 from syncmymoodle.moodle import MOODLE_REST_URL
-from syncmymoodle.moodle_files import add_moodle_content_file_node
+from syncmymoodle.moodle_files import (
+    add_moodle_content_file_node,
+    add_moodle_file_node,
+)
 from syncmymoodle.node import Node
 from syncmymoodle.totp import hotp
 
@@ -43,32 +49,21 @@ def test_missing_config_file_fails_clearly(tmp_path, monkeypatch, capsys):
 # --------------------------------------------------------------------------
 
 
-def test_keyring_totp_secret_without_totp_provider_is_rejected(
-    tmp_path, monkeypatch, capsys
-):
-    keyring_calls = []
-    fake_keyring = SimpleNamespace(
-        get_password=lambda service, name: keyring_calls.append(name),
-        set_password=lambda service, name, value: keyring_calls.append(name),
-    )
-    monkeypatch.setattr(cli, "keyring", fake_keyring)
-    # Keep the run from picking up real config files.
-    monkeypatch.chdir(tmp_path)
-    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
-    monkeypatch.setattr(
-        sys,
-        "argv",
-        ["syncmymoodle", "--secretservice", "--secretservicetotpsecret", "--user", "u"],
-    )
-
-    with pytest.raises(SystemExit) as excinfo:
-        cli.main()
-
-    # The guard used to check a key that is never set ("secretservicetotpsecret"),
-    # letting the run continue into keyring lookups keyed on None.
-    assert excinfo.value.code == 1
-    assert "TOTP provider" in capsys.readouterr().out
-    assert keyring_calls == []
+def test_keyring_totp_secret_without_totp_provider_is_rejected():
+    with pytest.raises(
+        ConfigValidationError, match="auth.login.totp_serial is required"
+    ):
+        Config.from_dict(
+            {
+                "auth": {
+                    "user": "u",
+                    "login": {
+                        "provider": "keyring",
+                        "keyring_store_totp_secret": True,
+                    },
+                }
+            }
+        )
 
 
 # --------------------------------------------------------------------------
@@ -90,11 +85,26 @@ def test_get_all_courses_exits_clearly_on_api_error(caplog):
 
     assert excinfo.value.code == 1
     assert "invalidtoken" in caplog.text
+    assert "syncmymoodle auth status" in caplog.text
+    assert "syncmymoodle auth login" in caplog.text
+    assert "delete the cookie file" not in caplog.text
 
 
 def test_get_course_skips_course_on_api_error(caplog):
-    assert moodle.get_course(_error_session(), "token", 101) == []
+    assert moodle.get_course(_error_session(), "token", 101) is None
     assert "invalidtoken" in caplog.text
+
+
+def test_get_course_skips_cleanly_when_request_times_out(caplog):
+    session = FakeSession()
+
+    def timeout(url, kwargs):
+        raise requests.Timeout("Moodle did not respond")
+
+    session.add("POST", MOODLE_REST_URL, timeout)
+
+    assert moodle.get_course(session, "token", 101) is None
+    assert "Moodle did not respond" in caplog.text
 
 
 def test_get_assignment_skips_course_on_api_error(caplog):
@@ -136,6 +146,53 @@ def test_submission_files_tolerate_null_fields():
 
     files = moodle.get_assignment_submission_files(session, "token", 1, 2)
     assert files == [{"filename": "graded.pdf"}]
+
+
+def test_submission_response_is_not_logged(caplog):
+    payload = {
+        "lastattempt": None,
+        "feedback": None,
+        "diagnostic": "private-assignment-response",
+    }
+    session = FakeSession()
+    session.add(
+        "POST",
+        MOODLE_REST_URL,
+        FakeResponse(text=json.dumps(payload), json_payload=payload),
+    )
+    caplog.set_level(logging.INFO, logger="syncmymoodle.moodle")
+
+    assert moodle.get_assignment_submission_files(session, "token", 1, 2) == []
+
+    assert "private-assignment-response" not in caplog.text
+
+
+def test_equivalent_moodle_folder_entities_share_one_raw_node():
+    parent = Node("Section", 1, "Section", None)
+
+    add_moodle_file_node(
+        parent,
+        "/R&amp;D/",
+        "first.pdf",
+        "first",
+        "Folder File",
+        "https://example.test/first.pdf",
+    )
+    add_moodle_file_node(
+        parent,
+        "/R&D/",
+        "second.pdf",
+        "second",
+        "Folder File",
+        "https://example.test/second.pdf",
+    )
+
+    assert len(parent.children) == 1
+    assert parent.children[0].name == "R&amp;D"
+    assert [child.name for child in parent.children[0].children] == [
+        "first.pdf",
+        "second.pdf",
+    ]
 
 
 # --------------------------------------------------------------------------

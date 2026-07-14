@@ -1,23 +1,34 @@
-import json
 import logging
 import re
 import urllib.parse
 from dataclasses import dataclass
 from typing import Any, cast
 
+import requests
+
 from syncmymoodle.constants import (
     CHECKSUM_LENGTHS_BY_ALGO,
+    HTTP_TIMEOUT_SECONDS,
     MOODLE_URL,
+    OPENCAST_EPISODE_URL_RE,
+    OPENCAST_URL,
     RWTH_MOODLE_STATUS_URL,
 )
-from syncmymoodle.context import SyncContext
-from syncmymoodle.http_utils import parse_html
-from syncmymoodle.node import RemoteMarkerKind
+from syncmymoodle.context import BrowserSessionUnavailable, SyncContext
+from syncmymoodle.http_utils import (
+    HttpFailureKind,
+    classify_http_failure,
+    parse_html,
+    record_service_failure,
+    redact_url_secrets,
+    safe_request_error,
+)
+from syncmymoodle.node import Node, RemoteMarkerKind
 
 logger = logging.getLogger(__name__)
 
-OPENCAST_LTI_URL = "https://engage.streaming.rwth-aachen.de/lti"
-OPENCAST_SEARCH_URL = "https://engage.streaming.rwth-aachen.de/search/episode.json"
+OPENCAST_LTI_URL = f"{OPENCAST_URL}/lti"
+OPENCAST_SEARCH_URL = f"{OPENCAST_URL}/search/episode.json"
 
 
 @dataclass(frozen=True)
@@ -41,29 +52,60 @@ class OpencastTrack:
         return RemoteMarkerKind.CONTENT_HASH if self.checksum else None
 
 
+def add_track_node(
+    parent_node: Node,
+    name: str,
+    episode_id: Any,
+    track: OpencastTrack,
+) -> Node | None:
+    """Add a downloadable Opencast track with its remote metadata."""
+    return parent_node.add_child(
+        name,
+        episode_id,
+        "Opencast",
+        url=track.url,
+        etag=track.remote_marker,
+        etag_kind=track.remote_marker_kind,
+        remote_size=track.size,
+    )
+
+
 def log_backend_issue(
     ctx: SyncContext,
-    response_body: str | None = None,
+    reason: str,
     log: logging.Logger = logger,
 ) -> None:
-    """Log additional context for repeated Opencast backend issues.
+    record_service_failure(
+        ctx.service_outages,
+        OPENCAST_URL,
+        "Opencast",
+        HttpFailureKind.TRANSIENT,
+        reason,
+        log,
+        f"Check the RWTH ITC status page: {RWTH_MOODLE_STATUS_URL}",
+    )
 
-    We keep the response body at INFO level (only shown with --verbose) and
-    emit a hint to the RWTH ITC status page once the error counter exceeds a
-    small threshold.
-    """
-    ctx.opencast_error_count += 1
 
-    if response_body:
-        log.info(f"Opencast response body (truncated): {response_body[:1000]}")
-
-    if ctx.opencast_error_count >= 5 and not ctx.opencast_status_hint_logged:
-        log.warning(
-            "Multiple Opencast backend errors occurred. Please check the RWTH "
-            "ITC status page before reporting an issue on GitHub: "
-            f"{RWTH_MOODLE_STATUS_URL}"
-        )
-        ctx.opencast_status_hint_logged = True
+def _record_http_failure(
+    ctx: SyncContext,
+    status_code: int,
+    context: str,
+    log: logging.Logger,
+) -> None:
+    failure_kind = classify_http_failure(status_code)
+    assert failure_kind is not None
+    record_service_failure(
+        ctx.service_outages,
+        OPENCAST_URL,
+        "Opencast",
+        failure_kind,
+        f"{context} returned HTTP {status_code}",
+        log,
+        f"Check the RWTH ITC status page: {RWTH_MOODLE_STATUS_URL}",
+    )
+    if failure_kind is HttpFailureKind.TRANSIENT:
+        return
+    log.warning("Opencast: %s returned HTTP %s", context, status_code)
 
 
 def extract_episode_id(url: Any) -> str | None:
@@ -76,10 +118,7 @@ def extract_episode_id(url: Any) -> str | None:
     if episode_ids and episode_ids[0]:
         return str(episode_ids[0])
 
-    match = re.match(
-        r"^https://engage\.streaming\.rwth-aachen\.de/play/([a-zA-Z0-9-]{36})(?:[/?#].*)?$",
-        url,
-    )
+    match = OPENCAST_EPISODE_URL_RE.match(url)
     if match:
         return match.group(1)
 
@@ -99,27 +138,39 @@ def submit_lti_form(
     engage_data: dict[str, Any],
     context: str,
     log: logging.Logger = logger,
+    *,
+    endpoint: str = OPENCAST_LTI_URL,
 ) -> bool:
+    if ctx.service_outages.should_skip(OPENCAST_URL):
+        return False
     if not engage_data:
         log.warning("Opencast: missing LTI form fields for %s", context)
         return False
 
     try:
-        response = ctx.require_session().post(OPENCAST_LTI_URL, data=engage_data)
-    except Exception:
-        log.exception("Opencast: failed to submit LTI form for %s", context)
-        log_backend_issue(ctx, None, log)
+        response = ctx.require_session().post(
+            endpoint,
+            data=engage_data,
+            timeout=HTTP_TIMEOUT_SECONDS,
+        )
+    except requests.RequestException as error:
+        log_backend_issue(
+            ctx,
+            f"failed to submit LTI form for {context}: {safe_request_error(error)}",
+            log,
+        )
         return False
 
     if not (200 <= response.status_code < 300):
-        log.warning(
-            "Opencast: LTI form returned status %s for %s",
+        _record_http_failure(
+            ctx,
             response.status_code,
-            context,
+            f"LTI form for {context}",
+            log,
         )
-        log_backend_issue(ctx, response.text, log)
         return False
 
+    ctx.service_outages.record_available(OPENCAST_URL)
     return True
 
 
@@ -129,11 +180,19 @@ def fetch_lti_form_data(
     context: str,
     log: logging.Logger = logger,
 ) -> dict[str, Any] | None:
+    if ctx.service_outages.should_skip(OPENCAST_URL):
+        return None
     try:
-        response = ctx.require_session().get(url)
-    except Exception:
-        log.exception("Opencast: failed to fetch LTI form for %s", context)
-        log_backend_issue(ctx, None, log)
+        response = ctx.require_browser_session().get(
+            url,
+            timeout=HTTP_TIMEOUT_SECONDS,
+        )
+    except requests.RequestException as error:
+        log.warning(
+            "Opencast: failed to fetch LTI form for %s: %s",
+            context,
+            safe_request_error(error),
+        )
         return None
 
     if not (200 <= response.status_code < 300):
@@ -142,16 +201,12 @@ def fetch_lti_form_data(
             response.status_code,
             context,
         )
-        log_backend_issue(ctx, response.text, log)
         return None
 
     soup = parse_html(response.text)
     engage_data = extract_lti_form_data(soup)
     if not engage_data:
         log.info("Opencast: no LTI form fields found for %s", context)
-        log.info("------LTI-ERROR-HTML------")
-        log.info(f"url: {url}")
-        log.info(soup)
         return None
 
     return engage_data
@@ -163,7 +218,16 @@ def authenticate_episode(
     episode_id: str,
     log: logging.Logger = logger,
 ) -> bool:
-    if not ctx.session_key:
+    if ctx.service_outages.should_skip(OPENCAST_URL):
+        return False
+    try:
+        ctx.require_browser_session()
+    except BrowserSessionUnavailable as error:
+        if not ctx.browser_bootstrap_error_logged:
+            log.warning("Opencast: %s", error)
+            ctx.browser_bootstrap_error_logged = True
+        return False
+    if not ctx.browser_session_key:
         log.warning("Opencast: cannot launch episode without Moodle sesskey")
         return False
 
@@ -175,7 +239,7 @@ def authenticate_episode(
         {
             "courseid": course_id,
             "episodeid": episode_id,
-            "sesskey": ctx.session_key,
+            "sesskey": ctx.browser_session_key,
             "ocinstanceid": 1,
         }
     )
@@ -190,73 +254,66 @@ def authenticate_episode(
     return True
 
 
-def fetch_json(
+def fetch_result_list(
     ctx: SyncContext,
     url: str,
     context: str,
     log: logging.Logger = logger,
-) -> dict[str, Any] | None:
+) -> list[Any] | None:
+    if ctx.service_outages.should_skip(OPENCAST_URL):
+        return None
     try:
-        response = ctx.require_session().get(url)
-    except Exception:
-        log.exception("Opencast: failed to fetch %s from %s", context, url)
-        log_backend_issue(ctx, None, log)
+        response = ctx.require_session().get(url, timeout=HTTP_TIMEOUT_SECONDS)
+    except requests.RequestException as error:
+        log_backend_issue(
+            ctx,
+            f"failed to fetch {context} from {redact_url_secrets(url)}: "
+            f"{safe_request_error(error)}",
+            log,
+        )
         return None
 
     if not (200 <= response.status_code < 300):
-        log.error(
-            "Opencast: %s returned status %s for %s",
-            context,
+        _record_http_failure(
+            ctx,
             response.status_code,
-            url,
+            f"{context} from {redact_url_secrets(url)}",
+            log,
         )
-        log_backend_issue(ctx, response.text, log)
         return None
 
     try:
         payload = response.json()
     except ValueError:
-        log.error("Opencast: failed to decode JSON for %s from %s", context, url)
-        log_backend_issue(ctx, response.text, log)
+        log_backend_issue(
+            ctx,
+            f"{context} from {redact_url_secrets(url)} returned invalid JSON",
+            log,
+        )
         return None
 
     if not isinstance(payload, dict):
-        log.warning(
-            "Opencast: expected JSON object for %s, got %s",
-            context,
-            type(payload).__name__,
+        log_backend_issue(
+            ctx,
+            f"{context} returned {type(payload).__name__} instead of a JSON object",
+            log,
         )
-        log_backend_issue(ctx, response.text, log)
         return None
 
     if payload.get("error") or payload.get("errorcode"):
+        ctx.service_outages.record_available(OPENCAST_URL)
         log.error(
-            "Opencast: %s returned error%s: %s",
+            "Opencast: %s returned an error%s",
             context,
-            f" {payload.get('errorcode')}" if payload.get("errorcode") else "",
-            payload.get("error") or payload,
+            f" ({payload.get('errorcode')})" if payload.get("errorcode") else "",
         )
-        log_backend_issue(ctx, response.text, log)
         return None
 
-    return payload
-
-
-def get_result_list(
-    ctx: SyncContext,
-    payload: Any,
-    context: str,
-    log: logging.Logger = logger,
-) -> list[Any]:
-    result = payload.get("result") if isinstance(payload, dict) else None
+    result = payload.get("result")
     if not isinstance(result, list):
-        log.warning("Opencast: missing result list for %s", context)
-        log_backend_issue(
-            ctx,
-            json.dumps(payload, ensure_ascii=False) if payload is not None else None,
-            log,
-        )
-        return []
+        log_backend_issue(ctx, f"{context} response did not contain a result list", log)
+        return None
+    ctx.service_outages.record_available(OPENCAST_URL)
     if not result:
         log.warning("Opencast: empty result list for %s", context)
         return []
@@ -342,7 +399,7 @@ def opencast_track_from_api(track: dict[str, Any]) -> OpencastTrack | None:
     )
 
 
-def resolve_track_from_episode(
+def resolve_track_from_episode(  # noqa: C901 - legacy resolver awaiting decomposition
     ctx: SyncContext,
     episode_id: str,
     log: logging.Logger = logger,
@@ -351,12 +408,11 @@ def resolve_track_from_episode(
         return ctx.opencast_track_cache[episode_id]
 
     episode_url = f"{OPENCAST_SEARCH_URL}?id={episode_id}"
-    episodejson = fetch_json(ctx, episode_url, f"episode {episode_id}", log)
-    if episodejson is None:
-        return None
-
     tracks: list[tuple[int, OpencastTrack]] = []
-    for entry in get_result_list(ctx, episodejson, f"episode {episode_id}", log):
+    entries = fetch_result_list(ctx, episode_url, f"episode {episode_id}", log)
+    if entries is None:
+        return None
+    for entry in entries:
         if not isinstance(entry, dict):
             continue
         mediapackage = entry.get("mediapackage")
