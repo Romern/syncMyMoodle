@@ -8,7 +8,10 @@ Entry / orchestration:
     sync            walks courses -> sections -> modules into the node tree
 
 Auth:
+    moodle_tokens     persistent Moodle token model and stores
     rwth            RWTH SSO login flow and service/status checks
+    secret_providers
+                    secret storage provider abstraction and keyring provider
     totp            HOTP/TOTP code generation for 2FA login
 
 Moodle API:

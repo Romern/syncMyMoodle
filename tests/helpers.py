@@ -48,6 +48,23 @@ DEFAULT_CONFIG = {
 }
 
 
+class FakeKeyring:
+    def __init__(self, values: dict[tuple[str, str], str] | None = None) -> None:
+        self.values = {} if values is None else values
+
+    def get_keyring(self) -> object:
+        return object()
+
+    def get_password(self, service: str, name: str) -> str | None:
+        return self.values.get((service, name))
+
+    def set_password(self, service: str, name: str, value: str) -> None:
+        self.values[(service, name)] = value
+
+    def delete_password(self, service: str, name: str) -> None:
+        self.values.pop((service, name), None)
+
+
 @dataclass
 class FakeResponse:
     text: str = ""

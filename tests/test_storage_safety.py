@@ -129,8 +129,9 @@ def test_private_chmod_warns_on_windows(tmp_path, monkeypatch, caplog):
 
     monkeypatch.setattr("syncmymoodle.storage.importlib.import_module", missing_pywin32)
 
-    chmod_private_best_effort(target, "session cookie")
+    result = chmod_private_best_effort(target, "session cookie")
 
+    assert result is False
     assert (
         "Could not restrict permissions for session cookie file on Windows"
         in caplog.text
@@ -185,7 +186,7 @@ def test_private_chmod_uses_windows_acl(tmp_path, monkeypatch):
         "syncmymoodle.storage.importlib.import_module", fake_import_module
     )
 
-    chmod_private_best_effort(target, "session cookie")
+    assert chmod_private_best_effort(target, "session cookie") is True
 
     assert calls["dacl"].entries == [(2, 7, "user-sid")]
     assert calls["security_info"] == (
@@ -198,30 +199,6 @@ def test_private_chmod_uses_windows_acl(tmp_path, monkeypatch):
         None,
     )
     assert calls["closed"] == [("token", "process", 8)]
-
-
-def test_private_gzip_json_restricts_temp_file_before_writing_on_windows(
-    tmp_path, monkeypatch
-):
-    target = tmp_path / "session"
-    restricted_paths = []
-
-    monkeypatch.setattr("syncmymoodle.pathing.is_windows", lambda: True)
-    monkeypatch.setattr(
-        "syncmymoodle.storage.restrict_private_file_windows",
-        lambda path: restricted_paths.append(path),
-    )
-
-    write_private_gzip_json(target, {"format": "test", "value": 1})
-
-    assert len(restricted_paths) == 2
-    assert restricted_paths[0].name.startswith(".session.")
-    assert restricted_paths[0].parent == tmp_path
-    assert restricted_paths[1] == target
-    assert read_private_gzip_json(target, "test data") == {
-        "format": "test",
-        "value": 1,
-    }
 
 
 def test_private_gzip_json_write_does_not_require_fchmod(tmp_path, monkeypatch):

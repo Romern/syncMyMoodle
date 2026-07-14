@@ -52,11 +52,10 @@ def harden_private_file(path: Path, description: str) -> bool:
     if path.is_symlink():
         logger.warning("Refusing to use symlinked %s file: %s", description, path)
         return False
-    chmod_private_best_effort(path, description)
-    return True
+    return chmod_private_best_effort(path, description)
 
 
-def chmod_private_best_effort(path: Path, description: str) -> None:
+def chmod_private_best_effort(path: Path, description: str) -> bool:
     if pathing.is_windows():
         try:
             restrict_private_file_windows(path)
@@ -67,40 +66,44 @@ def chmod_private_best_effort(path: Path, description: str) -> None:
                 path,
                 error,
             )
-        return
+            return False
+        return True
     try:
         path.chmod(0o600)
     except OSError:
         logger.warning(
             "Could not restrict permissions for %s file: %s", description, path
         )
+        return False
+    return True
 
 
-def write_private_gzip_json(path: Path, payload: Any) -> None:
+def write_private_bytes(path: Path, data: bytes, description: str) -> None:
     path = path.expanduser()
     path.parent.mkdir(parents=True, exist_ok=True)
-
-    json_bytes = json.dumps(payload, separators=(",", ":")).encode("utf-8")
-    data = gzip.compress(json_bytes)
 
     fd, tmp_name = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
     tmp_path = Path(tmp_name)
     try:
+        # The temporary file is created beside the destination, so its mode or
+        # Windows ACL survives the atomic replace. Secure it before writing any
+        # private data rather than trying to repair permissions afterwards.
         if pathing.is_windows():
-            chmod_private_best_effort(tmp_path, "temporary private data")
+            if not chmod_private_best_effort(tmp_path, f"temporary {description}"):
+                raise PermissionError(
+                    f"could not restrict permissions for temporary {description} file"
+                )
         elif (fchmod := getattr(os, "fchmod", None)) is not None:
             try:
                 fchmod(fd, 0o600)
-            except OSError:
-                logger.warning(
-                    "Could not restrict permissions for temporary private file: %s",
-                    tmp_path,
-                )
+            except OSError as error:
+                raise PermissionError(
+                    f"could not restrict permissions for temporary {description} file"
+                ) from error
         with os.fdopen(fd, "wb") as f:
             fd = -1
             f.write(data)
         os.replace(tmp_path, path)
-        chmod_private_best_effort(path, "private data")
     finally:
         if fd >= 0:
             os.close(fd)
@@ -108,6 +111,15 @@ def write_private_gzip_json(path: Path, payload: Any) -> None:
             tmp_path.unlink(missing_ok=True)
         except OSError:
             logger.warning("Could not remove temporary private file: %s", tmp_path)
+
+
+def write_private_text(path: Path, text: str, description: str) -> None:
+    write_private_bytes(path, text.encode("utf-8"), description)
+
+
+def write_private_gzip_json(path: Path, payload: Any) -> None:
+    json_bytes = json.dumps(payload, separators=(",", ":")).encode("utf-8")
+    write_private_bytes(path, gzip.compress(json_bytes), "private data")
 
 
 def read_private_gzip_json(path: Path, description: str) -> Any:

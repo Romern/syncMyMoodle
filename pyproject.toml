@@ -30,12 +30,12 @@ dependencies = [
   "tqdm>=4.0.0",
   "lxml>=5.0.0",
   "latex2mathml>=3.77.0",
+  "keyring>=20.0.0",
   "pywin32>=306; platform_system == 'Windows'",
-  "tomli-w>=1.0.0"
+  "tomlkit>=0.13.0",
 ]
 
 [project.optional-dependencies]
-keyring = ["keyring>=20.0.0"]
 test = [
   "ruff",
   "mypy",
