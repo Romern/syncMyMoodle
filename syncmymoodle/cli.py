@@ -1,6 +1,5 @@
 #!/usr/bin/env python3
 
-import getpass
 import json
 import logging
 import sys
@@ -15,13 +14,12 @@ from argparse import (
 from collections.abc import Callable, Mapping, MutableMapping, Sequence
 from dataclasses import dataclass, field
 from importlib import metadata, resources
-from itertools import groupby
 from pathlib import Path
-from typing import Any
+from typing import Any, NoReturn
 
 import tomlkit
 
-from syncmymoodle import cleanup, course_cache, downloader, pathing, rwth, sync
+from syncmymoodle import cleanup, course_cache, downloader, output, pathing, rwth, sync
 from syncmymoodle import moodle as moodle_api
 from syncmymoodle.config import (
     CONFIG_OPTIONS,
@@ -74,6 +72,13 @@ STARTER_CONFIG_RESOURCE = "config.toml.example"
 keyring: Any = None
 
 
+class TerminalArgumentParser(ArgumentParser):
+    def error(self, message: str) -> NoReturn:
+        self.print_usage(sys.stderr)
+        output.error(f"{self.prog}: error: {message}")
+        self.exit(2)
+
+
 class DeprecatedAliasAction(Action):
     def __init__(
         self,
@@ -93,10 +98,7 @@ class DeprecatedAliasAction(Action):
     ) -> None:
         del parser
         assert option_string is not None
-        print(
-            f"warning: {option_string} is deprecated; use {self.replacement} instead",
-            file=sys.stderr,
-        )
+        output.warning(f"{option_string} is deprecated; use {self.replacement} instead")
         setattr(namespace, self.dest, self.const if self.nargs == 0 else values)
 
 
@@ -120,7 +122,7 @@ def package_version() -> str:
 
 
 def build_parser() -> ArgumentParser:
-    parser = ArgumentParser(
+    parser = TerminalArgumentParser(
         prog="syncmymoodle",
         allow_abbrev=False,
         description=(
@@ -186,6 +188,12 @@ def build_parser() -> ArgumentParser:
         const=logging.INFO,
         default=logging.WARNING,
         help="show information useful for debugging",
+    )
+    parser.add_argument(
+        "--color",
+        choices=output.COLOR_MODES,
+        default=output.DEFAULT_COLOR_MODE,
+        help="control colored terminal output (default: auto)",
     )
     parser.add_argument(
         "--show-filtered",
@@ -638,7 +646,7 @@ def migrate_config_command(args: Namespace, parser: ArgumentParser) -> None:
         ctx.auth.totp_secret = totp_secret if isinstance(totp_secret, str) else None
         store = token_store_from_config(config, None)
         require_store_available(store, parser)
-        print(
+        output.phase(
             "Logging in once to obtain Moodle tokens for the migrated configuration..."
         )
         rwth.login(ctx, logger, reuse_cached_session=False)
@@ -658,15 +666,15 @@ def migrate_config_command(args: Namespace, parser: ArgumentParser) -> None:
         ValueError,
     ) as error:
         parser.error(str(error))
-    print(f"Wrote TOML config to {output_path}")
-    print(f"Stored Moodle tokens in {store.description}")
+    output.success(f"Wrote TOML config to {output_path}")
+    output.success(f"Stored Moodle tokens in {store.description}")
     if raw.get("password") or raw.get("totpsecret"):
-        print(
+        output.warning(
             f"The source JSON was left unchanged and still contains secrets: {input_path}"
         )
     else:
-        print(f"The source JSON was left unchanged: {input_path}")
-    print(
+        output.print(f"The source JSON was left unchanged: {input_path}")
+    output.print(
         "Review the migrated TOML and source JSON, then delete the source JSON "
         "after confirming the migration."
     )
@@ -675,9 +683,11 @@ def migrate_config_command(args: Namespace, parser: ArgumentParser) -> None:
 def path_config_command() -> None:
     config_dir = pathing.user_config_dir()
     discovered_path = discover_config_file(config_dir)
-    print(f"Global config directory: {config_dir}")
-    print(f"Default TOML config: {global_config_path()}")
-    print(f"Discovered config: {discovered_path if discovered_path else '<none>'}")
+    output.print(f"Global config directory: {config_dir}")
+    output.print(f"Default TOML config: {global_config_path()}")
+    output.print(
+        f"Discovered config: {discovered_path if discovered_path else '<none>'}"
+    )
 
 
 def check_config_command(args: Namespace, parser: ArgumentParser) -> None:
@@ -686,19 +696,19 @@ def check_config_command(args: Namespace, parser: ArgumentParser) -> None:
     try:
         read_config_file(config_path)
     except ConfigValidationError as error:
-        print(f"Config is invalid: {config_path}", file=sys.stderr)
+        output.error(f"Config is invalid: {config_path}")
         for detail in error.errors:
-            print(f"- {detail}", file=sys.stderr)
+            output.error(f"- {detail}")
         raise SystemExit(1) from error
     except (OSError, ValueError) as error:
-        print(f"Could not read config: {config_path}: {error}", file=sys.stderr)
+        output.error(f"Could not read config: {config_path}: {error}")
         raise SystemExit(1) from error
-    print(f"Config is valid: {config_path}")
+    output.success(f"Config is valid: {config_path}")
 
 
 def run_config_command(args: Namespace, parser: ArgumentParser) -> None:
     if args.config_command == "example":
-        print(starter_config_text(), end="")
+        output.raw(starter_config_text())
         return
     if args.config_command == "path":
         path_config_command()
@@ -724,29 +734,15 @@ def login_auth_command(
     except ProviderSecretError as error:
         parser.error(str(error))
     require_store_available(store, parser)
-    print("Logging in to obtain the current Moodle tokens...")
+    output.phase("Logging in to obtain the current Moodle tokens...")
     rwth.login(ctx, logger, reuse_cached_session=False)
     tokens = acquire_validated_moodle_tokens(ctx, parser)
     try:
         store_tokens_verified(store, tokens)
     except ProviderSecretError as error:
         parser.error(str(error))
-    print(f"Stored Moodle tokens in {store.description}")
-    print(f"Browser session cached in {ctx.config.cookie_file}")
-
-
-def prompt_text(prompt: str, default: str | None = None) -> str:
-    suffix = f" [{default}]" if default is not None else ""
-    value = input(f"{prompt}{suffix}: ").strip()
-    return default if value == "" and default is not None else value
-
-
-def prompt_yes_no(prompt: str, default: bool = False) -> bool:
-    suffix = "Y/n" if default else "y/N"
-    value = input(f"{prompt} [{suffix}]: ").strip().lower()
-    if not value:
-        return default
-    return value in {"y", "yes"}
+    output.success(f"Stored Moodle tokens in {store.description}")
+    output.print(f"Browser session cached in {ctx.config.cookie_file}")
 
 
 def setup_sync_directory_value(value: str) -> str:
@@ -756,13 +752,13 @@ def setup_sync_directory_value(value: str) -> str:
 def prompt_setup_config(
     parser: ArgumentParser,
 ) -> tuple[ConfigDict, str, str]:
-    username = prompt_text("RWTH SSO username")
+    username = output.prompt("RWTH SSO username")
     if not username:
         parser.error("RWTH SSO username is required")
-    totp_serial = prompt_text("RWTH SSO TOTP serial (for example, TOTP12345678)")
+    totp_serial = output.prompt("RWTH SSO TOTP serial (for example, TOTP12345678)")
     if not totp_serial:
         parser.error("RWTH SSO TOTP serial is required")
-    sync_directory = prompt_text(
+    sync_directory = output.prompt(
         "Directory to sync Moodle files to",
         str(Path.cwd()),
     )
@@ -859,19 +855,18 @@ def prompt_setup_token_store(
     backend = load_keyring_backend() if keyring_backend is None else keyring_backend
     keyring_store = KeyringTokenStore(KeyringProvider(backend), username)
     availability = keyring_store.check_available()
-    use_keyring = availability.available and prompt_yes_no(
+    use_keyring = availability.available and output.confirm(
         "Store Moodle tokens in the system keyring (recommended)", default=True
     )
     if use_keyring:
         config["auth.tokens.store"] = "keyring"
         return
     if not availability.available:
-        print(
-            f"System keyring storage is unavailable ({availability.reason}).",
-            file=sys.stderr,
+        output.warning(
+            f"System keyring storage is unavailable ({availability.reason})."
         )
     default_path = pathing.user_config_dir() / "moodle-tokens.env"
-    env_file = prompt_text(
+    env_file = output.prompt(
         "File for securely storing Moodle tokens",
         str(default_path),
     )
@@ -900,7 +895,7 @@ def prompt_setup_password_manager(
 ) -> None:
     for provider_name in detect_password_manager_clis():
         display_name = password_manager_display_name(provider_name)
-        if not prompt_yes_no(f"Use {display_name} for RWTH sign-ins"):
+        if not output.confirm(f"Use {display_name} for RWTH sign-ins"):
             continue
         if provider_name == "1password":
             password_example = "op://Private/RWTH/password"
@@ -908,14 +903,14 @@ def prompt_setup_password_manager(
         else:
             password_example = otp_example = "rwth/sso"
         password_ref = normalize_secret_reference(
-            prompt_text(
+            output.prompt(
                 f"{display_name} password reference (for example, {password_example})"
             )
         )
         if not password_ref:
             parser.error(f"{display_name} password reference is required")
         otp_ref = normalize_secret_reference(
-            prompt_text(
+            output.prompt(
                 f"{display_name} TOTP reference (for example, {otp_example}; "
                 "optional, blank means prompt for codes)"
             )
@@ -959,7 +954,7 @@ def setup_command(
     store = token_store_from_config(ctx.config, keyring_backend)
     require_store_available(store, parser)
 
-    print("Logging in once to obtain Moodle tokens...")
+    output.phase("Logging in once to obtain Moodle tokens...")
     rwth.login(
         ctx,
         logger,
@@ -968,7 +963,7 @@ def setup_command(
     )
     tokens = acquire_validated_moodle_tokens(ctx, parser)
     limited_opencast = tokens.private_token is None
-    if limited_opencast and not prompt_yes_no(
+    if limited_opencast and not output.confirm(
         "Moodle did not provide the browser login token required for embedded "
         "Opencast downloads. Finish setup with limited Opencast support"
     ):
@@ -983,19 +978,19 @@ def setup_command(
             write_private_text(target_path, text, "global config")
     except (OSError, ProviderSecretError, ValueError) as error:
         parser.error(f"could not write global config {target_path}: {error}")
-    print(f"Setup complete. Wrote global config to {target_path}")
-    print(f"Stored Moodle tokens in {store.description}")
-    print(
+    output.success(f"Setup complete. Wrote global config to {target_path}")
+    output.success(f"Stored Moodle tokens in {store.description}")
+    output.print(
         "Normal syncs use the stored Moodle tokens and will not ask for your "
         "RWTH password or TOTP code."
     )
     if limited_opencast:
-        print(
+        output.warning(
             "Embedded Opencast downloads may stop working after the cached browser "
             "session expires. Run `syncmymoodle auth reset-token` to create a "
             "complete token pair."
         )
-    print("Run `syncmymoodle` to start syncing.")
+    output.print("Run `syncmymoodle` to start syncing.")
 
 
 @dataclass(frozen=True)
@@ -1055,7 +1050,9 @@ def migrate_auth_command(
         if tokens is None:
             ctx = SyncContext(config=config)
             configure_secret_resolvers(ctx, args, keyring_backend)
-            print("No stored Moodle tokens found; logging in once before migration...")
+            output.phase(
+                "No stored Moodle tokens found; logging in once before migration..."
+            )
             rwth.login(ctx, logger, reuse_cached_session=False)
             tokens = acquire_validated_moodle_tokens(ctx, parser)
         else:
@@ -1087,24 +1084,26 @@ def migrate_auth_command(
     except (ConfigValidationError, OSError, ProviderSecretError, ValueError) as error:
         parser.error(str(error))
 
-    print(
+    output.success(
         f"Copied Moodle tokens to {destination.description} and updated {config_path}"
     )
     if source.description != destination.description:
-        print(f"The previous {source.description} was left untouched.")
+        output.print(f"The previous {source.description} was left untouched.")
 
 
-def sign_in_method_description(config: Config, keyring_backend: Any) -> str:
+def sign_in_method_status(config: Config, keyring_backend: Any) -> tuple[str, bool]:
     source = config.auth_source
     if isinstance(source, KeyringAuthSource):
         keyring_provider = KeyringProvider(keyring_backend)
+        availability = keyring_provider.check_available()
         return (
-            "system keyring "
-            f"({provider_availability_text(keyring_provider.check_available())})"
+            f"system keyring ({provider_availability_text(availability)})",
+            availability.available,
         )
     if isinstance(source, EnvFileAuthSource):
-        state = "available" if source.path.is_file() else "missing"
-        return f"protected environment file {source.path} ({state})"
+        available = source.path.is_file()
+        state = "available" if available else "missing"
+        return f"protected environment file {source.path} ({state})", available
     if isinstance(source, ExternalAuthSource):
         try:
             availability = build_external_secret_provider(
@@ -1114,7 +1113,8 @@ def sign_in_method_description(config: Config, keyring_backend: Any) -> str:
             availability = ProviderAvailability(False, str(error))
         return (
             f"{password_manager_display_name(source.provider)} CLI "
-            f"({provider_availability_text(availability)})"
+            f"({provider_availability_text(availability)})",
+            availability.available,
         )
     if isinstance(source, CommandAuthSource):
         command_provider = CommandSecretProvider(
@@ -1124,9 +1124,12 @@ def sign_in_method_description(config: Config, keyring_backend: Any) -> str:
         availability = command_provider.check_available()
         if availability.available and source.otp_command:
             availability = command_provider.check_otp_available()
-        return f"configured command ({provider_availability_text(availability)})"
+        return (
+            f"configured command ({provider_availability_text(availability)})",
+            availability.available,
+        )
     if isinstance(source, PromptAuthSource):
-        return "interactive prompt when needed"
+        return "interactive prompt when needed", True
     raise AssertionError(f"unknown authentication source: {source!r}")
 
 
@@ -1160,17 +1163,18 @@ def report_stored_moodle_tokens(
             if availability.available
             else f"unavailable: {availability.reason}"
         )
-        print(f"Token storage: {store.description} ({state})")
+        report = output.success if availability.available else output.failure
+        report(f"Token storage: {store.description} ({state})")
         if not availability.available:
-            print("Moodle tokens: unavailable")
+            output.failure("Moodle tokens: unavailable")
             return True
         tokens = store.load()
     except ProviderSecretError as error:
-        print(f"Moodle tokens: unavailable ({error})")
+        output.failure(f"Moodle tokens: unavailable ({error})")
         return True
     if tokens is None:
-        print("Moodle tokens: missing")
-        print("Run `syncmymoodle auth login` to create them.")
+        output.caution("Moodle tokens: missing")
+        output.caution("Run `syncmymoodle auth login` to create them.")
         return True
     return report_moodle_tokens(config, tokens)
 
@@ -1179,25 +1183,25 @@ def report_moodle_tokens(config: Config, tokens: MoodleTokens) -> bool:
     token_status = moodle_api.validate_mobile_tokens(tokens)
     failed = False
     if token_status.kind is moodle_api.TokenValidationKind.VALID:
-        print("Moodle API token: valid")
-        print("API token expiry: not reported by Moodle")
+        output.success("Moodle API token: valid")
+        output.print("API token expiry: not reported by Moodle")
     elif token_status.kind is moodle_api.TokenValidationKind.INVALID:
-        print(f"Moodle API token: invalid ({token_status.detail})")
-        print("Run `syncmymoodle auth login` to replace it.")
+        output.failure(f"Moodle API token: invalid ({token_status.detail})")
+        output.caution("Run `syncmymoodle auth login` to replace it.")
         failed = True
     else:
-        print(f"Moodle API token: unknown ({token_status.detail})")
+        output.caution(f"Moodle API token: unknown ({token_status.detail})")
         failed = True
 
     if tokens.private_token:
-        print(
+        output.print(
             "Browser login token: present "
             "(not tested because Moodle limits how often it can be used)"
         )
     else:
-        print("Browser login token: missing")
+        output.caution("Browser login token: missing")
         if config.link_source_enabled("opencast"):
-            print(
+            output.caution(
                 "Embedded Opencast needs a browser login token; run "
                 "`syncmymoodle auth reset-token`."
             )
@@ -1209,15 +1213,15 @@ def report_cached_session(cookie_file: str) -> None:
     session_status = rwth.cached_session_status(Path(cookie_file))
     if session_status.kind is rwth.SessionStatusKind.VALID:
         assert session_status.remaining_seconds is not None
-        print("Cached browser session: valid")
-        print(f"Remaining: {format_duration(session_status.remaining_seconds)}")
+        output.success("Cached browser session: valid")
+        output.print(f"Remaining: {format_duration(session_status.remaining_seconds)}")
     elif session_status.kind is rwth.SessionStatusKind.EXPIRED:
-        print("Cached browser session: expired")
+        output.caution("Cached browser session: expired")
     elif session_status.kind is rwth.SessionStatusKind.MISSING:
-        print("Cached browser session: missing")
+        output.caution("Cached browser session: missing")
     else:
         detail = f" ({session_status.detail})" if session_status.detail else ""
-        print(f"Cached browser session: unknown{detail}")
+        output.caution(f"Cached browser session: unknown{detail}")
 
 
 def auth_status_command(
@@ -1229,10 +1233,13 @@ def auth_status_command(
     config_path = auth_config.path
     config = auth_config.config
     backend = load_keyring_backend() if keyring_backend is None else keyring_backend
-    print(f"Configuration: {config_path}")
+    output.print(f"Configuration: {config_path}")
     account = config.user or "<missing>"
-    print(f"Account: {account} @ {MOODLE_NETLOC}")
-    print(f"RWTH sign-in method: {sign_in_method_description(config, backend)}")
+    account_report = output.print if config.user else output.caution
+    account_report(f"Account: {account} @ {MOODLE_NETLOC}")
+    sign_in_method, sign_in_available = sign_in_method_status(config, backend)
+    sign_in_report = output.print if sign_in_available else output.caution
+    sign_in_report(f"RWTH sign-in method: {sign_in_method}")
     failed = report_stored_moodle_tokens(config, backend)
     report_cached_session(config.cookie_file)
     if failed:
@@ -1245,25 +1252,25 @@ def forget_auth_command(
     keyring_backend: Any,
 ) -> None:
     config = load_auth_config(args, parser).config
-    print("This removes authentication data stored only on this installation.")
-    print(
+    output.caution("This removes authentication data stored only on this installation.")
+    output.caution(
         "The shared Moodle API token, configuration, and RWTH sign-in secrets "
         "will remain unchanged."
     )
     if not isinstance(config.auth_source, PromptAuthSource):
-        print(
+        output.caution(
             "The configured RWTH sign-in method remains available, so a later sync "
             "can sign in and store local Moodle tokens again."
         )
-    if not prompt_yes_no("Forget local Moodle tokens and cached browser session"):
-        print("Local authentication data was left unchanged.")
+    if not output.confirm("Forget local Moodle tokens and cached browser session"):
+        output.caution("Local authentication data was left unchanged.")
         return
 
     errors: list[str] = []
     try:
         store = token_store_from_config(config, keyring_backend)
         store.delete()
-        print(f"Removed Moodle tokens from {store.description} (if present).")
+        output.success(f"Removed Moodle tokens from {store.description} (if present).")
     except ProviderSecretError as error:
         errors.append(f"Moodle tokens: {error}")
 
@@ -1271,17 +1278,17 @@ def forget_auth_command(
     try:
         cookie_file.unlink()
     except FileNotFoundError:
-        print(f"Cached browser session was already absent ({cookie_file}).")
+        output.print(f"Cached browser session was already absent ({cookie_file}).")
     except OSError as error:
         errors.append(f"cached browser session {cookie_file}: {error}")
     else:
-        print(f"Removed cached browser session ({cookie_file}).")
+        output.success(f"Removed cached browser session ({cookie_file}).")
 
     if errors:
         parser.error(
             "could not forget all local authentication data: " + "; ".join(errors)
         )
-    print(
+    output.success(
         "Local authentication data forgotten; the shared Moodle API token "
         "was not reset."
     )
@@ -1293,13 +1300,13 @@ def reset_token_auth_command(
     keyring_backend: Any,
 ) -> None:
     ctx = configured_auth_context(args, parser, keyring_backend)
-    print("This resets the shared Moodle API token.")
-    print(
+    output.caution("This resets the shared Moodle API token.")
+    output.caution(
         "The Moodle app and every other syncMyMoodle installation using it "
         "will need to authenticate again. Other Moodle service tokens are unaffected."
     )
-    if not prompt_yes_no("Reset the shared Moodle API token"):
-        print("Token reset cancelled.")
+    if not output.confirm("Reset the shared Moodle API token"):
+        output.caution("Token reset cancelled.")
         return
     ctx.config.dry_run = False
     try:
@@ -1307,7 +1314,7 @@ def reset_token_auth_command(
     except ProviderSecretError as error:
         parser.error(str(error))
     require_store_available(store, parser)
-    print("Logging in before the explicit token reset...")
+    output.phase("Logging in before the explicit token reset...")
     rwth.login(ctx, logger, reuse_cached_session=False)
     if ctx.session_key is None:
         parser.error("logged-in Moodle session did not provide a session key")
@@ -1327,7 +1334,9 @@ def reset_token_auth_command(
         parser.error(
             f"token was reset but the replacement could not be stored: {error}"
         )
-    print(f"Reset and stored the replacement Moodle tokens in {store.description}")
+    output.success(
+        f"Reset and stored the replacement Moodle tokens in {store.description}"
+    )
 
 
 def run_auth_command(
@@ -1379,42 +1388,44 @@ def clean_conflicts_command(args: Namespace, parser: ArgumentParser) -> None:
     root = cleanup_root_from_args(args, parser)
     conflicts = cleanup.iter_conflicts(root)
     plan = cleanup.conflict_cleanup_plan(conflicts)
-    action = "Deleting" if args.apply else "Would delete"
-    for path in plan.remove:
-        print(f"{action}: {path}")
     if args.apply:
         cleanup.delete_paths(plan.remove)
+    action = "Deleted" if args.apply else "Would delete"
+    report = output.success if args.apply else output.caution
+    for path in plan.remove:
+        report(f"{action}: {path}")
 
-    print(
+    report(
         f"Scanned {count_phrase(len(conflicts), 'syncconflict file', 'syncconflict files')}; "
         f"{count_phrase(len(plan.remove), 'file', 'files')} "
         f"{'deleted' if args.apply else 'would be deleted'}; "
         f"{count_phrase(len(plan.keep), 'unique differing conflict file', 'unique differing conflict files')} kept."
     )
     if not args.apply:
-        print("Dry run only. Re-run with --apply to delete these files.")
+        output.caution("Dry run only. Re-run with --apply to delete these files.")
 
 
 def clean_caches_command(args: Namespace, parser: ArgumentParser) -> None:
     root = cleanup_root_from_args(args, parser)
     cache_paths = cleanup.iter_course_caches(root)
-    print(
+    output.caution(
         "This resets syncMyMoodle metadata caches. It is usually only useful "
         "when recovering from broken or stale cache metadata."
     )
-    action = "Deleting" if args.apply else "Would delete"
-    for path in cache_paths:
-        print(f"{action}: {path}")
     if args.apply:
         cleanup.delete_paths(cache_paths)
+    action = "Deleted" if args.apply else "Would delete"
+    report = output.success if args.apply else output.caution
+    for path in cache_paths:
+        report(f"{action}: {path}")
 
-    print(
+    report(
         f"Scanned {root}; "
         f"{count_phrase(len(cache_paths), 'cache file', 'cache files')} "
         f"{'deleted' if args.apply else 'would be deleted'}."
     )
     if not args.apply:
-        print(
+        output.caution(
             "Dry run only. Re-run with --apply to delete these files. "
             "Do this only when you intentionally want the next sync to rebuild "
             "course metadata caches."
@@ -1471,15 +1482,15 @@ def get_or_prompt_stored_secret(
     get_secret: Callable[[str], str | None],
     store_secret: Callable[[str, str], None],
     reference: str,
-    prompt: str,
+    label: str,
 ) -> str:
     secret = get_secret(reference)
     if secret:
         return secret
 
-    secret = getpass.getpass(prompt)
+    secret = output.prompt_secret(label)
     if not secret:
-        raise ProviderSecretError(f"{prompt.rstrip(':')} is required")
+        raise ProviderSecretError(f"{label} is required")
     store_secret(reference, secret)
     return secret
 
@@ -1509,7 +1520,7 @@ def resolve_keyring_credentials(
                 provider.get_secret,
                 provider.store_secret,
                 auth.user,
-                "Password:",
+                "Password",
             )
         if store_totp_secret and not auth.totp_secret:
             assert auth.totp_serial is not None
@@ -1517,7 +1528,7 @@ def resolve_keyring_credentials(
                 provider.get_secret,
                 provider.store_secret,
                 auth.totp_serial,
-                "TOTP-Secret:",
+                "TOTP-Secret",
             )
     except ProviderSecretError as error:
         logger.critical("%s", error)
@@ -1850,33 +1861,55 @@ def configure_browser_session_resolver(ctx: SyncContext) -> None:
     ctx.browser_session_resolver = resolve
 
 
+def selected_color_mode(argv: Sequence[str] | None) -> output.ColorMode:
+    arguments = sys.argv[1:] if argv is None else argv
+    selected = output.DEFAULT_COLOR_MODE
+    for index, argument in enumerate(arguments):
+        candidate: str | None = None
+        if argument == "--color" and index + 1 < len(arguments):
+            candidate = arguments[index + 1]
+        elif argument.startswith("--color="):
+            candidate = argument.partition("=")[2]
+        if candidate in output.COLOR_MODES:
+            selected = candidate
+    return selected
+
+
 def main(argv: Sequence[str] | None = None) -> None:
-    parser = build_parser()
-    args = parser.parse_args(argv)
-    validate_command_option_scope(args, parser)
-    logging.basicConfig(level=args.loglevel)
-    if args.command == "setup":
-        setup_command(args, parser, None)
-        return
-    if args.command == "config":
-        run_config_command(args, parser)
-        return
-    if args.command == "auth":
-        run_auth_command(args, parser, None)
-        return
-    if args.command == "clean":
-        run_clean_command(args, parser)
-        return
-    if (
-        not args.config
-        and discover_config_file(pathing.user_config_dir()) is None
-        and not has_cli_config_overrides(args)
-    ):
-        legacy_path = discover_json_migration_input()
-        if legacy_path is not None:
-            parser.error(legacy_json_migration_message(legacy_path))
-        parser.error("no global config found; run `syncmymoodle setup` first")
-    run(context_from_args(args, parser), show_filtered=args.show_filtered)
+    with output.use_output(selected_color_mode(argv)):
+        parser = build_parser()
+        args = parser.parse_args(argv)
+        try:
+            validate_command_option_scope(args, parser)
+            output.configure_logging(args.loglevel)
+            if args.command == "setup":
+                setup_command(args, parser, None)
+                return
+            if args.command == "config":
+                run_config_command(args, parser)
+                return
+            if args.command == "auth":
+                run_auth_command(args, parser, None)
+                return
+            if args.command == "clean":
+                run_clean_command(args, parser)
+                return
+            if (
+                not args.config
+                and discover_config_file(pathing.user_config_dir()) is None
+                and not has_cli_config_overrides(args)
+            ):
+                legacy_path = discover_json_migration_input()
+                if legacy_path is not None:
+                    parser.error(legacy_json_migration_message(legacy_path))
+                parser.error("no global config found; run `syncmymoodle setup` first")
+            ctx = context_from_args(args, parser)
+            run(ctx, show_filtered=args.show_filtered)
+            if ctx.stats.failed:
+                raise SystemExit(1)
+        except KeyboardInterrupt:
+            output.error("Interrupted.")
+            raise SystemExit(130) from None
 
 
 def load_stored_moodle_tokens(
@@ -1914,7 +1947,7 @@ def reauthenticate_moodle_tokens(
             "method requires interaction. Run `syncmymoodle auth login`."
         )
         raise SystemExit(1)
-    print("Automatically re-authenticating with RWTH SSO...")
+    ctx.output.phase("Automatically re-authenticating with RWTH SSO...")
     rwth.login(ctx, logger, reuse_cached_session=False)
     assert ctx.auth.user is not None
     try:
@@ -1961,18 +1994,7 @@ def report_filtered_items(ctx: SyncContext, show_details: bool) -> None:
     items = sorted(ctx.filtered_items)
     if not items:
         return
-    count = len(items)
-    if not show_details:
-        noun = "item" if count == 1 else "items"
-        print(f"Filtered {count} {noun}; use --show-filtered for details.")
-        return
-
-    print(f"Filtered items ({count}):")
-    for config_key, group in groupby(items, key=lambda item: item.config_key):
-        grouped_items = list(group)
-        print(f"  {config_key} ({len(grouped_items)}):")
-        for item in grouped_items:
-            print(f"    {item.category}: {item.item} - {item.reason}")
+    ctx.output.filtered_items(items, show_details=show_details)
 
 
 def run(ctx: SyncContext, *, show_filtered: bool = False) -> None:
@@ -1992,17 +2014,18 @@ def run(ctx: SyncContext, *, show_filtered: bool = False) -> None:
         user_private_access_key,
     )
     configure_browser_session_resolver(ctx)
-    print("Syncing file tree...")
-    sync.sync(ctx)
-    if ctx.config.dry_run:
-        print("Dry run: listing files that would be downloaded...")
-    else:
-        print("Downloading files...")
-    downloader.download_all_files(ctx, logger)
-    if not ctx.config.dry_run:
-        print("Saving root node as cache...")
-        course_cache.cache_root_node(ctx, logger)
+    with ctx.output.sync_progress:
+        sync.sync(ctx)
+        downloader.download_all_files(ctx, logger)
+        if not ctx.config.dry_run:
+            ctx.output.sync_progress.finalizing("saving course metadata")
+            course_cache.cache_root_node(ctx, logger)
     report_filtered_items(ctx, show_filtered)
+    ctx.output.summary(
+        ctx.stats,
+        len(ctx.filtered_items),
+        dry_run=ctx.config.dry_run,
+    )
 
 
 if __name__ == "__main__":

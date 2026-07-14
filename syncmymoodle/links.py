@@ -134,6 +134,8 @@ def scan_for_links(  # noqa: C901 - legacy parser awaiting decomposition
             if filters.should_skip_url(ctx, text, "link"):
                 return
 
+            ctx.output.sync_progress.module_status("checking linked resource")
+
             def url_allowed(url: str) -> bool:
                 return filters.require_url_allowed(
                     ctx,
@@ -183,6 +185,7 @@ def scan_for_links(  # noqa: C901 - legacy parser awaiting decomposition
                 request_origin and ctx.service_outages.should_skip(request_origin)
             )
             if ctx.config.follow_links and not target_is_unavailable:
+                ctx.output.sync_progress.module_status("loading linked page")
                 response = request_following_safe_redirects(
                     ctx.require_session(),
                     "GET",
@@ -275,8 +278,10 @@ def scan_for_links(  # noqa: C901 - legacy parser awaiting decomposition
             if not vid_id:
                 log.warning(f"Opencast: could not extract episode id from url {vid}")
                 continue
+            ctx.output.sync_progress.module_status("authenticating Opencast video")
             if not opencast_api.authenticate_episode(ctx, course_id, vid_id, log):
                 continue
+            ctx.output.sync_progress.module_status("resolving Opencast video")
             opencast_api.add_episode_nodes(
                 ctx,
                 parent_node,
@@ -291,6 +296,7 @@ def scan_for_links(  # noqa: C901 - legacy parser awaiting decomposition
             link = match.group(0)
             if filters.should_skip_url(ctx, link, "emedia link"):
                 continue
+            ctx.output.sync_progress.module_status("resolving emedia video")
             emedia_api.add_video_node(ctx, parent_node, link, module_title, log)
 
     # https://rwth-aachen.sciebo.de/s/XXX

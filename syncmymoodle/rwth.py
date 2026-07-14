@@ -1,4 +1,3 @@
-import getpass
 import logging
 import sys
 import time
@@ -20,7 +19,7 @@ from syncmymoodle.constants import (
     RWTH_STATUS_URL,
     RWTH_TOTP_MANAGER_URL,
 )
-from syncmymoodle.context import AuthState, SyncContext
+from syncmymoodle.context import SyncContext
 from syncmymoodle.http_utils import (
     get_input_value,
     parse_html,
@@ -90,30 +89,38 @@ def _require_input_value(
     return value
 
 
-def prompt_required_value(prompt: str, description: str, log: logging.Logger) -> str:
-    value = input(prompt).strip()
+def prompt_required_value(
+    ctx: SyncContext,
+    label: str,
+    description: str,
+    log: logging.Logger,
+) -> str:
+    value = ctx.output.prompt(label)
     if value:
         return value
     log.critical("A %s is required to log in.", description)
     sys.exit(1)
 
 
-def ensure_login_credentials(auth: AuthState, log: logging.Logger) -> None:
+def ensure_login_credentials(ctx: SyncContext, log: logging.Logger) -> None:
+    auth = ctx.auth
     if not auth.user:
-        auth.user = prompt_required_value("RWTH SSO username: ", "username", log)
+        auth.user = prompt_required_value(ctx, "RWTH SSO username", "username", log)
     if auth.credential_resolver is not None:
         auth.credential_resolver()
     if not auth.password:
-        auth.password = getpass.getpass("RWTH SSO password: ")
+        auth.password = ctx.output.prompt_secret("RWTH SSO password")
     if not auth.password:
         log.critical("A password is required to log in.")
         sys.exit(1)
 
 
-def ensure_totp_serial(auth: AuthState, log: logging.Logger) -> str:
+def ensure_totp_serial(ctx: SyncContext, log: logging.Logger) -> str:
+    auth = ctx.auth
     if not auth.totp_serial:
         auth.totp_serial = prompt_required_value(
-            "RWTH SSO TOTP serial id (for example, TOTP12345678): ",
+            ctx,
+            "RWTH SSO TOTP serial id (for example, TOTP12345678)",
             "TOTP serial",
             log,
         )
@@ -411,7 +418,7 @@ def login(  # noqa: C901 - legacy login flow awaiting decomposition
 
     soup = parse_html(resp.text)
     if soup.find("input", {"name": "RelayState"}) is None:
-        ensure_login_credentials(ctx.auth, log)
+        ensure_login_credentials(ctx, log)
         csrf_token = _require_input_value(
             soup, "csrf_token", "username/password form", log
         )
@@ -444,8 +451,8 @@ def login(  # noqa: C901 - legacy login flow awaiting decomposition
             soup, "csrf_token", "TOTP method selection form", log
         )
 
-        totp_serial = ensure_totp_serial(ctx.auth, log)
-        print(f"Selecting TOTP method {totp_serial}...")
+        totp_serial = ensure_totp_serial(ctx, log)
+        ctx.output.phase(f"Selecting TOTP method {totp_serial}...")
         totp_selection_data = {
             "fudis_selected_token_ids_input": totp_serial,
             "_eventId_proceed": "",
@@ -480,12 +487,14 @@ def login(  # noqa: C901 - legacy login flow awaiting decomposition
         if ctx.auth.otp_code:
             totp_input = ctx.auth.otp_code
         elif not totp_secret:
-            totp_input = input(
-                f"Current 6-digit TOTP code for {ctx.auth.totp_serial}: "
+            totp_input = ctx.output.prompt(
+                f"Current 6-digit TOTP code for {ctx.auth.totp_serial}"
             )
         else:
             totp_input = generate_totp(totp_secret)
-            print("Generated the current TOTP code from the configured seed.")
+            ctx.output.print(
+                "Generated the current TOTP code from the configured seed."
+            )
 
         totp_login_data = {
             "fudis_otp_input": totp_input,

@@ -20,6 +20,7 @@ from syncmymoodle.config import (
     group_config_for_toml,
 )
 from syncmymoodle.context import AuthState
+from syncmymoodle.output import TerminalOutput
 
 from .helpers import FakeKeyring, make_context
 
@@ -121,6 +122,7 @@ def test_cli_help_groups_config_options():
     assert "Moodle course roles has" in help_text
     assert "whose size is known" in help_text
     assert "--show-filtered" in help_text
+    assert "--color {auto,always,never}" in help_text
 
 
 def test_filtered_report_is_summarized_by_default(capsys):
@@ -171,6 +173,25 @@ def test_show_filtered_report_is_grouped_and_deduplicated(capsys):
     )
 
 
+def test_filtered_report_is_colored_without_parsing_item_markup(monkeypatch, capsys):
+    monkeypatch.delenv("NO_COLOR", raising=False)
+    ctx = make_context()
+    ctx.output = TerminalOutput("always")
+    ctx.record_filtered(
+        "filters.exclude_files",
+        "file",
+        "/sync/[red]notes.tmp[/]",
+        "matches '[red]*.tmp[/]'",
+    )
+
+    cli.report_filtered_items(ctx, show_details=True)
+
+    output = capsys.readouterr().out
+    assert "\x1b[" in output
+    assert "[red]notes.tmp[/]" in output
+    assert "matches '[red]*.tmp[/]'" in output
+
+
 def test_show_filtered_is_forwarded_to_sync_run(tmp_path, monkeypatch):
     calls = []
     monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "empty-xdg"))
@@ -183,6 +204,39 @@ def test_show_filtered_is_forwarded_to_sync_run(tmp_path, monkeypatch):
     cli.main(["--sync-directory", str(tmp_path), "--show-filtered"])
 
     assert calls == [True]
+
+
+def test_partial_sync_failure_exits_nonzero_after_run(tmp_path, monkeypatch):
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "empty-xdg"))
+
+    def fail_one_item(ctx, *, show_filtered=False):
+        del show_filtered
+        ctx.stats.failed = 1
+
+    monkeypatch.setattr(cli, "run", fail_one_item)
+
+    with pytest.raises(SystemExit) as exc_info:
+        cli.main(["--sync-directory", str(tmp_path), "--color", "never"])
+
+    assert exc_info.value.code == 1
+
+
+def test_keyboard_interrupt_exits_cleanly_with_shell_status(monkeypatch, capsys):
+    monkeypatch.delenv("NO_COLOR", raising=False)
+
+    def interrupt(args, parser):
+        del args, parser
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(cli, "run_config_command", interrupt)
+
+    with pytest.raises(SystemExit) as exc_info:
+        cli.main(["--color", "always", "config", "example"])
+
+    assert exc_info.value.code == 130
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert captured.err == "\x1b[31mInterrupted.\x1b[0m\n"
 
 
 def test_setup_help_explains_what_will_be_configured(capsys):
@@ -242,6 +296,19 @@ def test_cli_version_flag(capsys):
 
     assert exc_info.value.code == 0
     assert "syncmymoodle" in capsys.readouterr().out
+
+
+def test_parse_errors_use_requested_color_and_keep_usage_plain(monkeypatch, capsys):
+    monkeypatch.delenv("NO_COLOR", raising=False)
+
+    with pytest.raises(SystemExit) as exc_info:
+        cli.main(["--color", "always", "--unknown-option"])
+
+    assert exc_info.value.code == 2
+    error = capsys.readouterr().err
+    assert error.startswith("usage: syncmymoodle ")
+    assert "\x1b[31msyncmymoodle: error: " in error
+    assert "unrecognized arguments: --unknown-option" in error
 
 
 def test_plain_run_without_config_points_to_setup(tmp_path, monkeypatch, capsys):
@@ -1056,15 +1123,17 @@ def test_cli_requires_migration_for_global_legacy_json(tmp_path, monkeypatch, ca
         encoding="utf-8",
     )
     monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "xdg"))
+    monkeypatch.delenv("NO_COLOR", raising=False)
     monkeypatch.chdir(tmp_path)
 
     with pytest.raises(SystemExit) as exc_info:
-        cli.main([])
+        cli.main(["--color", "always"])
 
     assert exc_info.value.code == 2
     error = capsys.readouterr().err
     assert str(xdg_config) in error
     assert "syncmymoodle config migrate" in error
+    assert "\x1b[31msyncmymoodle: error: found legacy JSON config" in error
 
 
 def test_cli_explicit_config_skips_discovery(tmp_path, monkeypatch):
@@ -1230,12 +1299,12 @@ def test_config_migrate_command_writes_secret_free_toml_and_tokens(
     assert json.loads(input_path.read_text(encoding="utf-8"))["password"] == (
         "json-password"
     )
-    output = capsys.readouterr().out
-    assert str(output_path) in output
-    assert "source JSON was left unchanged and still contains secrets" in output
+    captured = capsys.readouterr()
+    assert str(output_path) in captured.out
+    assert "source JSON was left unchanged and still contains secrets" in captured.err
     assert (
         "Review the migrated TOML and source JSON, then delete the source JSON"
-        in output
+        in captured.out
     )
 
 
@@ -1336,7 +1405,7 @@ def test_config_example_prints_template_without_modifying_global_config(
     config_path.write_text(existing, encoding="utf-8")
     monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "xdg"))
     monkeypatch.setattr(
-        "builtins.input", lambda prompt: pytest.fail("example must not prompt")
+        "builtins.input", lambda: pytest.fail("example must not prompt")
     )
 
     cli.main(["config", "example"])
@@ -2253,7 +2322,9 @@ def test_empty_keyring_password_reprompts_before_storing(monkeypatch):
             }
         }
     )
-    monkeypatch.setattr(cli.getpass, "getpass", lambda prompt: "prompt-password")
+    monkeypatch.setattr(
+        "syncmymoodle.output.getpass.getpass", lambda prompt: "prompt-password"
+    )
 
     auth = AuthState.from_config(config)
     cli.resolve_keyring_credentials(auth, False, fake_keyring)
@@ -2273,7 +2344,7 @@ def test_empty_prompted_keyring_password_fails_without_storing(monkeypatch, capl
             }
         }
     )
-    monkeypatch.setattr(cli.getpass, "getpass", lambda prompt: "")
+    monkeypatch.setattr("syncmymoodle.output.getpass.getpass", lambda prompt: "")
     caplog.set_level(logging.CRITICAL, logger="syncmymoodle.cli")
 
     with pytest.raises(SystemExit) as exc_info:

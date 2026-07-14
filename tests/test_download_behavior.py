@@ -9,6 +9,8 @@ from syncmymoodle import course_cache, downloader, links, moodle, pathing
 from syncmymoodle.constants import COURSE_CACHE_FILENAME, YOUTUBE_WATCH_URL
 from syncmymoodle.downloader import download_file
 from syncmymoodle.node import Node, RemoteMarkerKind
+from syncmymoodle.outcomes import HANDLED_DOWNLOAD
+from syncmymoodle.output import format_size
 from syncmymoodle.storage import write_private_gzip_json
 
 from .helpers import (
@@ -92,6 +94,7 @@ def test_youtube_outtmpl_applies_windows_prefix_after_template_suffix(
 
         def download(self, links):
             captured["links"] = links
+            (download_directory / "Lecture-abcdefghijk.mp4").write_bytes(b"video")
 
     monkeypatch.setattr(downloader.yt_dlp, "YoutubeDL", FakeYoutubeDL)
     ctx = make_context({"paths.sync_directory": str(tmp_path)})
@@ -105,8 +108,9 @@ def test_youtube_outtmpl_applies_windows_prefix_after_template_suffix(
         url="https://youtu.be/abcdefghijk",
     )
     assert node is not None
+    download_directory = node_path(ctx, section)
 
-    assert downloader.scan_and_download_youtube(ctx, node)
+    assert downloader.scan_and_download_youtube(ctx, node).is_handled
 
     assert captured["opts"]["outtmpl"].startswith("\\\\?\\")
     assert "%(title)s-%(id)s.%(ext)s" in captured["opts"]["outtmpl"]
@@ -134,10 +138,11 @@ def test_youtube_partial_file_does_not_block_resume(tmp_path, monkeypatch):
 
         def download(self, urls):
             downloads.append(urls)
+            (video_path / "Lecture-abcdefghijk.mp4").write_bytes(b"video")
 
     monkeypatch.setattr(downloader.yt_dlp, "YoutubeDL", FakeYoutubeDL)
 
-    assert downloader.scan_and_download_youtube(ctx, video_node) is True
+    assert downloader.scan_and_download_youtube(ctx, video_node).is_handled
     assert downloads == [["https://www.youtube.com/watch?v=abcdefghijk"]]
 
 
@@ -174,12 +179,12 @@ def test_tokenized_request_failure_does_not_log_token(caplog):
     assert "[REDACTED]" in caplog.text
 
 
-def test_human_readable_size_formats_binary_units():
-    assert downloader.human_readable_size(10) == "10 B"
-    assert downloader.human_readable_size(1024) == "1 KiB"
-    assert downloader.human_readable_size(1536) == "1.5 KiB"
-    assert downloader.human_readable_size(5 * 1024**2) == "5 MiB"
-    assert downloader.human_readable_size(1024**5) == "1 PiB"
+def test_format_size_uses_binary_units():
+    assert format_size(10) == "10 B"
+    assert format_size(1024) == "1 KiB"
+    assert format_size(1536) == "1.5 KiB"
+    assert format_size(5 * 1024**2) == "5 MiB"
+    assert format_size(1024**5) == "1 PiB"
 
 
 def seed_course_cache(config, *, timemodified, etag, handled=True):
@@ -261,6 +266,7 @@ def test_existing_youtube_download_is_marked_handled(tmp_path):
     downloader.download_node_tree(ctx, root)
 
     assert video.is_handled
+    assert ctx.stats.unchanged == 1
 
 
 # --------------------------------------------------------------------------
@@ -283,7 +289,9 @@ def test_download_streams_chunks_to_disk_and_records_metadata(tmp_path):
         ),
     )
 
-    assert download_file(syncer, file_node) is True
+    outcome = download_file(syncer, file_node)
+
+    assert outcome.is_handled
 
     assert download_path.read_bytes() == b"".join(chunks)
     # The temp part-file and its etag sidecar are cleaned up on completion.
@@ -293,6 +301,147 @@ def test_download_streams_chunks_to_disk_and_records_metadata(tmp_path):
     # The ETag is persisted on the node for the next run's change detection.
     assert file_node.etag == etag
     assert syncer.session.count("GET", URL) == 1
+    assert outcome.downloaded == 1
+    assert outcome.transferred_bytes == len(b"".join(chunks))
+
+
+def test_yt_dlp_progress_payload_updates_shared_progress():
+    ctx = make_context()
+    progress = ctx.output.transfer("video.mp4", total=None)
+
+    downloader.update_yt_dlp_progress(
+        progress,
+        {
+            "status": "downloading",
+            "downloaded_bytes": 512,
+            "total_bytes_estimate": 1024,
+        },
+    )
+    downloader.update_yt_dlp_progress(
+        progress,
+        {
+            "status": "downloading",
+            "downloaded_bytes": 128,
+            "total_bytes": 256,
+        },
+    )
+    downloader.update_yt_dlp_progress(
+        progress,
+        {
+            "status": "finished",
+            "downloaded_bytes": 256,
+            "total_bytes": 256,
+        },
+    )
+
+    assert progress.transferred_bytes == 768
+
+
+def test_failed_youtube_download_is_reported_by_tree_walk(tmp_path, monkeypatch):
+    captured = {}
+
+    class FakeYoutubeDL:
+        def __init__(self, opts):
+            captured.update(opts)
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def download(self, urls):
+            return 1
+
+    monkeypatch.setattr(downloader.yt_dlp, "YoutubeDL", FakeYoutubeDL)
+    ctx = make_context({"paths.sync_directory": str(tmp_path)})
+    root, _, video = build_youtube_tree("https://youtu.be/abcdefghijk")
+
+    downloader.download_node_tree(ctx, root)
+
+    assert video.is_handled is False
+    assert ctx.stats.failed == 1
+    assert captured["noprogress"] is True
+    assert len(captured["progress_hooks"]) == 1
+    assert isinstance(captured["logger"], downloader.YtDlpLogger)
+
+
+def test_youtube_success_without_output_is_reported_by_tree_walk(
+    tmp_path, monkeypatch, caplog
+):
+    class FakeYoutubeDL:
+        def __init__(self, opts):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def download(self, urls):
+            return 0
+
+    monkeypatch.setattr(downloader.yt_dlp, "YoutubeDL", FakeYoutubeDL)
+    ctx = make_context({"paths.sync_directory": str(tmp_path)})
+    root, _, video = build_youtube_tree("https://youtu.be/abcdefghijk")
+
+    downloader.download_node_tree(ctx, root)
+
+    assert not video.is_handled
+    assert ctx.stats.failed == 1
+    assert "did not download YouTube video" in caplog.text
+
+
+def test_failed_install_is_not_marked_handled(tmp_path, monkeypatch):
+    ctx = make_context({"paths.sync_directory": str(tmp_path)})
+    ctx.session = FakeSession()
+    root, file_node = build_single_file_tree("slides.pdf", URL)
+    ctx.session.add(
+        "GET",
+        URL,
+        FakeResponse(
+            headers={"Content-Type": "application/pdf"},
+            chunks=[b"downloaded bytes"],
+        ),
+    )
+    monkeypatch.setattr(
+        downloader,
+        "install_downloaded_file",
+        lambda *args, **kwargs: False,
+    )
+
+    downloader.download_node_tree(ctx, root)
+
+    assert not file_node.is_handled
+    assert ctx.stats.failed == 1
+    assert ctx.stats.downloaded == 0
+
+
+def test_download_walk_reports_progress_for_every_pending_item(monkeypatch, capsys):
+    ctx = make_context()
+    root = Node("", -1, "Root", None)
+    section = root.add_child("Course", 1, "Section")
+    first = section.add_child("slides.pdf", 2, "File", url="https://example.test/1")
+    second = section.add_child("lecture.mp4", 3, "Video", url="https://example.test/2")
+    handled = section.add_child("old.pdf", 4, "File", url="https://example.test/3")
+    handled.mark_handled()
+    visited = []
+    monkeypatch.setattr(
+        downloader,
+        "download_leaf",
+        lambda context, node, log: visited.append(node) or HANDLED_DOWNLOAD,
+    )
+
+    downloader.download_node_tree(ctx, root)
+
+    assert visited == [first, second]
+    assert first.is_handled
+    assert second.is_handled
+    output = capsys.readouterr().out
+    assert "Processing 2 items..." in output
+    assert "[1/2] Processing File: Course/slides.pdf" in output
+    assert "[2/2] Processing Video: Course/lecture.mp4" in output
 
 
 def test_download_is_skipped_for_excluded_filetypes(tmp_path):
@@ -304,7 +453,7 @@ def test_download_is_skipped_for_excluded_filetypes(tmp_path):
     download_path = node_path(syncer, file_node)
 
     # No GET route registered: a request would raise in the fake session.
-    assert download_file(syncer, file_node) is True
+    assert download_file(syncer, file_node).is_handled
     assert not download_path.exists()
     assert syncer.session.calls == []
     assert {
@@ -326,7 +475,7 @@ def test_download_is_skipped_for_excluded_filename_pattern(tmp_path):
     syncer, file_node = make_run_syncer(config, timemodified=1710000500)
     download_path = node_path(syncer, file_node)
 
-    assert download_file(syncer, file_node) is True
+    assert download_file(syncer, file_node).is_handled
     assert not download_path.exists()
     assert {
         (item.config_key, item.item, item.reason) for item in syncer.filtered_items
@@ -353,7 +502,7 @@ def test_download_is_skipped_when_max_file_size_is_exceeded(tmp_path, caplog):
     )
 
     caplog.set_level(logging.WARNING, logger="syncmymoodle.downloader")
-    assert download_file(syncer, file_node) is True
+    assert download_file(syncer, file_node).is_handled
     assert not download_path.exists()
     assert file_node.remote_size == 2048
     assert caplog.messages == []
@@ -376,7 +525,7 @@ def test_download_uses_known_remote_size_before_get(tmp_path):
     download_path = node_path(syncer, file_node)
 
     # No GET route registered: the known size is enough to skip.
-    assert download_file(syncer, file_node) is True
+    assert download_file(syncer, file_node).is_handled
     assert not download_path.exists()
     assert syncer.session.calls == []
 
@@ -394,7 +543,7 @@ def test_download_is_skipped_when_below_min_file_size(tmp_path):
         ),
     )
 
-    assert download_file(syncer, file_node) is True
+    assert download_file(syncer, file_node).is_handled
     assert not download_path.exists()
     assert file_node.remote_size == 10
     assert {(item.config_key, item.reason) for item in syncer.filtered_items} == {
@@ -430,7 +579,7 @@ def test_max_file_size_skips_large_youtube_videos(tmp_path, monkeypatch):
 
     monkeypatch.setattr(downloader.yt_dlp, "YoutubeDL", FakeYoutubeDL)
 
-    assert downloader.scan_and_download_youtube(syncer, video_node) is True
+    assert downloader.scan_and_download_youtube(syncer, video_node).is_handled
     assert not node_path(syncer, section).exists()
     assert video_node.remote_size == 5 * 1024**2
 
@@ -460,7 +609,7 @@ def test_cached_youtube_size_skips_without_yt_dlp(tmp_path, monkeypatch):
 
     monkeypatch.setattr(downloader.yt_dlp, "YoutubeDL", FakeYoutubeDL)
 
-    assert downloader.scan_and_download_youtube(syncer, video_node) is True
+    assert downloader.scan_and_download_youtube(syncer, video_node).is_handled
     assert not node_path(syncer, section).exists()
     assert video_node.remote_size == 5 * 1024**2
 
@@ -494,7 +643,7 @@ def test_dry_run_honors_youtube_size_limits(tmp_path, monkeypatch, capsys):
 
     monkeypatch.setattr(downloader.yt_dlp, "YoutubeDL", FakeYoutubeDL)
 
-    assert downloader.scan_and_download_youtube(syncer, video_node) is True
+    assert downloader.scan_and_download_youtube(syncer, video_node).is_handled
     assert "Would download" not in capsys.readouterr().out
     assert not node_path(syncer, section).exists()
     assert video_node.remote_size == 5 * 1024**2
@@ -533,7 +682,7 @@ def test_download_within_max_file_size_proceeds(tmp_path):
         ),
     )
 
-    assert download_file(syncer, file_node) is True
+    assert download_file(syncer, file_node).is_handled
     assert node_path(syncer, file_node).read_bytes() == b"data"
     assert file_node.remote_size == 4
 
@@ -552,7 +701,7 @@ def test_invalid_content_length_does_not_abort_download(tmp_path):
         ),
     )
 
-    assert download_file(syncer, file_node) is True
+    assert download_file(syncer, file_node).is_handled
     assert node_path(syncer, file_node).read_bytes() == b"data"
 
 
@@ -565,7 +714,7 @@ def test_repeated_download_503_opens_origin_circuit(caplog, tmp_path):
     caplog.set_level(logging.WARNING, logger="syncmymoodle.downloader")
 
     for _ in range(4):
-        assert download_file(syncer, file_node) is False
+        assert not download_file(syncer, file_node).is_handled
 
     assert syncer.session.count("GET", URL) == 3
     assert caplog.messages == [
@@ -595,7 +744,7 @@ def test_download_rejects_redirect_outside_allowed_domains(tmp_path, caplog):
     )
     caplog.set_level(logging.WARNING, logger="syncmymoodle.downloader")
 
-    assert download_file(syncer, file_node) is False
+    assert not download_file(syncer, file_node).is_handled
     assert syncer.session.calls == [("GET", URL)]
     assert not node_path(syncer, file_node).exists()
     assert caplog.messages == []
@@ -644,7 +793,7 @@ def test_cross_origin_redirect_strips_download_credentials(tmp_path):
     syncer.session.add("GET", URL, redirect_response)
     syncer.session.add("GET", external_url, download_response)
 
-    assert download_file(syncer, file_node) is True
+    assert download_file(syncer, file_node).is_handled
     assert node_path(syncer, file_node).read_bytes() == b"data"
 
 
@@ -654,7 +803,7 @@ def test_dry_run_reports_downloads_without_writing(tmp_path, capsys):
     download_path = node_path(syncer, file_node)
 
     # No GET route registered: any request would raise in the fake session.
-    assert download_file(syncer, file_node) is True
+    assert download_file(syncer, file_node).is_handled
     assert f"Would download {download_path}" in capsys.readouterr().out
     assert not download_path.exists()
     assert syncer.session.calls == []
@@ -677,7 +826,7 @@ def test_dry_run_honors_direct_download_size_limits(tmp_path, capsys):
         ),
     )
 
-    assert download_file(syncer, file_node) is True
+    assert download_file(syncer, file_node).is_handled
     assert "Would download" not in capsys.readouterr().out
     assert not download_path.exists()
     assert syncer.session.count("GET", URL) == 1
@@ -702,8 +851,8 @@ def test_download_path_is_deduplicated_within_a_run(tmp_path):
     )
     section.children.append(second_node)
 
-    assert download_file(syncer, first_node) is True
-    assert download_file(syncer, second_node) is True
+    assert download_file(syncer, first_node).is_handled
+    assert download_file(syncer, second_node).is_handled
     assert syncer.session.count("GET", URL) == 1
 
 
@@ -743,7 +892,7 @@ def test_conflict_keep_preserves_local_file_and_skips_download(tmp_path):
     syncer, file_node, download_path, local_modified = _setup_conflict(tmp_path, "keep")
 
     # No GET registered: keep mode must not contact the server at all.
-    assert download_file(syncer, file_node) is True
+    assert download_file(syncer, file_node).is_handled
     assert download_path.read_bytes() == local_modified
     assert syncer.session.calls == []
 
@@ -752,7 +901,7 @@ def test_conflict_overwrite_replaces_local_file(tmp_path):
     syncer, file_node, download_path, _ = _setup_conflict(tmp_path, "overwrite")
     new_body = _add_new_remote(syncer)
 
-    assert download_file(syncer, file_node) is True
+    assert download_file(syncer, file_node).is_handled
     assert download_path.read_bytes() == new_body
     # Overwrite mode leaves no side-car conflict copy behind.
     assert list(download_path.parent.glob("*.syncconflict.*")) == []
@@ -765,7 +914,7 @@ def test_conflict_rename_moves_local_file_aside_before_download(tmp_path):
     )
     new_body = _add_new_remote(syncer)
 
-    assert download_file(syncer, file_node) is True
+    assert download_file(syncer, file_node).is_handled
 
     # The fresh remote content lands at the canonical path.
     assert download_path.read_bytes() == new_body
@@ -791,7 +940,7 @@ def test_unchanged_timemodified_skips_download_despite_local_edit(tmp_path):
     download_path.parent.mkdir(parents=True, exist_ok=True)
     download_path.write_bytes(b"locally edited content")
 
-    assert download_file(syncer, file_node) is True
+    assert download_file(syncer, file_node).is_handled
     assert syncer.session.calls == []
     assert list(download_path.parent.glob("*.syncconflict.*")) == []
 
@@ -814,7 +963,7 @@ def test_failed_previous_download_is_retried_not_skipped(tmp_path):
         ),
     )
 
-    assert download_file(syncer, file_node) is True
+    assert download_file(syncer, file_node).is_handled
     assert syncer.session.count("GET", URL) == 1
     assert download_path.read_bytes() == b"NEW CORRECT VERSION"
 
@@ -832,7 +981,7 @@ def test_unchanged_linked_file_etag_skips_download(tmp_path):
     download_path.parent.mkdir(parents=True, exist_ok=True)
     download_path.write_bytes(content)
 
-    assert download_file(syncer, file_node) is True
+    assert download_file(syncer, file_node).is_handled
     assert syncer.session.calls == []
     assert download_path.read_bytes() == content
 
@@ -858,7 +1007,7 @@ def test_get_only_etag_304_skips_download(tmp_path):
 
     syncer.session.add("GET", URL, unchanged)
 
-    assert download_file(syncer, file_node) is True
+    assert download_file(syncer, file_node).is_handled
     assert syncer.session.count("GET", URL) == 1
     assert seen_headers == [{"If-None-Match": etag}]
     assert file_node.etag == etag
@@ -886,7 +1035,7 @@ def test_get_only_etag_same_200_skips_download(tmp_path):
         ),
     )
 
-    assert download_file(syncer, file_node) is True
+    assert download_file(syncer, file_node).is_handled
     assert syncer.session.count("GET", URL) == 1
     assert file_node.etag == etag
     assert download_path.read_bytes() == content
@@ -916,7 +1065,7 @@ def test_get_only_etag_changed_200_downloads_update(tmp_path):
 
     syncer.session.add("GET", URL, changed)
 
-    assert download_file(syncer, file_node) is True
+    assert download_file(syncer, file_node).is_handled
     assert syncer.session.count("GET", URL) == 2
     assert file_node.etag == new_etag
     assert download_path.read_bytes() == b"new remote video"
@@ -950,7 +1099,7 @@ def test_unchanged_duplicate_section_file_uses_matching_cache_node(tmp_path):
     assert old_node is not None
     assert old_node.url == DUPLICATE_SECTION_URL_B
 
-    assert download_file(syncer, current_second) is True
+    assert download_file(syncer, current_second).is_handled
     assert syncer.session.calls == []
     assert list(download_path.parent.glob("*.syncconflict.*")) == []
     assert download_path.read_bytes() == content
@@ -981,8 +1130,8 @@ def test_distinct_files_in_merged_sections_are_both_downloaded(tmp_path):
     )
 
     assert first_path != second_path
-    assert download_file(syncer, first_file) is True
-    assert download_file(syncer, second_file) is True
+    assert download_file(syncer, first_file).is_handled
+    assert download_file(syncer, second_file).is_handled
     assert first_path.read_bytes() == b"first section"
     assert second_path.read_bytes() == b"second section"
 
@@ -1001,7 +1150,7 @@ def test_etag_failure_falls_back_to_timestamp_heuristic_conflict(tmp_path, monke
 
     monkeypatch.setattr("syncmymoodle.downloader.classify_local_file", unverifiable)
 
-    assert download_file(syncer, file_node) is True
+    assert download_file(syncer, file_node).is_handled
     assert download_path.read_bytes() == new_body
     conflicts = list(download_path.parent.glob("*.syncconflict.*"))
     assert len(conflicts) == 1
@@ -1025,7 +1174,7 @@ def test_etag_failure_falls_back_to_timestamp_heuristic_no_conflict(
 
     monkeypatch.setattr("syncmymoodle.downloader.classify_local_file", unverifiable)
 
-    assert download_file(syncer, file_node) is True
+    assert download_file(syncer, file_node).is_handled
     assert download_path.read_bytes() == new_body
     assert list(download_path.parent.glob("*.syncconflict.*")) == []
 
@@ -1051,7 +1200,7 @@ def test_rename_conflict_failed_html_update_preserves_canonical_file(tmp_path):
         ),
     )
 
-    assert download_file(syncer, file_node) is False
+    assert not download_file(syncer, file_node).is_handled
     assert download_path.exists()
     assert download_path.read_bytes() == local_modified
     assert list(download_path.parent.glob("*.syncconflict.*")) == []
@@ -1063,7 +1212,7 @@ def test_rename_conflict_non_2xx_update_preserves_canonical_file(tmp_path):
     )
     syncer.session.add("GET", URL, FakeResponse(status_code=403, text="forbidden"))
 
-    assert download_file(syncer, file_node) is False
+    assert not download_file(syncer, file_node).is_handled
     assert download_path.read_bytes() == local_modified
     assert list(download_path.parent.glob("*.syncconflict.*")) == []
 
@@ -1084,7 +1233,7 @@ def test_excluded_filetype_existing_file_is_not_touched(tmp_path):
     download_path.write_bytes(b"locally edited content")
 
     # No GET route registered: a request would raise in the fake session.
-    assert download_file(syncer, file_node) is True
+    assert download_file(syncer, file_node).is_handled
     assert download_path.read_bytes() == b"locally edited content"
     assert syncer.session.calls == []
     assert list(download_path.parent.glob("*.syncconflict.*")) == []
@@ -1123,7 +1272,7 @@ def test_resume_appends_when_remote_unchanged(tmp_path):
         ),
     )
 
-    assert download_file(syncer, file_node) is True
+    assert download_file(syncer, file_node).is_handled
     # The partial head is kept and the resumed tail appended.
     assert download_path.read_bytes() == b"HEAD-TAIL"
     assert list(download_path.parent.glob(".*.smmpart*")) == []
@@ -1147,7 +1296,7 @@ def test_resume_aborts_when_partial_response_starts_at_wrong_offset(tmp_path):
         ),
     )
 
-    assert download_file(syncer, file_node) is False
+    assert not download_file(syncer, file_node).is_handled
     assert not download_path.exists()
     assert list(download_path.parent.glob(".*.smmpart*")) == []
 
@@ -1168,7 +1317,7 @@ def test_resume_discards_partial_when_remote_served_full_content(tmp_path):
         ),
     )
 
-    assert download_file(syncer, file_node) is True
+    assert download_file(syncer, file_node).is_handled
     assert download_path.read_bytes() == b"FULL-NEW-CONTENT"
     assert list(download_path.parent.glob(".*.smmpart*")) == []
 
@@ -1200,7 +1349,7 @@ def test_resume_aborts_when_partial_etag_cannot_be_verified(tmp_path, response_e
         ),
     )
 
-    assert download_file(syncer, file_node) is False
+    assert not download_file(syncer, file_node).is_handled
     assert not download_path.exists()
     assert list(download_path.parent.glob(".*.smmpart*")) == []
 
@@ -1219,7 +1368,7 @@ def test_unrecognized_partial_without_sidecar_is_not_resumed(tmp_path):
         FakeResponse(headers={"Content-Type": "application/pdf"}, chunks=[b"FRESH"]),
     )
 
-    assert download_file(syncer, file_node) is True
+    assert download_file(syncer, file_node).is_handled
     assert download_path.read_bytes() == b"FRESH"
     assert list(download_path.parent.glob(".*.smmpart*")) == []
 
@@ -1289,7 +1438,7 @@ def test_sciebo_changed_etag_triggers_redownload(tmp_path):
     )
     _, current = _sciebo_tree(sha1(new))
 
-    assert download_file(syncer, current) is True
+    assert download_file(syncer, current).is_handled
     assert syncer.session.count("GET", SCIEBO_URL) == 1
     assert download_path.read_bytes() == new
     assert list(download_path.parent.glob("*.syncconflict.*")) == []
@@ -1303,7 +1452,7 @@ def test_sciebo_unchanged_etag_skips_download(tmp_path):
     syncer.session = FakeSession()
     _, current = _sciebo_tree(sha1(content))  # unchanged etag
 
-    assert download_file(syncer, current) is True
+    assert download_file(syncer, current).is_handled
     assert syncer.session.calls == []
     assert download_path.read_bytes() == content
 
@@ -1320,7 +1469,7 @@ def test_sciebo_unchanged_opaque_getetag_skips_without_conflict(tmp_path):
     syncer.session = FakeSession()
     _, current = _sciebo_tree(GETETAG_V1)  # same opaque getetag
 
-    assert download_file(syncer, current) is True
+    assert download_file(syncer, current).is_handled
     assert syncer.session.calls == []
     assert download_path.read_bytes() == content
     assert list(download_path.parent.glob("*.syncconflict.*")) == []
@@ -1348,7 +1497,7 @@ def test_sciebo_download_keeps_propfind_etag_when_get_etag_differs(tmp_path):
     )
     _, current = _sciebo_tree(GETETAG_V2)
 
-    assert download_file(syncer, current) is True
+    assert download_file(syncer, current).is_handled
     assert download_path.read_bytes() == new
     assert current.etag == GETETAG_V2
     assert current.content_hash == sha256(new)
@@ -1372,7 +1521,7 @@ def test_sciebo_changed_getetag_without_local_edit_overwrites_cleanly(tmp_path):
     )
     _, current = _sciebo_tree(GETETAG_V2)
 
-    assert download_file(syncer, current) is True
+    assert download_file(syncer, current).is_handled
     assert download_path.read_bytes() == new
     assert list(download_path.parent.glob("*.syncconflict.*")) == []
 
@@ -1398,7 +1547,7 @@ def test_sciebo_changed_getetag_with_local_edit_preserves_conflict(tmp_path):
     )
     _, current = _sciebo_tree(GETETAG_V2)
 
-    assert download_file(syncer, current) is True
+    assert download_file(syncer, current).is_handled
     assert download_path.read_bytes() == new
     conflicts = list(download_path.parent.glob("*.syncconflict.*"))
     assert len(conflicts) == 1
@@ -1426,7 +1575,7 @@ def test_opaque_etag_is_not_treated_as_local_content_hash(tmp_path):
     )
     _, current = _sciebo_tree(GETETAG_V2, etag_kind=RemoteMarkerKind.OPAQUE)
 
-    assert download_file(syncer, current) is True
+    assert download_file(syncer, current).is_handled
     assert download_path.read_bytes() == new
     conflicts = list(download_path.parent.glob("*.syncconflict.*"))
     assert len(conflicts) == 1
@@ -1516,7 +1665,7 @@ def test_legacy_is_downloaded_cache_key_is_read_as_handled(tmp_path):
     download_path.parent.mkdir(parents=True, exist_ok=True)
     download_path.write_bytes(content)
 
-    assert download_file(syncer, current_file) is True
+    assert download_file(syncer, current_file).is_handled
     assert syncer.session.calls == []
     assert download_path.read_bytes() == content
     assert course_cache.get_old_node_for(syncer, current_file).is_handled is True

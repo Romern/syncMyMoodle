@@ -111,10 +111,21 @@ syncmymoodle --semesters 25ws --max-file-size 50M
 
 # Include diagnostic information
 syncmymoodle --verbose
+
+# Disable color explicitly (auto, always, and never are supported)
+syncmymoodle --color never
 ```
 
 Command-line sync options override the configuration for that run only. Use
 `syncmymoodle --help` for the complete option list.
+
+Interactive terminals show colored phases and prompts plus aggregate course,
+item, and byte-transfer progress. Redirected output stays plain and reports
+numbered course and periodic item milestones without animated progress;
+`NO_COLOR` is also respected. Every sync ends with a summary of downloaded,
+updated, unchanged, filtered, and failed items. A detected course, module, or
+download failure makes the command exit non-zero after finishing the remaining
+work.
 
 Boolean options have matching positive and negative forms, for example
 `--update-files` and `--no-update-files`. An empty value clears a configured

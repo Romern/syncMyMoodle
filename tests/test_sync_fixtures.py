@@ -21,6 +21,49 @@ from .helpers import (
 )
 
 H5P_PACKAGE_URL = "https://moodle.rwth-aachen.de/pluginfile.php/activity.h5p"
+PAGE_URL = "https://moodle.rwth-aachen.de/mod/page/view.php?id=123"
+
+
+def run_page_handler(response):
+    ctx = make_context({"links.opencast": False})
+    session = FakeSession()
+    session.add("GET", PAGE_URL, response)
+    ctx.session = session
+    course_node = Node("Course", 1, "Course", None)
+    section_node = course_node.add_child("Section", 2, "Section")
+    assert section_node is not None
+    module_context = sync_handlers.ModuleContext(
+        ctx, 1, course_node, section_node, {}, {}
+    )
+
+    sync_handlers.handle_embedded_link_module(
+        module_context,
+        {
+            "id": 123,
+            "modname": "page",
+            "name": "Unavailable page",
+            "url": PAGE_URL,
+        },
+    )
+
+    return ctx
+
+
+def test_page_request_failure_is_counted(caplog):
+    def fail_request(url, kwargs):
+        raise requests.ConnectionError("offline")
+
+    ctx = run_page_handler(fail_request)
+
+    assert ctx.stats.failed == 1
+    assert "Failed to fetch page module 123" in caplog.text
+
+
+def test_page_http_failure_is_counted(caplog):
+    ctx = run_page_handler(FakeResponse(status_code=503))
+
+    assert ctx.stats.failed == 1
+    assert "Page module 123 returned status 503" in caplog.text
 
 
 def run_h5p_handler(monkeypatch, response):
@@ -751,6 +794,7 @@ def test_generic_link_error_pages_open_origin_circuit_without_being_scanned(capl
 def test_opencast_series_fetches_every_page(monkeypatch):
     syncer = make_context()
     requested_urls = []
+    statuses = []
 
     def fetch_result_list(ctx, url, context, log):
         requested_urls.append(url)
@@ -767,6 +811,11 @@ def test_opencast_series_fetches_every_page(monkeypatch):
         ]
 
     monkeypatch.setattr(opencast, "fetch_result_list", fetch_result_list)
+    monkeypatch.setattr(
+        syncer.output.sync_progress,
+        "module_status",
+        statuses.append,
+    )
 
     episodes = sync_handlers._opencast_series_episodes(
         syncer,
@@ -779,6 +828,10 @@ def test_opencast_series_fetches_every_page(monkeypatch):
     assert requested_urls == [
         f"{opencast.OPENCAST_SEARCH_URL}?limit=100&offset=0&sid=series-123",
         f"{opencast.OPENCAST_SEARCH_URL}?limit=100&offset=100&sid=series-123",
+    ]
+    assert statuses == [
+        "listing Opencast episodes (0 found)",
+        "listing Opencast episodes (100 found)",
     ]
 
 

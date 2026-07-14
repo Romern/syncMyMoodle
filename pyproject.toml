@@ -27,7 +27,7 @@ dependencies = [
   "requests>=2.0.0",
   "beautifulsoup4>=4.0.0",
   "yt-dlp>=2021.12.27",
-  "tqdm>=4.0.0",
+  "rich>=14.1.0",
   "lxml>=5.0.0",
   "latex2mathml>=3.77.0",
   "keyring>=20.0.0",
@@ -73,7 +73,6 @@ warn_unreachable = true
 module = [
   "bs4",
   "yt_dlp",
-  "tqdm",
   "latex2mathml",
   "keyring",
 ]

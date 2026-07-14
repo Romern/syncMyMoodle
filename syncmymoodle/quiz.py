@@ -42,6 +42,13 @@ from syncmymoodle.http_utils import (
     request_following_safe_redirects,
     same_origin,
 )
+from syncmymoodle.outcomes import (
+    FAILED_DOWNLOAD,
+    HANDLED_DOWNLOAD,
+    PLANNED_DOWNLOAD,
+    DownloadOutcome,
+    completed_download,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -784,7 +791,7 @@ def render_quiz_pdf(
     pdf_path: Path,
     mode: str,
     log: logging.Logger = logger,
-) -> bool:
+) -> DownloadOutcome:
     browser = find_chromium(ctx.config, log)
     if browser is None:
         log.warning(
@@ -793,9 +800,9 @@ def render_quiz_pdf(
             "Edge, or set 'browser' in the [paths] table of your config.",
             node.name,
         )
-        return False
+        return FAILED_DOWNLOAD
 
-    print(f"Rendering {pdf_path} [Quiz PDF]")
+    ctx.output.action("Rendering", pdf_path, "Quiz PDF")
     pdf_ok = render_pdf_with_chromium(browser, html_path, pdf_path, log)
     if not pdf_ok:
         log.warning(
@@ -804,10 +811,33 @@ def render_quiz_pdf(
         )
     elif mode == "pdf":
         html_path.unlink(missing_ok=True)
-    return pdf_ok
+    return completed_download(existed=False) if pdf_ok else FAILED_DOWNLOAD
 
 
-def download_quiz(ctx: SyncContext, node: Any, log: logging.Logger = logger) -> bool:
+def report_quiz_dry_run(
+    ctx: SyncContext,
+    html_path: Path,
+    pdf_path: Path,
+    *,
+    want_html: bool,
+    want_pdf: bool,
+) -> DownloadOutcome:
+    outcome = HANDLED_DOWNLOAD
+    if not html_path.exists():
+        ctx.output.action("Would download", html_path, "Quiz", dry_run=True)
+        if want_html:
+            outcome = outcome.merge(PLANNED_DOWNLOAD)
+    if want_pdf and not pdf_path.exists():
+        ctx.output.action("Would render", pdf_path, "Quiz PDF", dry_run=True)
+        outcome = outcome.merge(PLANNED_DOWNLOAD)
+    return outcome
+
+
+def download_quiz(
+    ctx: SyncContext,
+    node: Any,
+    log: logging.Logger = logger,
+) -> DownloadOutcome:
     """Save a quiz review attempt as an HTML snapshot and/or a rendered PDF.
 
     The output is controlled by ``config.quiz_mode`` (off/html/pdf/both). The
@@ -817,7 +847,7 @@ def download_quiz(ctx: SyncContext, node: Any, log: logging.Logger = logger) -> 
     """
     mode = ctx.config.quiz_mode
     if mode == "off":
-        return False
+        return FAILED_DOWNLOAD
     want_html = mode in ("html", "both")
     want_pdf = mode in ("pdf", "both")
 
@@ -829,26 +859,34 @@ def download_quiz(ctx: SyncContext, node: Any, log: logging.Logger = logger) -> 
     # Idempotency: skip when every wanted artifact is already on disk.
     html_done = html_path.exists() if want_html else True
     pdf_done = pdf_path.exists() if want_pdf else True
+    outcome = DownloadOutcome(
+        unchanged=int(want_html and html_path.exists())
+        + int(want_pdf and pdf_path.exists())
+    )
     if html_done and pdf_done:
-        return True
+        return outcome
 
     if ctx.config.dry_run:
-        if not html_path.exists():
-            print(f"Would download {html_path} [Quiz]")
-        if want_pdf and not pdf_path.exists():
-            print(f"Would render {pdf_path} [Quiz PDF]")
-        return True
+        return outcome.merge(
+            report_quiz_dry_run(
+                ctx,
+                html_path,
+                pdf_path,
+                want_html=want_html,
+                want_pdf=want_pdf,
+            )
+        )
 
     # Only (re)build the snapshot when it is not already on disk. When just the
     # PDF is missing (e.g. a "both"/"pdf" run that previously found no browser),
     # we render from the existing snapshot rather than re-downloading the page
     # and re-inlining every asset.
     if not html_path.exists():
-        print(f"Downloading {html_path} [Quiz]")
+        ctx.output.action("Downloading", html_path, "Quiz")
         review_html = ctx.quiz_review_cache.get(node.url)
         if review_html is None:
             log.warning("No token-derived quiz review is available for %s", node.url)
-            return False
+            return outcome.merge(FAILED_DOWNLOAD)
 
         path.mkdir(parents=True, exist_ok=True)
         html_path.write_text(
@@ -860,8 +898,10 @@ def download_quiz(ctx: SyncContext, node: Any, log: logging.Logger = logger) -> 
             ),
             encoding="utf-8",
         )
+        if want_html:
+            outcome = outcome.merge(completed_download(existed=False))
 
     if not want_pdf or pdf_path.exists():
-        return True
+        return outcome
 
-    return render_quiz_pdf(ctx, node, html_path, pdf_path, mode, log)
+    return outcome.merge(render_quiz_pdf(ctx, node, html_path, pdf_path, mode, log))

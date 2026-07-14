@@ -11,6 +11,8 @@ from syncmymoodle.config import Config
 from syncmymoodle.http_utils import ServiceOutageTracker
 from syncmymoodle.moodle_tokens import MoodleTokens
 from syncmymoodle.node import Node
+from syncmymoodle.outcomes import RunStatistics
+from syncmymoodle.output import TerminalOutput, get_output
 
 if TYPE_CHECKING:
     from syncmymoodle.emedia import EmediaVideo
@@ -78,6 +80,12 @@ class FilteredItem:
 @dataclass
 class SyncContext:
     config: Config
+    output: TerminalOutput = field(
+        default_factory=get_output, repr=False, compare=False
+    )
+    stats: RunStatistics = field(
+        default_factory=RunStatistics, repr=False, compare=False
+    )
     auth: AuthState = field(init=False)
     session: requests.Session | None = None
     session_key: str | None = field(default=None, repr=False)

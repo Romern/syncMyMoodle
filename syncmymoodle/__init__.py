@@ -40,6 +40,8 @@ Persistence:
 Core (cross-cutting):
     node            Node tree model and name-clash resolution
     context         SyncContext: per-run mutable state (session, caches, ...)
+    outcomes        typed download outcomes and per-run statistics
+    output          Rich terminal output, progress, logging, and run summaries
     config          Config: option schema, canonical form and validation
     constants       shared URLs, regexes and option constants
     http_utils      small shared HTTP response helpers

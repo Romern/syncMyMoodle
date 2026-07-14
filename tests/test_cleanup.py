@@ -101,7 +101,9 @@ def test_clean_help_makes_dry_run_default_explicit(command, capsys):
     assert "--apply" in output
 
 
-def test_clean_conflicts_dry_run_uses_config_without_credentials(tmp_path, capsys):
+def test_clean_conflicts_dry_run_uses_config_without_credentials(
+    tmp_path, monkeypatch, capsys
+):
     root = tmp_path / "Moodle"
     current = write(root / "course" / "file.pdf", b"content")
     conflict = write(current.with_name("file.syncconflict.aaaaaaaa.pdf"), b"content")
@@ -110,24 +112,50 @@ def test_clean_conflicts_dry_run_uses_config_without_credentials(tmp_path, capsy
         '[paths]\nsync_directory = "Moodle"\n',
         encoding="utf-8",
     )
+    monkeypatch.delenv("NO_COLOR", raising=False)
 
-    cli.main(["--config", str(config_path), "clean", "conflicts"])
+    cli.main(
+        [
+            "--config",
+            str(config_path),
+            "--color",
+            "always",
+            "clean",
+            "conflicts",
+        ]
+    )
 
     captured = capsys.readouterr()
     assert f"Would delete: {conflict}" in captured.out
+    assert f"\x1b[33mWould delete: {conflict}\x1b[0m" in captured.out
     assert "Dry run only." in captured.out
     assert captured.err == ""
     assert conflict.exists()
 
 
-def test_clean_conflicts_apply_deletes_redundant_conflicts(tmp_path, capsys):
+def test_clean_conflicts_apply_deletes_redundant_conflicts(
+    tmp_path, monkeypatch, capsys
+):
     current = write(tmp_path / "course" / "file.pdf", b"content")
     conflict = write(current.with_name("file.syncconflict.aaaaaaaa.pdf"), b"content")
+    monkeypatch.delenv("NO_COLOR", raising=False)
 
-    cli.main(["clean", "conflicts", "--path", str(tmp_path), "--apply"])
+    cli.main(
+        [
+            "--color",
+            "always",
+            "clean",
+            "conflicts",
+            "--path",
+            str(tmp_path),
+            "--apply",
+        ]
+    )
 
     assert not conflict.exists()
-    assert "1 file deleted" in capsys.readouterr().out
+    output = capsys.readouterr().out
+    assert f"\x1b[32mDeleted: {conflict}\x1b[0m" in output
+    assert "1 file deleted" in output
 
 
 def test_clean_apply_requires_explicit_or_configured_path(
