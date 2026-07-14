@@ -1,6 +1,9 @@
+import json
 import logging
 
-from syncmymoodle import filters, sync
+import pytest
+
+from syncmymoodle import filters, moodle, sync
 
 from .helpers import FakeSession, make_context, node_rows
 
@@ -37,9 +40,16 @@ def test_selected_courses_override_semester_filter(monkeypatch):
                 "https://moodle.rwth-aachen.de/course/view.php?id=202"
             ],
             "courses.semesters": ["26ss"],
+            "courses.exclude_roles": ["tutor"],
         }
     )
     install_filter_fixtures(monkeypatch, synced_course_ids, FILTER_COURSES)
+    monkeypatch.setattr(
+        "syncmymoodle.moodle.get_direct_course_roles_by_course",
+        lambda *args, **kwargs: pytest.fail(
+            "an explicit course selection must not perform role filtering"
+        ),
+    )
     syncer.session = FakeSession()
 
     sync.sync(syncer)
@@ -116,6 +126,152 @@ def test_skip_courses_and_semester_filter_limit_synced_courses(monkeypatch):
             "matches 'https://moodle.rwth-aachen.de/course/view.php?id=203'",
         ),
     ]
+
+
+def test_excluded_course_roles_skip_matches_and_keep_unknowns(monkeypatch):
+    synced_course_ids = []
+    role_lookup_batches = []
+    syncer = make_context({"courses.exclude_roles": ["Tutor"]})
+    install_filter_fixtures(monkeypatch, synced_course_ids, FILTER_COURSES)
+    roles_by_course = {
+        "201": {" Student "},
+        "202": {"student", "TUTOR"},
+        "203": None,
+    }
+
+    def get_direct_course_roles_by_course(session, wstoken, user_id, course_ids, log):
+        role_lookup_batches.append(course_ids)
+        return roles_by_course
+
+    monkeypatch.setattr(
+        "syncmymoodle.moodle.get_direct_course_roles_by_course",
+        get_direct_course_roles_by_course,
+    )
+    syncer.session = FakeSession()
+
+    sync.sync(syncer)
+
+    assert role_lookup_batches == [[201, 202, 203]]
+    assert synced_course_ids == [201, 203]
+    assert filtered_rows(syncer) == [
+        (
+            "courses.exclude_roles",
+            "course",
+            "Selected Old Semester (202)",
+            "your directly assigned Moodle course role is 'tutor'",
+        )
+    ]
+
+
+def test_get_direct_course_roles_batches_course_profiles(monkeypatch):
+    call = {}
+
+    def call_webservice(session, wstoken, function, data, log):
+        call.update(
+            session=session,
+            wstoken=wstoken,
+            function=function,
+            data=data,
+            log=log,
+        )
+        return {
+            "responses": [
+                {
+                    "error": False,
+                    "data": json.dumps(
+                        [
+                            {
+                                "id": 17,
+                                "roles": [
+                                    {
+                                        "roleid": 5,
+                                        "name": "Student",
+                                        "shortname": "Student",
+                                    },
+                                    {
+                                        "roleid": 9,
+                                        "name": "Tutor",
+                                        "shortname": "tutor",
+                                    },
+                                ],
+                            }
+                        ]
+                    ),
+                },
+                {
+                    "error": False,
+                    "data": json.dumps([{"id": 17, "roles": []}]),
+                },
+            ]
+        }
+
+    monkeypatch.setattr(moodle, "call_webservice", call_webservice)
+    session = FakeSession()
+
+    assert moodle.get_direct_course_roles_by_course(
+        session, "token", 17, [201, 202]
+    ) == {
+        "201": {"Student", "tutor"},
+        "202": set(),
+    }
+    assert call["session"] is session
+    assert call["wstoken"] == "token"
+    assert call["function"] == "tool_mobile_call_external_functions"
+    assert call["data"]["requests[0][function]"] == (
+        "core_user_get_course_user_profiles"
+    )
+    assert call["data"]["requests[1][function]"] == (
+        "core_user_get_course_user_profiles"
+    )
+    assert json.loads(call["data"]["requests[0][arguments]"]) == {
+        "userlist": [{"userid": "17", "courseid": "201"}]
+    }
+    assert json.loads(call["data"]["requests[1][arguments]"]) == {
+        "userlist": [{"userid": "17", "courseid": "202"}]
+    }
+    assert call["data"]["requests[0][settingfilter]"] == 0
+    assert call["data"]["requests[0][settingfileurl]"] == 0
+
+
+@pytest.mark.parametrize(
+    "profile_payload",
+    [
+        [{"id": 17}],
+        [{"id": 17, "roles": [{"shortname": "student"}, {"name": "Broken"}]}],
+        {"id": 17, "roles": []},
+    ],
+)
+def test_get_direct_course_roles_keeps_malformed_profiles_unknown(
+    monkeypatch, caplog, profile_payload
+):
+    monkeypatch.setattr(
+        moodle,
+        "call_webservice",
+        lambda *args, **kwargs: {
+            "responses": [{"error": False, "data": json.dumps(profile_payload)}]
+        },
+    )
+
+    assert moodle.get_direct_course_roles_by_course(
+        FakeSession(), "token", 17, [201]
+    ) == {"201": None}
+    assert "profile roles were missing or malformed" in caplog.text
+
+
+def test_get_direct_course_roles_stops_after_batch_error(monkeypatch, caplog):
+    calls = []
+
+    def call_webservice(*args, **kwargs):
+        calls.append((args, kwargs))
+        return {"responses": [{"error": True, "exception": "not allowed"}]}
+
+    monkeypatch.setattr(moodle, "call_webservice", call_webservice)
+
+    assert moodle.get_direct_course_roles_by_course(
+        FakeSession(), "token", 17, [201, 202, 203]
+    ) == {"201": None, "202": None, "203": None}
+    assert len(calls) == 1
+    assert caplog.text.count("not allowed") == 1
 
 
 def test_section_and_module_filters_record_the_matching_patterns():

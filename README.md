@@ -168,8 +168,14 @@ The main course selectors are:
 - `courses.selected`: sync only these course URLs or numeric IDs
 - `courses.semesters`: sync courses from these semester IDs
 - `courses.skip`: exclude these course URLs or numeric IDs
+- `courses.exclude_roles`: exclude courses where a directly assigned Moodle
+  course-role shortname matches, such as `tutor`
 
-`courses.selected` takes priority over both `semesters` and `skip`.
+`courses.selected` takes priority over `semesters`, `skip`, and `exclude_roles`.
+Role lookups are only made when `exclude_roles` is configured. If Moodle cannot
+determine your role for a course, that course is kept.
+Moodle's mobile API exposes only roles assigned directly in the course; roles
+inherited from a course category or the system cannot be matched by this filter.
 
 `exclude_sections` skips complete topic or week blocks. `exclude_modules` skips
 individual activities or resources by name, type, ID, URL, or pattern. Both can

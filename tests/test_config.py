@@ -43,6 +43,7 @@ def test_config_options_record_cli_overrides():
         "browser": "paths.browser",
         "courses": "courses.selected",
         "skip-courses": "courses.skip",
+        "exclude-course-roles": "courses.exclude_roles",
         "semesters": "courses.semesters",
         "course-prefix-handling": "courses.prefix_handling",
         "update-files": "downloads.update_files",
@@ -115,6 +116,8 @@ def test_cli_help_groups_config_options():
     assert "--update-files, --no-update-files" in help_text
     assert "Moodle course URLs or" in help_text
     assert "numeric IDs" in help_text
+    assert "one of your directly assigned" in help_text
+    assert "Moodle course roles has" in help_text
     assert "whose size is known" in help_text
     assert "--show-filtered" in help_text
 
@@ -544,6 +547,7 @@ def test_defaults_applied_for_empty_config(tmp_path, monkeypatch):
     assert cfg.follow_links is True
     assert cfg.update_files is False
     assert cfg.selected_courses == []
+    assert cfg.exclude_course_roles == []
     assert cfg.exclude_links == {}
     # Default module and link toggles are on.
     assert cfg.module_assignment
@@ -752,6 +756,7 @@ def test_filter_values_are_normalized():
     cfg = Config.from_dict(
         {
             "courses.selected": 12,
+            "courses.exclude_roles": ["Tutor", " tutor ", ""],
             "filters.exclude_links": "*calendar*",
             "filters.allowed_domains": "moodle.rwth-aachen.de",
             "filters.exclude_sections": {"*": "General", 42: ["Hidden", None]},
@@ -760,6 +765,9 @@ def test_filter_values_are_normalized():
     )
 
     assert cfg.selected_courses == ["12"]
+    assert cfg.exclude_course_roles == ["tutor"]
+    assert cfg.matching_excluded_course_role({" Student ", "TUTOR"}) == "tutor"
+    assert cfg.matching_excluded_course_role(None) is None
     assert cfg.exclude_links == {"*": ["*calendar*"]}
     assert cfg.allowed_domains == {"*": ["moodle.rwth-aachen.de"]}
     assert cfg.exclude_sections == {"*": ["General"], "42": ["Hidden"]}

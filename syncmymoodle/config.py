@@ -21,7 +21,7 @@ from __future__ import annotations
 import difflib
 import os
 import re
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field, fields
 from pathlib import Path
 from typing import Any, Callable, Literal, TypeAlias, cast
@@ -54,6 +54,14 @@ def as_string_list(value: Any) -> list[str]:
     else:
         values = [value]
     return [str(item) for item in values if item is not None]
+
+
+def normalize_role_shortnames(value: Any) -> list[str]:
+    return list(
+        dict.fromkeys(
+            role for item in as_string_list(value) if (role := item.strip().casefold())
+        )
+    )
 
 
 def as_command_argv(value: Any) -> list[str]:
@@ -420,6 +428,18 @@ class Config:
             aliases=("skipcourses",),
         ),
     )
+    exclude_course_roles: list[str] = option(
+        group="courses",
+        key="exclude_roles",
+        factory=list,
+        normalize=normalize_role_shortnames,
+        cli=cli_csv(
+            "exclude-course-roles",
+            "exclude courses where one of your directly assigned Moodle course "
+            "roles has one of these comma-separated shortnames, e.g. tutor; "
+            "ignored when --courses is set",
+        ),
+    )
     only_sync_semester: list[str] = option(
         group="courses",
         key="semesters",
@@ -688,6 +708,18 @@ class Config:
             "sciebo": self.link_sciebo,
         }
         return self.follow_links and flags.get(name, False)
+
+    def matching_excluded_course_role(
+        self, role_shortnames: Iterable[str] | None
+    ) -> str | None:
+        """Return the first configured role matching Moodle's direct assignments."""
+        if role_shortnames is None:
+            return None
+        normalized = set(normalize_role_shortnames(list(role_shortnames)))
+        return next(
+            (role for role in self.exclude_course_roles if role in normalized),
+            None,
+        )
 
 
 @dataclass(frozen=True)

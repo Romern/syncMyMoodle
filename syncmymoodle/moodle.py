@@ -547,6 +547,37 @@ def get_quiz_attempt_review(
     return payload if isinstance(payload, dict) else None
 
 
+def _mobile_request_data(
+    calls: list[tuple[str, dict[str, Any]]],
+    *,
+    filter_content: bool,
+    rewrite_file_urls: bool,
+) -> dict[str, Any]:
+    data: dict[str, Any] = {}
+    for index, (function, arguments) in enumerate(calls):
+        prefix = f"requests[{index}]"
+        data[f"{prefix}[function]"] = function
+        data[f"{prefix}[arguments]"] = json.dumps(arguments)
+        data[f"{prefix}[settingfilter]"] = int(filter_content)
+        data[f"{prefix}[settingfileurl]"] = int(rewrite_file_urls)
+    return data
+
+
+def _mobile_response_data(response: Any) -> tuple[Any, str | None]:
+    if not isinstance(response, dict):
+        return None, "unexpected response shape"
+    if response.get("error"):
+        return None, str(
+            response.get("exception")
+            or response.get("data")
+            or "web service request failed"
+        )
+    try:
+        return json.loads(response["data"]), None
+    except (KeyError, TypeError, ValueError):
+        return None, "unexpected response shape"
+
+
 def get_all_courses(
     session: requests.Session,
     wstoken: str,
@@ -557,14 +588,16 @@ def get_all_courses(
         session,
         wstoken,
         "tool_mobile_call_external_functions",
-        {
-            "requests[0][function]": "core_enrol_get_users_courses",
-            "requests[0][arguments]": json.dumps(
-                {"userid": str(user_id), "returnusercount": "0"}
-            ),
-            "requests[0][settingfilter]": 1,
-            "requests[0][settingfileurl]": 1,
-        },
+        _mobile_request_data(
+            [
+                (
+                    "core_enrol_get_users_courses",
+                    {"userid": str(user_id), "returnusercount": "0"},
+                )
+            ],
+            filter_content=True,
+            rewrite_file_urls=True,
+        ),
         log,
     )
 
@@ -576,16 +609,11 @@ def get_all_courses(
         first = responses[0] if isinstance(responses, list) and responses else None
         if not isinstance(first, dict):
             error = "unexpected response shape"
-        elif first.get("error"):
-            error = str(first.get("exception") or first.get("data"))
         else:
-            try:
-                courses = json.loads(first["data"])
-            except (KeyError, TypeError, ValueError):
-                error = "unexpected response shape"
-            else:
-                if isinstance(courses, list):
-                    return courses
+            courses, error = _mobile_response_data(first)
+            if error is None and isinstance(courses, list):
+                return courses
+            if error is None:
                 error = "unexpected response shape"
     log.critical(
         "Failed to retrieve the course list from Moodle: %s. Run "
@@ -594,6 +622,103 @@ def get_all_courses(
         error,
     )
     sys.exit(1)
+
+
+def _direct_course_role_shortnames(payload: Any, user_id: Any) -> set[str] | None:
+    if not isinstance(payload, list):
+        return None
+    profile = next(
+        (
+            item
+            for item in payload
+            if isinstance(item, dict) and str(item.get("id")) == str(user_id)
+        ),
+        None,
+    )
+    if profile is None or not isinstance((roles := profile.get("roles")), list):
+        return None
+
+    shortnames: set[str] = set()
+    for role in roles:
+        if (
+            not isinstance(role, dict)
+            or not isinstance((shortname := role.get("shortname")), str)
+            or not shortname.strip()
+        ):
+            return None
+        shortnames.add(shortname)
+    return shortnames
+
+
+def get_direct_course_roles_by_course(
+    session: requests.Session,
+    wstoken: str,
+    user_id: Any,
+    course_ids: list[Any],
+    log: logging.Logger = logger,
+) -> dict[str, set[str] | None]:
+    """Return direct course-context role assignments in one mobile API call.
+
+    Moodle's core profile API calls ``get_user_roles(..., false)`` and therefore
+    does not expose assignments inherited from course categories or the system.
+    """
+    roles_by_course: dict[str, set[str] | None] = {
+        str(course_id): None for course_id in course_ids
+    }
+    if not course_ids:
+        return roles_by_course
+
+    payload = call_webservice(
+        session,
+        wstoken,
+        "tool_mobile_call_external_functions",
+        _mobile_request_data(
+            [
+                (
+                    "core_user_get_course_user_profiles",
+                    {
+                        "userlist": [
+                            {"userid": str(user_id), "courseid": str(course_id)}
+                        ]
+                    },
+                )
+                for course_id in course_ids
+            ],
+            filter_content=False,
+            rewrite_file_urls=False,
+        ),
+        log,
+    )
+    if payload is None:
+        return roles_by_course
+    responses = payload.get("responses") if isinstance(payload, dict) else None
+    error = None
+    if not isinstance(responses, list):
+        responses = []
+        error = "unexpected batch response shape"
+
+    for course_id, response in zip(course_ids, responses, strict=False):
+        response_payload, response_error = _mobile_response_data(response)
+        if response_error is not None:
+            error = response_error
+            break
+        roles = _direct_course_role_shortnames(response_payload, user_id)
+        if roles is None:
+            error = error or "profile roles were missing or malformed"
+            continue
+        roles_by_course[str(course_id)] = roles
+
+    unknown_count = sum(roles is None for roles in roles_by_course.values())
+    if unknown_count:
+        if error is None:
+            error = "the batch response ended early"
+        log.warning(
+            "Could not determine directly assigned Moodle course roles for %s "
+            "course(s): %s; keeping those courses",
+            unknown_count,
+            error,
+        )
+    return roles_by_course
 
 
 def get_course(

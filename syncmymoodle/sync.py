@@ -20,7 +20,8 @@ def sync(ctx: SyncContext) -> None:  # noqa: C901 - legacy sync awaiting decompo
     root_node = Node("", -1, "Root", None)
     ctx.root_node = root_node
 
-    # Syncing all courses
+    selected_courses = config.selected_courses
+    course_candidates = []
     for course in moodle_api.get_all_courses(session, wstoken, user_id):
         course_name = filters.format_course_name(
             course.get("shortname") or f"course-{course.get('id')}",
@@ -29,10 +30,9 @@ def sync(ctx: SyncContext) -> None:  # noqa: C901 - legacy sync awaiting decompo
         )
         course_id = course["id"]
 
-        selected_courses = config.selected_courses
         if selected_courses:
             # selected_courses is an explicit allowlist that overrides
-            # skip_courses (and, below, only_sync_semester).
+            # skip_courses, only_sync_semester and exclude_course_roles.
             if (
                 filters.matching_course_filter_entry(course_id, selected_courses)
                 is None
@@ -71,6 +71,33 @@ def sync(ctx: SyncContext) -> None:  # noqa: C901 - legacy sync awaiting decompo
                 f"semester {semestername!r} is not selected",
             )
             continue
+
+        course_candidates.append((course_name, course_id, semestername))
+
+    direct_roles_by_course = {}
+    if not selected_courses and config.exclude_course_roles:
+        direct_roles_by_course = moodle_api.get_direct_course_roles_by_course(
+            session,
+            wstoken,
+            user_id,
+            [course_id for _, course_id, _ in course_candidates],
+            logger,
+        )
+
+    # Syncing all courses that passed the local course filters.
+    for course_name, course_id, semestername in course_candidates:
+        if config.exclude_course_roles:
+            excluded_role = config.matching_excluded_course_role(
+                direct_roles_by_course.get(str(course_id))
+            )
+            if excluded_role is not None:
+                ctx.record_filtered(
+                    "courses.exclude_roles",
+                    "course",
+                    f"{course_name} ({course_id})",
+                    f"your directly assigned Moodle course role is {excluded_role!r}",
+                )
+                continue
 
         print(f"Syncing {course_name}...")
         course_sections = moodle_api.get_course(session, wstoken, course_id)

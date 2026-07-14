@@ -26,8 +26,9 @@ cookie_file = "" # Defaults to the user config directory, e.g. ~/.config/syncmym
 browser = "" # Optional Chrome/Chromium/Edge path for quiz PDFs; empty auto-detects
 
 [courses]
-selected = [] # Course URLs or numeric IDs; overrides skip and semesters
+selected = [] # Course URLs or numeric IDs; overrides skip, exclude_roles, and semesters
 skip = [] # Course URLs or numeric IDs to exclude
+exclude_roles = [] # Directly assigned course-role shortnames to exclude, such as ["tutor"]
 semesters = [] # Semester IDs such as 25ws or 26ss
 prefix_handling = "suffix" # keep, remove, or suffix
 
