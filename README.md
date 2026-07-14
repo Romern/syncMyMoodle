@@ -123,8 +123,9 @@ Interactive terminals show colored phases and prompts plus aggregate course,
 item, and byte-transfer progress. Redirected output stays plain and reports
 numbered course and periodic item milestones without animated progress;
 `NO_COLOR` is also respected. Every sync ends with a summary of downloaded,
-updated, unchanged, filtered, and failed items. A partial failure makes the
-command exit non-zero after finishing the remaining work.
+updated, unchanged, filtered, and failed items. A detected course, module, or
+download failure makes the command exit non-zero after finishing the remaining
+work.
 
 Boolean options have matching positive and negative forms, for example
 `--update-files` and `--no-update-files`. An empty value clears a configured

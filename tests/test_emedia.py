@@ -257,6 +257,9 @@ def test_emedia_download_uses_best_stream_and_exact_node_name(
     assert Path(captured["opts"]["outtmpl"]).name == temporary_filename
     assert captured["opts"].get("fixup") == expected_fixup
     assert video.is_handled
+    assert ctx.stats.downloaded == 1
+    # Generated file size is not a substitute for bytes observed on the network.
+    assert ctx.stats.transferred_bytes == 0
 
 
 def test_emedia_size_limit_uses_hls_duration_and_bitrate(tmp_path, monkeypatch):

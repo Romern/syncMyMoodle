@@ -7,12 +7,19 @@ import time
 import pytest
 from rich.progress import Progress
 
-from syncmymoodle.output import RunStatistics, TerminalOutput, safe_terminal_text
+from syncmymoodle.outcomes import RunStatistics
+from syncmymoodle.output import TerminalOutput, safe_terminal_text
 
 
 class TtyBuffer(io.StringIO):
     def isatty(self):
         return True
+
+
+@pytest.fixture(autouse=True)
+def stable_terminal_detection(monkeypatch):
+    monkeypatch.delenv("TERM", raising=False)
+    monkeypatch.delenv("TTY_INTERACTIVE", raising=False)
 
 
 def test_redirected_output_is_plain_unwrapped_and_markup_safe(monkeypatch):
@@ -60,6 +67,21 @@ def test_color_modes_and_no_color(monkeypatch, mode, no_color, has_ansi):
     assert ("\x1b[" in stdout.getvalue()) is has_ansi
 
 
+def test_color_always_overrides_term_dumb_without_enabling_animation(monkeypatch):
+    stdout = io.StringIO()
+    stderr = io.StringIO()
+    monkeypatch.setattr(sys, "stdout", stdout)
+    monkeypatch.setattr(sys, "stderr", stderr)
+    monkeypatch.setenv("TERM", "dumb")
+    monkeypatch.delenv("NO_COLOR", raising=False)
+
+    terminal = TerminalOutput("always")
+    terminal.success("Complete")
+
+    assert "\x1b[32mComplete\x1b[0m" in stdout.getvalue()
+    assert terminal.interactive is False
+
+
 def test_warnings_and_logging_use_stderr_without_parsing_markup(monkeypatch):
     stdout = io.StringIO()
     stderr = io.StringIO()
@@ -99,12 +121,13 @@ def test_prompts_share_colors_streams_defaults_and_secret_handling(monkeypatch):
     stdout = io.StringIO()
     stderr = io.StringIO()
     answers = iter(["", " YES "])
+    secret_prompts = []
     monkeypatch.setattr(sys, "stdout", stdout)
     monkeypatch.setattr(sys, "stderr", stderr)
     monkeypatch.setattr("builtins.input", lambda: next(answers))
     monkeypatch.setattr(
         "syncmymoodle.output.getpass.getpass",
-        lambda prompt: "private-password" if prompt == "" else pytest.fail(),
+        lambda prompt: secret_prompts.append(prompt) or "private-password",
     )
     monkeypatch.delenv("NO_COLOR", raising=False)
     terminal = TerminalOutput("always")
@@ -118,7 +141,8 @@ def test_prompts_share_colors_streams_defaults_and_secret_handling(monkeypatch):
     assert secret == "private-password"
     assert "\x1b[36mCourse [red]name[/] [all]: \x1b[0m" in stdout.getvalue()
     assert "\x1b[33mContinue [y/N]: \x1b[0m" in stdout.getvalue()
-    assert stderr.getvalue() == "\x1b[36mRWTH password: \x1b[0m"
+    assert secret_prompts == ["RWTH password: "]
+    assert stderr.getvalue() == ""
     assert secret not in stdout.getvalue() + stderr.getvalue()
 
 

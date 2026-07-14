@@ -391,6 +391,7 @@ def test_login_prompts_for_missing_credentials_only_when_fresh_login_is_needed(
 ):
     session, posted_login, posted_totp_serial, posted_otp = fresh_login_session()
     prompt_answers = iter(["prompt-user", "prompt-totp-serial", "654321"])
+    secret_prompts = []
     ctx = make_context(
         {
             "paths.cookie_file": str(tmp_path / "session"),
@@ -405,7 +406,8 @@ def test_login_prompts_for_missing_credentials_only_when_fresh_login_is_needed(
 
     monkeypatch.setattr("builtins.input", answer)
     monkeypatch.setattr(
-        "syncmymoodle.output.getpass.getpass", lambda prompt: "prompt-password"
+        "syncmymoodle.output.getpass.getpass",
+        lambda prompt: secret_prompts.append(prompt) or "prompt-password",
     )
     monkeypatch.setattr(rwth, "save_session", lambda path, cookies, session_key: None)
 
@@ -422,7 +424,8 @@ def test_login_prompts_for_missing_credentials_only_when_fresh_login_is_needed(
     assert ctx.config.totp_serial is None
     captured = capsys.readouterr()
     assert "RWTH SSO username: " in captured.out
-    assert "RWTH SSO password: " in captured.err
+    assert secret_prompts == ["RWTH SSO password: "]
+    assert captured.err == ""
     assert "RWTH SSO TOTP serial id (for example, TOTP12345678): " in captured.out
     assert "Current 6-digit TOTP code for prompt-totp-serial: " in captured.out
     assert "Selecting TOTP method prompt-totp-serial..." in captured.out

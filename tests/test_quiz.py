@@ -279,7 +279,11 @@ def test_html_mode_writes_snapshot_without_browser(tmp_path, monkeypatch, capsys
     node = quiz_node()
     html_path = tmp_path / "root" / "My Quiz, Versuch 1.html"
 
-    assert quiz.download_quiz(ctx, node) is True
+    outcome = quiz.download_quiz(ctx, node)
+
+    assert outcome.is_handled
+    assert outcome.downloaded == 1
+    assert outcome.transferred_bytes == 0
     assert capsys.readouterr().out == f"Downloading {html_path} [Quiz]\n"
     assert html_path.exists()
     snapshot = html_path.read_text(encoding="utf-8")
@@ -292,9 +296,11 @@ def test_html_mode_is_idempotent(tmp_path, capsys):
     ctx = quiz_context(tmp_path, "html")
     node = quiz_node()
 
-    assert quiz.download_quiz(ctx, node) is True
+    assert quiz.download_quiz(ctx, node).is_handled
     capsys.readouterr()
-    assert quiz.download_quiz(ctx, node) is True
+    unchanged = quiz.download_quiz(ctx, node)
+    assert unchanged.is_handled
+    assert unchanged.unchanged == 1
     assert capsys.readouterr().out == ""
     # The token-derived review is consumed only on the first run; the second is a no-op.
     assert ctx.session.count("GET", QUIZ_URL) == 0
@@ -313,7 +319,7 @@ def test_pdf_mode_removes_html_on_success(tmp_path, monkeypatch, capsys):
     html_path = tmp_path / "root" / "My Quiz, Versuch 1.html"
     pdf_path = tmp_path / "root" / "My Quiz, Versuch 1.pdf"
 
-    assert quiz.download_quiz(ctx, node) is True
+    assert quiz.download_quiz(ctx, node).is_handled
     assert capsys.readouterr().out == (
         f"Downloading {html_path} [Quiz]\nRendering {pdf_path} [Quiz PDF]\n"
     )
@@ -327,9 +333,9 @@ def test_pdf_mode_keeps_html_when_no_browser(tmp_path, monkeypatch):
     ctx = quiz_context(tmp_path, "pdf")
     node = quiz_node()
 
-    assert quiz.download_quiz(ctx, node) is False
-    # Falls back to the HTML snapshot so the attempt is not lost, but returns
-    # False so the missing requested PDF is retried on future runs.
+    assert not quiz.download_quiz(ctx, node).is_handled
+    # Falls back to the HTML snapshot so the attempt is not lost, but reports a
+    # failure so the missing requested PDF is retried on future runs.
     assert (tmp_path / "root" / "My Quiz, Versuch 1.html").exists()
     assert not (tmp_path / "root" / "My Quiz, Versuch 1.pdf").exists()
 
@@ -340,7 +346,7 @@ def test_both_mode_retries_pdf_without_refetching(tmp_path, monkeypatch):
     ctx = quiz_context(tmp_path, "both")
     node = quiz_node()
 
-    assert quiz.download_quiz(ctx, node) is False
+    assert not quiz.download_quiz(ctx, node).is_handled
     html_path = tmp_path / "root" / "My Quiz, Versuch 1.html"
     assert html_path.exists()
     assert ctx.session.count("GET", QUIZ_URL) == 0
@@ -354,7 +360,7 @@ def test_both_mode_retries_pdf_without_refetching(tmp_path, monkeypatch):
     monkeypatch.setattr(quiz, "find_chromium", lambda *a, **k: "/fake/chrome")
     monkeypatch.setattr(quiz, "render_pdf_with_chromium", fake_render)
 
-    assert quiz.download_quiz(ctx, node) is True
+    assert quiz.download_quiz(ctx, node).is_handled
     assert (tmp_path / "root" / "My Quiz, Versuch 1.pdf").exists()
     # No additional page fetch, no additional asset fetches.
     assert ctx.session.count("GET", QUIZ_URL) == 0
@@ -368,7 +374,7 @@ def test_download_quiz_rejects_missing_token_derived_review(tmp_path):
     ctx.session.routes.clear()
     node = quiz_node()
 
-    assert quiz.download_quiz(ctx, node) is False
+    assert not quiz.download_quiz(ctx, node).is_handled
     assert ctx.session.count("GET", QUIZ_URL) == 0
     assert not (tmp_path / "root").exists()
 
@@ -384,7 +390,7 @@ def test_both_mode_writes_html_and_pdf(tmp_path, monkeypatch):
     ctx = quiz_context(tmp_path, "both")
     node = quiz_node()
 
-    assert quiz.download_quiz(ctx, node) is True
+    assert quiz.download_quiz(ctx, node).is_handled
     assert (tmp_path / "root" / "My Quiz, Versuch 1.html").exists()
     assert (tmp_path / "root" / "My Quiz, Versuch 1.pdf").exists()
 
@@ -396,8 +402,10 @@ def test_both_mode_dry_run_reports_each_missing_artifact(tmp_path, capsys):
     html_path = tmp_path / "root" / "My Quiz, Versuch 1.html"
     pdf_path = tmp_path / "root" / "My Quiz, Versuch 1.pdf"
 
-    assert quiz.download_quiz(ctx, node) is True
+    outcome = quiz.download_quiz(ctx, node)
 
+    assert outcome.is_handled
+    assert outcome.planned == 2
     assert capsys.readouterr().out == (
         f"Would download {html_path} [Quiz]\nWould render {pdf_path} [Quiz PDF]\n"
     )
@@ -414,7 +422,7 @@ def test_both_mode_dry_run_reports_only_missing_pdf(tmp_path, capsys):
     html_path.write_text("existing", encoding="utf-8")
     pdf_path = tmp_path / "root" / "My Quiz, Versuch 1.pdf"
 
-    assert quiz.download_quiz(ctx, node) is True
+    assert quiz.download_quiz(ctx, node).is_handled
 
     assert capsys.readouterr().out == f"Would render {pdf_path} [Quiz PDF]\n"
     assert html_path.read_text(encoding="utf-8") == "existing"
@@ -425,7 +433,7 @@ def test_off_mode_does_nothing(tmp_path):
     ctx = quiz_context(tmp_path, "off")
     node = quiz_node()
 
-    assert quiz.download_quiz(ctx, node) is False
+    assert not quiz.download_quiz(ctx, node).is_handled
     assert not (tmp_path / "root").exists()
     assert ctx.session.count("GET", QUIZ_URL) == 0
 
@@ -509,7 +517,7 @@ def test_download_quiz_applies_long_path_check_after_file_extension(
         quiz.pathing, "with_windows_extended_length_prefix", record_path
     )
 
-    assert quiz.download_quiz(ctx, node)
+    assert quiz.download_quiz(ctx, node).is_handled
 
     assert any(str(path).endswith("My Quiz, Versuch 1.html") for path in checked_paths)
     assert any(str(path).endswith("My Quiz, Versuch 1.pdf") for path in checked_paths)

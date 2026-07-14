@@ -11,7 +11,8 @@ from syncmymoodle.config import Config
 from syncmymoodle.http_utils import ServiceOutageTracker
 from syncmymoodle.moodle_tokens import MoodleTokens
 from syncmymoodle.node import Node
-from syncmymoodle.output import RunStatistics, TerminalOutput, get_output
+from syncmymoodle.outcomes import RunStatistics
+from syncmymoodle.output import TerminalOutput, get_output
 
 if TYPE_CHECKING:
     from syncmymoodle.emedia import EmediaVideo

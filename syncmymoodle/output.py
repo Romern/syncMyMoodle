@@ -7,9 +7,7 @@ import logging
 import os
 import re
 import sys
-import time
 from contextlib import contextmanager
-from dataclasses import dataclass, field
 from itertools import groupby
 from pathlib import Path
 from types import TracebackType
@@ -29,6 +27,8 @@ from rich.progress import (
     TransferSpeedColumn,
 )
 from rich.text import Text
+
+from syncmymoodle.outcomes import RunStatistics
 
 ColorMode = Literal["auto", "always", "never"]
 COLOR_MODES: tuple[ColorMode, ...] = ("auto", "always", "never")
@@ -86,40 +86,6 @@ def format_size(size: int) -> str:
                 return f"{value:.0f} {unit}"
             return f"{value:.1f} {unit}" if value < 10 else f"{value:.0f} {unit}"
     raise AssertionError("unreachable")
-
-
-@dataclass
-class RunStatistics:
-    """User-relevant outcomes accumulated during one sync run."""
-
-    courses: int = 0
-    downloaded: int = 0
-    updated: int = 0
-    unchanged: int = 0
-    planned: int = 0
-    failed: int = 0
-    transferred_bytes: int = 0
-    started_at: float = field(default_factory=time.monotonic, repr=False)
-
-    def record_transfer(
-        self,
-        *,
-        existed: bool,
-        size: int = 0,
-        dry_run: bool = False,
-    ) -> None:
-        if dry_run:
-            self.planned += 1
-            return
-        if existed:
-            self.updated += 1
-        else:
-            self.downloaded += 1
-        self.transferred_bytes += max(0, size)
-
-    @property
-    def elapsed_seconds(self) -> float:
-        return max(0.0, time.monotonic() - self.started_at)
 
 
 class WorkCountColumn(ProgressColumn):
@@ -521,7 +487,6 @@ class TransferProgress:
         self._terminal = terminal
         self._label = safe_terminal_text(label)
         self._total = total
-        self._initial_completed = completed
         self._completed = completed
         self._progress: Progress | None = None
         self._task_id: TaskID | None = None
@@ -587,11 +552,12 @@ class TransferProgress:
             return
         if total is not None and total > 0:
             self._total = total
+        delta = completed - self._completed
+        if delta < 0:
+            # yt-dlp resets downloaded_bytes for each selected stream.
+            delta = completed
         self._completed = completed
-        self.transferred_bytes = max(
-            self.transferred_bytes,
-            completed - self._initial_completed,
-        )
+        self.transferred_bytes += delta
         if self._progress is not None and self._task_id is not None:
             self._progress.update(
                 self._task_id,
@@ -630,6 +596,9 @@ class TerminalOutput:
     def __init__(self, color: ColorMode = DEFAULT_COLOR_MODE) -> None:
         force_terminal = True if color == "always" else None
         no_color = True if color == "never" else None
+        color_system: Literal["auto", "standard"] = (
+            "standard" if color == "always" else "auto"
+        )
         stdout_force_interactive = (
             _stream_is_interactive(sys.stdout) if color == "always" else None
         )
@@ -639,6 +608,7 @@ class TerminalOutput:
         self.console = Console(
             force_terminal=force_terminal,
             force_interactive=stdout_force_interactive,
+            color_system=color_system,
             no_color=no_color,
             markup=False,
             highlight=False,
@@ -646,6 +616,7 @@ class TerminalOutput:
         self.error_console = Console(
             force_terminal=force_terminal,
             force_interactive=stderr_force_interactive,
+            color_system=color_system,
             no_color=no_color,
             markup=False,
             highlight=False,
@@ -705,8 +676,15 @@ class TerminalOutput:
         return default if not value else value in {"y", "yes"}
 
     def prompt_secret(self, label: str) -> str:
-        self.print(f"{label}: ", style="cyan", end="", error=True)
-        return getpass.getpass("")
+        prompt = f"{safe_terminal_text(label)}: "
+        try:
+            stderr_is_tty = self.error_console.file.isatty()
+        except (AttributeError, OSError):
+            stderr_is_tty = False
+        if stderr_is_tty:
+            self.print(prompt, style="cyan", end="", error=True)
+            prompt = ""
+        return getpass.getpass(prompt)
 
     def warning(self, message: str) -> None:
         self.print(f"warning: {message}", style="yellow", error=True)

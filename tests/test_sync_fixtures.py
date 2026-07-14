@@ -21,6 +21,49 @@ from .helpers import (
 )
 
 H5P_PACKAGE_URL = "https://moodle.rwth-aachen.de/pluginfile.php/activity.h5p"
+PAGE_URL = "https://moodle.rwth-aachen.de/mod/page/view.php?id=123"
+
+
+def run_page_handler(response):
+    ctx = make_context({"links.opencast": False})
+    session = FakeSession()
+    session.add("GET", PAGE_URL, response)
+    ctx.session = session
+    course_node = Node("Course", 1, "Course", None)
+    section_node = course_node.add_child("Section", 2, "Section")
+    assert section_node is not None
+    module_context = sync_handlers.ModuleContext(
+        ctx, 1, course_node, section_node, {}, {}
+    )
+
+    sync_handlers.handle_embedded_link_module(
+        module_context,
+        {
+            "id": 123,
+            "modname": "page",
+            "name": "Unavailable page",
+            "url": PAGE_URL,
+        },
+    )
+
+    return ctx
+
+
+def test_page_request_failure_is_counted(caplog):
+    def fail_request(url, kwargs):
+        raise requests.ConnectionError("offline")
+
+    ctx = run_page_handler(fail_request)
+
+    assert ctx.stats.failed == 1
+    assert "Failed to fetch page module 123" in caplog.text
+
+
+def test_page_http_failure_is_counted(caplog):
+    ctx = run_page_handler(FakeResponse(status_code=503))
+
+    assert ctx.stats.failed == 1
+    assert "Page module 123 returned status 503" in caplog.text
 
 
 def run_h5p_handler(monkeypatch, response):

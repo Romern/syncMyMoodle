@@ -384,15 +384,17 @@ def handle_embedded_link_module(  # noqa: C901 - legacy handler awaiting decompo
                     module["id"],
                     safe_request_error(error),
                 )
+                ctx.stats.failed += 1
                 response = None
-            if response and not (200 <= response.status_code < 300):
+            if response is not None and not (200 <= response.status_code < 300):
                 log.warning(
                     "Page module %s returned status %s",
                     module["id"],
                     response.status_code,
                 )
+                ctx.stats.failed += 1
                 response = None
-            if response:
+            if response is not None:
                 if opencast_enabled:
                     html = parse_html(response.text)
                     for iframe in html.find_all("iframe"):
