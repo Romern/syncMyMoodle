@@ -17,4 +17,4 @@ Opencast | 26ss/Comprehensive Sync/Materials/Page module | https://video.example
 Embedded videojs | 26ss/Comprehensive Sync/Materials/page-video.mp4 | https://moodle.rwth-aachen.de/pluginfile.php/104/mod_page/content/315/page-video.mp4 |  |
 Youtube | 26ss/Comprehensive Sync/Materials/Youtube: Page module | https://www.youtube.com/watch?v=pagevideo01 |  |
 Youtube | 26ss/Comprehensive Sync/Materials/Youtube: Label module | https://www.youtube.com/watch?v=labelvid001 |  |
-Youtube | 26ss/Comprehensive Sync/Materials/Youtube: h5pactivity | https://www.youtube.com/watch?v=h5pvideo001 |  |
+Youtube | 26ss/Comprehensive Sync/Materials/Youtube: H5P module | https://www.youtube.com/watch?v=h5pvideo001 |  |

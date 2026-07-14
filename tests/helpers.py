@@ -8,8 +8,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from syncmymoodle import downloader
 from syncmymoodle.config import Config
+from syncmymoodle.constants import HTTP_TIMEOUT_SECONDS
 from syncmymoodle.context import MoodleAccount, SyncContext
 from syncmymoodle.moodle_tokens import MoodleTokens
 from syncmymoodle.node import Node
@@ -90,6 +90,9 @@ class FakeSession:
 
     def _dispatch(self, method: str, url: str, **kwargs: Any) -> FakeResponse:
         method = method.upper()
+        assert kwargs.get("timeout") == HTTP_TIMEOUT_SECONDS, (
+            f"Fake HTTP request must use the shared timeout: {method} {url}"
+        )
         self.calls.append((method, url))
         route = self.routes.get((method, url))
         if route is None:
@@ -162,10 +165,6 @@ def make_context(config: dict[str, Any] | None = None) -> SyncContext:
 
 def node_path(ctx: SyncContext, node: Node) -> Path:
     return get_sanitized_node_path(node, Path(ctx.config.sync_directory))
-
-
-def download_file(ctx: SyncContext, node: Node) -> bool:
-    return downloader.download_file(ctx, node)
 
 
 def node_at_path(root: Node, target_path: list[str]) -> Node:

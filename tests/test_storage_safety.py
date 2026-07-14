@@ -2,24 +2,32 @@ import gzip
 import json
 import os
 import stat
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+import requests
 
-from syncmymoodle import course_cache, pathing
+from syncmymoodle import pathing
 from syncmymoodle.node import Node
 from syncmymoodle.pathing import (
+    PATH_COMPONENT_MAX_BYTES,
+    format_conflict_path,
     make_conflict_path,
     sanitize_path_part,
     windows_extended_length_path,
 )
 from syncmymoodle.storage import (
     chmod_private_best_effort,
+    load_session_from_data,
     read_private_gzip_json,
+    save_session,
+    session_to_data,
     write_private_gzip_json,
+    write_private_text,
 )
 
-from .helpers import FakeSession, download_file, make_context, node_path
+from .helpers import make_context, node_path
 
 
 def test_sanitized_node_path_stays_inside_basedir(tmp_path):
@@ -44,6 +52,39 @@ def test_sanitize_path_part_avoids_windows_reserved_names():
     assert sanitize_path_part("COM²") == "_COM²"
     assert sanitize_path_part("lecture.") == "lecture"
     assert sanitize_path_part("bad\x00name") == "badname"
+
+
+def test_sanitize_path_part_decodes_entities_idempotently():
+    sanitized = sanitize_path_part("R&amp;amp;D")
+
+    assert sanitized == "R&D"
+    assert sanitize_path_part(sanitized) == sanitized
+
+
+def test_sanitize_path_part_bounds_long_names_and_preserves_extension():
+    first = sanitize_path_part(f"lecture-{'a' * 300}-one.pdf")
+    second = sanitize_path_part(f"lecture-{'a' * 300}-two.pdf")
+
+    assert len(first.encode("utf-8")) <= PATH_COMPONENT_MAX_BYTES
+    assert first.startswith("lecture-")
+    assert first.endswith(".pdf")
+    assert first != second
+    assert sanitize_path_part(first) == first
+
+
+def test_sanitize_path_part_applies_limit_to_multibyte_names():
+    sanitized = sanitize_path_part(f"{'資料' * 150}.pdf")
+
+    assert len(sanitized.encode("utf-8")) <= PATH_COMPONENT_MAX_BYTES
+    assert sanitized.endswith(".pdf")
+
+
+def test_bounded_name_leaves_room_for_internal_suffixes():
+    sanitized = sanitize_path_part(f"{'a' * 300}.pdf")
+    conflict_name = format_conflict_path(Path(sanitized), "12345678", 999).name
+
+    assert len(f".{sanitized}.smmpart.etag".encode("utf-8")) <= 255
+    assert len(conflict_name.encode("utf-8")) <= 255
 
 
 def test_empty_child_node_name_materializes_as_placeholder(tmp_path):
@@ -117,6 +158,155 @@ def test_private_gzip_json_roundtrip_uses_private_permissions(tmp_path):
         "format": "test",
         "value": 1,
     }
+
+
+def test_session_cache_roundtrip_includes_session_key(tmp_path):
+    target = tmp_path / "session"
+    cookies = requests.cookies.RequestsCookieJar()
+    cookies.set("MoodleSession", "cookie-value", domain="moodle.example", path="/")
+
+    save_session(target, cookies, "sesskey-value")
+
+    payload = read_private_gzip_json(target, "session cookie")
+    restored = requests.cookies.RequestsCookieJar()
+    assert payload["format"] == "syncmymoodle.session.v2"
+    assert load_session_from_data(restored, payload) == "sesskey-value"
+    assert restored.get("MoodleSession", domain="moodle.example", path="/") == (
+        "cookie-value"
+    )
+
+
+def test_legacy_cookie_cache_loads_without_session_key():
+    cookies = requests.cookies.RequestsCookieJar()
+    payload = session_to_data(cookies, "unused")
+    payload["format"] = "syncmymoodle.cookies.v1"
+    payload.pop("session_key")
+
+    assert load_session_from_data(cookies, payload) is None
+
+
+@pytest.mark.parametrize(
+    "cookie_data_items",
+    [
+        1,
+        [{"name": "valid", "value": "restorable"}, "not an object"],
+    ],
+)
+def test_malformed_cookie_list_is_ignored_without_partial_restore(
+    caplog, cookie_data_items
+):
+    cookies = requests.cookies.RequestsCookieJar()
+    payload = {
+        "format": "syncmymoodle.session.v2",
+        "session_key": "session-key",
+        "cookies": cookie_data_items,
+    }
+
+    assert load_session_from_data(cookies, payload) is None
+    assert list(cookies) == []
+    assert "Ignoring malformed cookie file" in caplog.text
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("value", 123),
+        ("domain", 123),
+        ("path", 123),
+        ("secure", {}),
+        ("expires", {}),
+        ("rest", {"HttpOnly": 123}),
+    ],
+)
+def test_malformed_cookie_fields_are_ignored_without_restore(caplog, field, value):
+    cookies = requests.cookies.RequestsCookieJar()
+    cookie = {
+        "name": "MoodleSession",
+        "value": "cookie-value",
+        "domain": "moodle.example",
+        "path": "/",
+        "secure": True,
+        "expires": None,
+        "rest": {"HttpOnly": None},
+    }
+    cookie[field] = value
+    payload = {
+        "format": "syncmymoodle.session.v2",
+        "session_key": "session-key",
+        "cookies": [cookie],
+    }
+
+    assert load_session_from_data(cookies, payload) is None
+    assert list(cookies) == []
+    assert "Ignoring malformed cookie file" in caplog.text
+
+
+def test_private_text_write_is_atomic_and_private(tmp_path, monkeypatch):
+    target = tmp_path / "config.toml"
+    write_private_text(target, "original", "config")
+    assert stat.S_IMODE(target.stat().st_mode) == 0o600
+
+    def failed_replace(source, destination):
+        raise OSError("simulated replace failure")
+
+    monkeypatch.setattr(os, "replace", failed_replace)
+
+    with pytest.raises(OSError, match="simulated replace failure"):
+        write_private_text(target, "replacement", "config")
+
+    assert target.read_text(encoding="utf-8") == "original"
+    assert list(tmp_path.glob(".config.toml.*")) == []
+
+
+def test_private_text_restricts_temp_before_writing_on_windows(tmp_path, monkeypatch):
+    target = tmp_path / "config.toml"
+    restricted_paths = []
+    monkeypatch.setattr("syncmymoodle.pathing.is_windows", lambda: True)
+    monkeypatch.setattr(
+        "syncmymoodle.storage.restrict_private_file_windows",
+        lambda path: restricted_paths.append(path),
+    )
+
+    write_private_text(target, "[auth]\n", "config")
+
+    assert len(restricted_paths) == 1
+    assert restricted_paths[0].name.startswith(".config.toml.")
+    assert target.read_text(encoding="utf-8") == "[auth]\n"
+
+
+def test_private_text_aborts_when_temp_permissions_cannot_be_restricted(
+    tmp_path, monkeypatch
+):
+    target = tmp_path / "config.toml"
+    target.write_text("original", encoding="utf-8")
+    monkeypatch.setattr("syncmymoodle.pathing.is_windows", lambda: True)
+    monkeypatch.setattr(
+        "syncmymoodle.storage.restrict_private_file_windows",
+        lambda path: (_ for _ in ()).throw(OSError("ACL denied")),
+    )
+
+    with pytest.raises(PermissionError, match="temporary config"):
+        write_private_text(target, "secret", "config")
+
+    assert target.read_text(encoding="utf-8") == "original"
+    assert list(tmp_path.glob(".config.toml.*")) == []
+
+
+def test_private_text_aborts_when_fchmod_fails(tmp_path, monkeypatch):
+    target = tmp_path / "config.toml"
+    monkeypatch.setattr("syncmymoodle.pathing.is_windows", lambda: False)
+    monkeypatch.setattr(
+        os,
+        "fchmod",
+        lambda fd, mode: (_ for _ in ()).throw(OSError("chmod denied")),
+        raising=False,
+    )
+
+    with pytest.raises(PermissionError, match="temporary config"):
+        write_private_text(target, "secret", "config")
+
+    assert not target.exists()
+    assert list(tmp_path.glob(".config.toml.*")) == []
 
 
 def test_private_chmod_warns_on_windows(tmp_path, monkeypatch, caplog):
@@ -235,44 +425,3 @@ def test_private_gzip_json_closes_temp_file_before_cleanup(tmp_path, monkeypatch
     assert closed_fds
     assert not target.exists()
     assert list(tmp_path.glob(".session.*")) == []
-
-
-def test_download_uses_course_cache_to_skip_unchanged_file(tmp_path):
-    config = {"paths.sync_directory": str(tmp_path), "downloads.update_files": True}
-    cached_syncer = make_context(config)
-    cached_root = Node("", -1, "Root", None)
-    semester = cached_root.add_child("26ss", None, "Semester")
-    course = semester.add_child("Cache Behavior", 301, "Course")
-    section = course.add_child("General", 401, "Section")
-    cached_file = section.add_child(
-        "slides.pdf",
-        "https://moodle.rwth-aachen.de/pluginfile.php/301/slides.pdf",
-        "Linked file [application/pdf]",
-        url="https://moodle.rwth-aachen.de/pluginfile.php/301/slides.pdf",
-        timemodified=1710000300,
-    )
-    # A real cache is written after a successful download.
-    cached_file.is_downloaded = True
-    cached_syncer.root_node = cached_root
-    course_cache.cache_root_node(cached_syncer)
-
-    download_path = node_path(cached_syncer, cached_file)
-    download_path.parent.mkdir(parents=True, exist_ok=True)
-    download_path.write_bytes(b"already downloaded")
-
-    syncer = make_context(config)
-    syncer.session = FakeSession()
-    current_root = Node("", -1, "Root", None)
-    current_semester = current_root.add_child("26ss", None, "Semester")
-    current_course = current_semester.add_child("Cache Behavior", 301, "Course")
-    current_section = current_course.add_child("General", 401, "Section")
-    current_file = current_section.add_child(
-        "slides.pdf",
-        "https://moodle.rwth-aachen.de/pluginfile.php/301/slides.pdf",
-        "Linked file [application/pdf]",
-        url="https://moodle.rwth-aachen.de/pluginfile.php/301/slides.pdf",
-        timemodified=1710000300,
-    )
-
-    assert download_file(syncer, current_file) is True
-    assert syncer.session.calls == []

@@ -1,5 +1,3 @@
-import logging
-
 from syncmymoodle.config import Config
 from syncmymoodle.filters import format_course_name as format_course_name_impl
 from syncmymoodle.node import Node
@@ -37,14 +35,6 @@ def test_non_matching_names_are_preserved():
     assert format_course_name("remove", "(VO)Analysis") == "(VO)Analysis"
     assert format_course_name("remove", "(V) Analysis") == "(V) Analysis"
     assert format_course_name("remove", "(ABC) Analysis") == "(ABC) Analysis"
-
-
-def test_invalid_mode_preserves_course_name(caplog):
-    config = Config.from_dict({})
-    config.course_prefix_handling = "invalid"
-    with caplog.at_level(logging.WARNING, logger="syncmymoodle.filters"):
-        assert format_course_name_impl("(VO) Analysis", config) == "(VO) Analysis"
-    assert any(record.levelno == logging.WARNING for record in caplog.records)
 
 
 def test_page_content_url_normalization_preserves_larger_content_ids():
@@ -106,6 +96,59 @@ def test_same_section_name_without_url_keeps_legacy_merged_path():
     assert names == ["Case Study", "Case Study"]
 
 
+def build_merged_section_files(
+    first_url: str,
+    second_url: str,
+) -> tuple[Node, Node, Node, Node, Node]:
+    root = Node("", -1, "Root", None)
+    course = root.add_child("Course", 100, "Course")
+    first_section = course.add_child("Case Study", 201, "Section")
+    second_section = course.add_child("Case Study", 202, "Section")
+    first_file = first_section.add_child(
+        "slides.pdf",
+        301,
+        "Linked file [application/pdf]",
+        url=first_url,
+    )
+    second_file = second_section.add_child(
+        "slides.pdf",
+        302,
+        "Linked file [application/pdf]",
+        url=second_url,
+    )
+    return root, first_section, second_section, first_file, second_file
+
+
+def test_different_files_in_merged_sections_get_distinct_names():
+    root, first_section, second_section, first_file, second_file = (
+        build_merged_section_files(
+            "https://example.test/first/slides.pdf",
+            "https://example.test/second/slides.pdf",
+        )
+    )
+
+    root.remove_children_nameclashes()
+
+    assert first_section.name == second_section.name == "Case Study"
+    materialized_names = {
+        sanitize_path_part(first_file.name).casefold(),
+        sanitize_path_part(second_file.name).casefold(),
+    }
+    assert len(materialized_names) == 2
+    assert "slides.pdf" not in materialized_names
+
+
+def test_same_file_in_merged_sections_keeps_shared_name():
+    root, _, _, first_file, second_file = build_merged_section_files(
+        "https://example.test/slides.pdf",
+        "https://example.test/slides.pdf",
+    )
+
+    root.remove_children_nameclashes()
+
+    assert first_file.name == second_file.name == "slides.pdf"
+
+
 def test_same_name_with_different_urls_still_gets_stable_suffixes():
     root = Node("", -1, "Root", None)
     section = root.add_child("General", None, "Section")
@@ -149,6 +192,52 @@ def test_clashing_files_without_name_clash_id_use_url_for_distinct_names():
     assert len(names) == 2
     assert len(set(names)) == 2
     assert "slides.pdf" not in names
+
+
+def test_generated_file_name_cannot_collide_with_existing_file():
+    probe = Node("", -1, "Root", None)
+    probe_section = probe.add_child("General", None, "Section")
+    probe_first = probe_section.add_child(
+        "slides.pdf",
+        "first",
+        "Linked file [application/pdf]",
+        url="https://example.test/first.pdf",
+    )
+    probe_section.add_child(
+        "slides.pdf",
+        "second",
+        "Linked file [application/pdf]",
+        url="https://example.test/second.pdf",
+    )
+    probe.remove_children_nameclashes()
+
+    root = Node("", -1, "Root", None)
+    section = root.add_child("General", None, "Section")
+    section.add_child(
+        "slides.pdf",
+        "first",
+        "Linked file [application/pdf]",
+        url="https://example.test/first.pdf",
+    )
+    section.add_child(
+        "slides.pdf",
+        "second",
+        "Linked file [application/pdf]",
+        url="https://example.test/second.pdf",
+    )
+    section.add_child(
+        probe_first.name,
+        "reserved",
+        "Linked file [application/pdf]",
+        url="https://example.test/reserved.pdf",
+    )
+
+    root.remove_children_nameclashes()
+
+    materialized_names = [
+        sanitize_path_part(child.name).casefold() for child in section.children
+    ]
+    assert len(materialized_names) == len(set(materialized_names))
 
 
 def test_names_that_sanitize_to_same_windows_path_get_distinct_suffixes():

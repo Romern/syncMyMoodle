@@ -15,8 +15,12 @@ def get_or_add_child(
     id: Any,  # noqa: A002 - keep Moodle payload name
     type: str,  # noqa: A002 - keep Moodle payload name
 ) -> Node | None:
+    filesystem_name = sanitize_path_part(name).casefold()
     for child in parent_node.children:
-        if child.name == name and child.type == type:
+        if (
+            child.type == type
+            and sanitize_path_part(child.name).casefold() == filesystem_name
+        ):
             return child
     return parent_node.add_child(name, id, type)
 
@@ -34,7 +38,7 @@ def add_moodle_file_node(
 ) -> Node | None:
     target_node: Node | None = parent_node
     path_segments = [
-        sanitize_path_part(segment)
+        segment
         for segment in str(moodle_filepath or "").strip("/").split("/")
         if segment
     ]

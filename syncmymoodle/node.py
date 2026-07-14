@@ -6,7 +6,7 @@ from enum import StrEnum
 from pathlib import Path
 from typing import Any
 
-from syncmymoodle.pathing import sanitize_path_part
+from syncmymoodle.pathing import sanitize_path_part, sanitized_node_path_parts
 
 NAME_CLASH_ID_UNSET = object()
 
@@ -67,7 +67,6 @@ class Node:
         remote_size: Any = None,
         name_clash_id: Any = NAME_CLASH_ID_UNSET,
         download_status: DownloadStatus | str | None = None,
-        is_downloaded: bool = False,
     ) -> None:
         self.name = name
         self.id = id
@@ -87,8 +86,8 @@ class Node:
         self.name_clash_id = (
             id if name_clash_id is NAME_CLASH_ID_UNSET else name_clash_id
         )
-        self.download_status = _download_status(download_status) or (
-            DownloadStatus.HANDLED if is_downloaded else DownloadStatus.PENDING
+        self.download_status = (
+            _download_status(download_status) or DownloadStatus.PENDING
         )
 
     def __repr__(self) -> str:
@@ -100,16 +99,6 @@ class Node:
 
     def mark_handled(self) -> None:
         self.download_status = DownloadStatus.HANDLED
-
-    @property
-    def is_downloaded(self) -> bool:
-        return self.is_handled
-
-    @is_downloaded.setter
-    def is_downloaded(self, value: bool) -> None:
-        self.download_status = (
-            DownloadStatus.HANDLED if value else DownloadStatus.PENDING
-        )
 
     def add_child(
         self,
@@ -177,34 +166,12 @@ class Node:
             cur = cur.parent
         return ret
 
-    def go_to_path(self, target_path: list[str]) -> Node:
-        target_node = [self]
-        for path_child in target_path:
-            if path_child == "":
-                continue
-            try:
-                target_node.append(
-                    [
-                        node_child
-                        for node_child in target_node[-1].children
-                        if node_child.name == path_child
-                    ][0]
-                )
-            except IndexError:
-                # The IndexError just means "no matching child"; its traceback
-                # adds no useful context to the error.
-                raise Exception(
-                    "The path is not found in this root node. Wrong path?"
-                ) from None
-        return target_node[-1]
-
     def _clash_suffix(self) -> str:
         # Stable, distinct suffix used to disambiguate same-named siblings.
-        # Fall back to the URL when no name_clash_id is set (direct-link,
-        # embedded, and direct-content file nodes pass name_clash_id=None);
-        # otherwise such nodes would all hash to md5("None") and collide onto
-        # the same path, silently dropping all but one file.
-        key = self.name_clash_id if self.name_clash_id is not None else self.url
+        # A URL identifies the actual downloadable file, including direct-link
+        # nodes whose name_clash_id is None. Non-downloadable nodes such as
+        # courses fall back to their stable Moodle id.
+        key = self.url if self.url is not None else self.name_clash_id
         return base64.urlsafe_b64encode(
             hashlib.md5(str(key).encode("utf-8")).hexdigest().encode("utf-8")
         ).decode()[:10]
@@ -219,6 +186,9 @@ class Node:
     @staticmethod
     def _filesystem_name_key(node: Node) -> str:
         return sanitize_path_part(node.name).casefold()
+
+    def _filesystem_path_key(self) -> tuple[str, ...]:
+        return tuple(part.casefold() for part in sanitized_node_path_parts(self))
 
     @classmethod
     def _general_name_clash(cls, left: Node, right: Node) -> bool:
@@ -284,9 +254,41 @@ class Node:
 
         return renamed
 
-    def remove_children_nameclashes(self) -> None:
+    def _remove_sibling_nameclashes(self) -> None:
         self.children = self._apply_opencast_name_clashes(self.children)
         self.children = self._apply_general_name_clashes(self.children)
 
         for child in self.children:
-            child.remove_children_nameclashes()
+            child._remove_sibling_nameclashes()
+
+    def _resolve_download_path_clashes(self) -> None:
+        download_nodes: list[Node] = []
+        remaining = [self]
+        while remaining:
+            node = remaining.pop()
+            remaining.extend(node.children)
+            if node.url:
+                download_nodes.append(node)
+
+        # Each pass either resolves every collision or moves a colliding file
+        # away from a pre-existing generated name. At most one such name can be
+        # consumed per file; the bound prevents a malformed tree from looping.
+        for _ in range(len(download_nodes) + 1):
+            nodes_by_path: dict[tuple[str, ...], list[Node]] = {}
+            for node in download_nodes:
+                nodes_by_path.setdefault(node._filesystem_path_key(), []).append(node)
+            clashes = [
+                nodes
+                for nodes in nodes_by_path.values()
+                if len({node.url for node in nodes}) > 1
+            ]
+            if not clashes:
+                return
+            for nodes in clashes:
+                for node in nodes:
+                    node.name = node._stable_clash_name()
+        raise ValueError("Could not create unique paths for downloaded files")
+
+    def remove_children_nameclashes(self) -> None:
+        self._remove_sibling_nameclashes()
+        self._resolve_download_path_clashes()

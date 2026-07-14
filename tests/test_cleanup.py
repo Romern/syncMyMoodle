@@ -58,11 +58,47 @@ def test_cleanup_recognizes_generated_conflict_paths(tmp_path):
     assert cleanup.iter_conflicts(tmp_path)[0].canonical == current
 
 
+def test_cleanup_does_not_confuse_numeric_extension_with_copy_index(tmp_path):
+    current = write(tmp_path / "lecture.1", b"new remote content")
+    conflict = pathing.make_conflict_path(current)
+    write(conflict, b"unique local edit")
+    write(tmp_path / "lecture", b"unique local edit")
+
+    parsed = pathing.parse_conflict_path(conflict)
+    plan = cleanup.conflict_cleanup_plan(cleanup.iter_conflicts(tmp_path))
+
+    assert parsed is not None
+    assert parsed.canonical == current
+    assert plan.remove == ()
+    assert [kept.path for kept in plan.keep] == [conflict]
+
+
+def test_cleanup_ignores_ambiguous_legacy_numeric_conflict(tmp_path):
+    legacy_conflict = write(
+        tmp_path / "lecture.syncconflict.aaaaaaaa.1", b"unique local edit"
+    )
+    write(tmp_path / "lecture", b"unique local edit")
+
+    assert pathing.parse_conflict_path(legacy_conflict) is None
+    assert cleanup.iter_conflicts(tmp_path) == []
+
+
 def test_iter_course_caches_finds_only_cache_files(tmp_path):
     cache = write(tmp_path / "course" / COURSE_CACHE_FILENAME, b"{}")
     write(tmp_path / "course" / "notes.syncmymoodle_cache", b"not a cache")
 
     assert cleanup.iter_course_caches(tmp_path) == [cache]
+
+
+@pytest.mark.parametrize("command", ["conflicts", "caches"])
+def test_clean_help_makes_dry_run_default_explicit(command, capsys):
+    with pytest.raises(SystemExit) as exc_info:
+        cli.main(["clean", command, "--help"])
+
+    assert exc_info.value.code == 0
+    output = capsys.readouterr().out
+    assert "default is a dry run" in output
+    assert "--apply" in output
 
 
 def test_clean_conflicts_dry_run_uses_config_without_credentials(tmp_path, capsys):
@@ -82,25 +118,6 @@ def test_clean_conflicts_dry_run_uses_config_without_credentials(tmp_path, capsy
     assert "Dry run only." in captured.out
     assert captured.err == ""
     assert conflict.exists()
-
-
-def test_clean_uses_config_relative_sync_directory(tmp_path, monkeypatch, capsys):
-    config_dir = tmp_path / "config"
-    root = config_dir / "Moodle"
-    current = write(root / "course" / "file.pdf", b"content")
-    conflict = write(current.with_name("file.syncconflict.aaaaaaaa.pdf"), b"content")
-    config_dir.mkdir(exist_ok=True)
-    config_path = config_dir / "config.toml"
-    config_path.write_text('[paths]\nsync_directory = "Moodle"\n', encoding="utf-8")
-    cwd = tmp_path / "work"
-    cwd.mkdir()
-    monkeypatch.chdir(cwd)
-
-    cli.main(["--config", str(config_path), "clean", "conflicts"])
-
-    captured = capsys.readouterr()
-    assert f"Would delete: {conflict}" in captured.out
-    assert captured.err == ""
 
 
 def test_clean_conflicts_apply_deletes_redundant_conflicts(tmp_path, capsys):
@@ -129,25 +146,6 @@ def test_clean_apply_requires_explicit_or_configured_path(
     )
 
 
-def test_clean_apply_accepts_sync_directory_override(tmp_path, monkeypatch):
-    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "xdg"))
-    root = tmp_path / "Moodle"
-    current = write(root / "course" / "file.pdf", b"content")
-    conflict = write(current.with_name("file.syncconflict.aaaaaaaa.pdf"), b"content")
-
-    cli.main(
-        [
-            "--sync-directory",
-            str(root),
-            "clean",
-            "conflicts",
-            "--apply",
-        ]
-    )
-
-    assert not conflict.exists()
-
-
 def test_clean_caches_apply_deletes_course_caches(tmp_path, capsys):
     cache = write(tmp_path / "course" / COURSE_CACHE_FILENAME, b"{}")
 
@@ -166,9 +164,7 @@ def test_clean_rejects_missing_path(tmp_path):
     assert exc_info.value.code == 2
 
 
-def test_clean_rejects_invalid_cli_overrides_without_traceback(
-    tmp_path, monkeypatch, capsys
-):
+def test_clean_rejects_sync_options_without_traceback(tmp_path, monkeypatch, capsys):
     monkeypatch.chdir(tmp_path)
     monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "xdg"))
 
@@ -177,5 +173,5 @@ def test_clean_rejects_invalid_cli_overrides_without_traceback(
 
     assert exc_info.value.code == 2
     captured = capsys.readouterr()
-    assert "filters.max_file_size must be a size" in captured.err
+    assert "sync options cannot be used with `clean`: --max-file-size" in captured.err
     assert "Traceback" not in captured.err

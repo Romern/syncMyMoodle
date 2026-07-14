@@ -14,6 +14,7 @@ from syncmymoodle.pathing import get_sanitized_node_path
 from syncmymoodle.storage import read_private_gzip_json, write_private_gzip_json
 
 logger = logging.getLogger(__name__)
+COURSE_CACHE_FORMAT = "syncmymoodle.course-cache.v1"
 
 
 def _node_path(ctx: SyncContext, node: Node) -> Path:
@@ -56,8 +57,8 @@ def node_to_cache_data(
     timemodified = node.timemodified
     etag = node.etag
     etag_kind = node.etag_kind
-    content_hash = getattr(node, "content_hash", None)
-    remote_size = getattr(node, "remote_size", None)
+    content_hash = node.content_hash
+    remote_size = node.remote_size
     is_handled = node.is_handled
     node_path = _node_path(ctx, node)
     downloaded_this_run = node_path in ctx.downloaded_paths
@@ -72,15 +73,11 @@ def node_to_cache_data(
         and old_node.is_handled
         and node_path.exists()
     ):
-        timemodified = getattr(old_node, "timemodified", None)
-        etag = getattr(old_node, "etag", None)
-        etag_kind = getattr(old_node, "etag_kind", None)
-        content_hash = getattr(old_node, "content_hash", None)
-        remote_size = (
-            remote_size
-            if remote_size is not None
-            else getattr(old_node, "remote_size", None)
-        )
+        timemodified = old_node.timemodified
+        etag = old_node.etag
+        etag_kind = old_node.etag_kind
+        content_hash = old_node.content_hash
+        remote_size = remote_size if remote_size is not None else old_node.remote_size
         is_handled = True
     return {
         "name": node.name,
@@ -104,14 +101,23 @@ def node_to_cache_data(
 
 
 def node_from_cache_data(data: dict[str, Any], parent: Node | None = None) -> Node:
+    name = data.get("name", "")
+    node_type = data.get("type", "Unknown")
+    children = data.get("children", [])
+    if not isinstance(name, str) or not isinstance(node_type, str):
+        raise ValueError("course cache node has invalid name or type")
+    if not isinstance(children, list) or not all(
+        isinstance(child, dict) for child in children
+    ):
+        raise ValueError("course cache node has invalid children")
+
     download_status = data.get("download_status")
-    legacy_is_downloaded = download_status is None and bool(
-        data.get("is_downloaded", False)
-    )
+    if download_status is None and data.get("is_downloaded"):
+        download_status = DownloadStatus.HANDLED
     node = Node(
-        data.get("name", ""),
+        name,
         data.get("id"),
-        data.get("type", "Unknown"),
+        node_type,
         parent,
         url=data.get("url"),
         timemodified=data.get("timemodified"),
@@ -121,32 +127,9 @@ def node_from_cache_data(data: dict[str, Any], parent: Node | None = None) -> No
         remote_size=data.get("remote_size"),
         name_clash_id=data.get("name_clash_id", NAME_CLASH_ID_UNSET),
         download_status=download_status,
-        is_downloaded=legacy_is_downloaded,
     )
-    node.children = [
-        node_from_cache_data(child, node)
-        for child in data.get("children", [])
-        if isinstance(child, dict)
-    ]
+    node.children = [node_from_cache_data(child, node) for child in children]
     return node
-
-
-def ensure_timemodified_attribute(node: Node) -> None:
-    # Old cached root nodes might not have the timemodified attribute yet.
-    if not hasattr(node, "timemodified"):
-        node.timemodified = None
-    if not hasattr(node, "etag"):
-        node.etag = None
-    if not hasattr(node, "etag_kind"):
-        node.etag_kind = None
-    if not hasattr(node, "content_hash"):
-        node.content_hash = None
-    if not hasattr(node, "remote_size"):
-        node.remote_size = None
-    if not hasattr(node, "name_clash_id"):
-        node.name_clash_id = getattr(node, "id", None)
-    for child in getattr(node, "children", []):
-        ensure_timemodified_attribute(child)
 
 
 def get_course_node(node: Node) -> Node:
@@ -176,15 +159,18 @@ def get_course_cache_root(
     payload = read_private_gzip_json(cache_path, "course cache")
     if not isinstance(payload, dict):
         return None
-    if payload.get("format") != "syncmymoodle.course-cache.v1":
+    if payload.get("format") != COURSE_CACHE_FORMAT:
         log.warning("Ignoring unsupported course cache format: %s", cache_path)
         return None
     course_data = payload.get("course")
     if not isinstance(course_data, dict):
         return None
 
-    cached_course_root = node_from_cache_data(course_data)
-    ensure_timemodified_attribute(cached_course_root)
+    try:
+        cached_course_root = node_from_cache_data(course_data)
+    except (TypeError, ValueError):
+        log.warning("Ignoring malformed course cache: %s", cache_path)
+        return None
 
     ctx.course_caches[course_path] = cached_course_root
     return cached_course_root
@@ -229,7 +215,7 @@ def cache_root_node(
 ) -> None:
     """Persist per-course caches into .syncmymoodle_cache files.
 
-    Each course directory beneath basedir receives its own cache file
+    Each course directory beneath the sync directory receives its own cache file
     containing the course subtree, which makes caching less brittle than
     a single global root cache.
     """
@@ -252,7 +238,7 @@ def cache_root_node(
             write_private_gzip_json(
                 cache_path,
                 {
-                    "format": "syncmymoodle.course-cache.v1",
+                    "format": COURSE_CACHE_FORMAT,
                     "course": node_to_cache_data(ctx, course_node, old_course_root),
                 },
             )

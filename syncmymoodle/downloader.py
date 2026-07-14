@@ -10,6 +10,7 @@ from fnmatch import fnmatchcase
 from pathlib import Path
 from typing import Any
 
+import requests
 import yt_dlp
 from tqdm import tqdm
 
@@ -17,16 +18,45 @@ from syncmymoodle import course_cache, filters, links, pathing, quiz
 from syncmymoodle.constants import (
     DEFAULT_BLOCK_SIZE,
     HASH_ALGOS_BY_LENGTH,
+    HTTP_TIMEOUT_SECONDS,
 )
 from syncmymoodle.context import SyncContext
 from syncmymoodle.http_utils import (
     HTML_CONTENT_TYPES,
+    HttpFailureKind,
+    classify_http_failure,
+    classify_request_failure,
     content_length,
     content_type_without_parameters,
+    normalized_http_origin,
+    record_service_failure,
+    redact_url_secrets,
+    request_following_safe_redirects,
+    safe_request_error,
 )
 from syncmymoodle.node import Node, RemoteMarkerKind
 
 logger = logging.getLogger(__name__)
+CONTENT_RANGE_RE = re.compile(
+    r"^bytes\s+(?P<start>\d+)-(?P<end>\d+)/(?P<total>\d+|\*)$",
+    re.IGNORECASE,
+)
+YOUTUBE_AUXILIARY_EXTENSIONS = frozenset(
+    {
+        ".ass",
+        ".description",
+        ".gif",
+        ".jpeg",
+        ".jpg",
+        ".json",
+        ".lrc",
+        ".png",
+        ".srt",
+        ".vtt",
+        ".webp",
+        ".ytdl",
+    }
+)
 
 
 class FileMatch(Enum):
@@ -103,6 +133,53 @@ def chunk_looks_like_html(chunk: bytes) -> bool:
     )
 
 
+def request_node_url(
+    ctx: SyncContext,
+    node: Node,
+    log: logging.Logger,
+    **kwargs: Any,
+) -> Any:
+    assert node.url is not None
+    return request_following_safe_redirects(
+        ctx.require_session(),
+        "GET",
+        node.url,
+        lambda url: (
+            not filters.should_skip_url(
+                ctx.config,
+                url,
+                f"redirected {node.type} file",
+                log,
+            )
+        ),
+        **kwargs,
+    )
+
+
+def _report_download_request_failure(
+    ctx: SyncContext,
+    origin: str | None,
+    url: str,
+    error: requests.RequestException,
+    log: logging.Logger,
+) -> None:
+    reason = (
+        f"download of {redact_url_secrets(url)} failed: {safe_request_error(error)}"
+    )
+    failure_kind = classify_request_failure(error)
+    if origin:
+        record_service_failure(
+            ctx.service_outages,
+            origin,
+            f"Download origin {origin}",
+            failure_kind,
+            reason,
+            log,
+        )
+    if failure_kind is HttpFailureKind.RESOURCE:
+        log.warning("Skipping download request: %s", reason)
+
+
 def download_response_is_usable(
     node: Any,
     response: Any,
@@ -156,6 +233,9 @@ def conditional_get_confirms_unchanged(
     """
     if not node.url:
         return False
+    download_origin = normalized_http_origin(node.url)
+    if download_origin and ctx.service_outages.should_skip(download_origin):
+        return False
 
     headers: dict[str, str] = {"If-None-Match": old_etag}
     if node.download_headers:
@@ -163,7 +243,14 @@ def conditional_get_confirms_unchanged(
 
     try:
         with closing(
-            ctx.require_session().get(node.url, headers=headers, stream=True)
+            request_node_url(
+                ctx,
+                node,
+                log,
+                headers=headers,
+                stream=True,
+                timeout=HTTP_TIMEOUT_SECONDS,
+            )
         ) as response:
             response_etag = response.headers.get("ETag")
             if response.status_code == 304:
@@ -174,8 +261,12 @@ def conditional_get_confirms_unchanged(
                 node.etag = response_etag
                 node.etag_kind = RemoteMarkerKind.OPAQUE
                 return True
-    except Exception as exc:
-        log.warning("Failed to validate cached ETag for %s: %s", node.url, exc)
+    except requests.RequestException as error:
+        log.warning(
+            "Failed to validate cached ETag for %s: %s",
+            redact_url_secrets(node.url),
+            safe_request_error(error),
+        )
     return False
 
 
@@ -415,6 +506,25 @@ def download_violates_size_limits(
     return True
 
 
+def planned_download_action(
+    ctx: SyncContext,
+    node: Node,
+    downloadpath: Path,
+    log: logging.Logger = logger,
+) -> ConflictAction | None:
+    """Return the transfer action, or None when policy handles the node."""
+    if should_skip_before_decision(ctx, node, downloadpath, log):
+        return None
+    if known_remote_size_violates_limit(ctx, node, downloadpath, log):
+        return None
+
+    decision = decide_download(ctx, node, downloadpath, log)
+    if decision.skip:
+        return None
+    action = conflict_action(ctx, decision, downloadpath, log)
+    return None if action == ConflictAction.SKIP else action
+
+
 def prepare_transfer_plan(node: Node, downloadpath: Path) -> TransferPlan:
     tmp_path = pathing.with_windows_extended_length_prefix(
         downloadpath.parent / f".{downloadpath.name}.smmpart"
@@ -444,12 +554,30 @@ def prepare_transfer_plan(node: Node, downloadpath: Path) -> TransferPlan:
     return plan
 
 
+def valid_resume_content_range(value: Any, resume_size: int) -> bool:
+    if not isinstance(value, str):
+        return False
+    match = CONTENT_RANGE_RE.fullmatch(value.strip())
+    if match is None:
+        return False
+    start = int(match.group("start"))
+    end = int(match.group("end"))
+    total = match.group("total")
+    return start == resume_size and end >= start and (total == "*" or end < int(total))
+
+
 def validate_resume_response(response: Any, transfer: TransferPlan) -> bool:
     if not transfer.resume_size:
         return True
 
     etag_header = response.headers.get("ETag")
-    valid_resume = response.status_code == 206 and etag_header == transfer.partial_etag
+    valid_resume = (
+        response.status_code == 206
+        and etag_header == transfer.partial_etag
+        and valid_resume_content_range(
+            response.headers.get("Content-Range"), transfer.resume_size
+        )
+    )
     if valid_resume:
         return True
 
@@ -490,9 +618,7 @@ def write_response_body(
     first_chunk: bytes,
 ) -> None:
     print(f"Downloading {downloadpath} [{node.type}]")
-    total_size_in_bytes = int(response.headers.get("content-length", 0)) + max(
-        transfer.resume_size, 0
-    )
+    total_size_in_bytes = content_length(response, transfer.resume_size) or 0
     progress_bar = tqdm(total=total_size_in_bytes, unit="iB", unit_scale=True)
     try:
         if transfer.resume_size:
@@ -567,6 +693,73 @@ def record_download_metadata(
         node.etag_kind = RemoteMarkerKind.OPAQUE
 
 
+def process_download_response(
+    ctx: SyncContext,
+    node: Node,
+    response: Any,
+    transfer: TransferPlan | None,
+    downloadpath: Path,
+    action: ConflictAction,
+    log: logging.Logger,
+) -> bool:
+    etag_header = response.headers.get("ETag")
+
+    if transfer is not None and not validate_resume_response(response, transfer):
+        return False
+
+    resume_size = transfer.resume_size if transfer is not None else 0
+    if not download_response_is_usable(node, response, downloadpath, log):
+        return True if ctx.config.dry_run else False
+    if download_violates_size_limits(
+        ctx, node, response, resume_size, downloadpath, log
+    ):
+        return True
+
+    if ctx.config.dry_run:
+        print(f"Would download {downloadpath} [{node.type}]")
+        return True
+
+    assert transfer is not None
+    content = response.iter_content(DEFAULT_BLOCK_SIZE)
+    first_chunk = next((chunk for chunk in content if chunk), b"")
+    if not response_body_is_usable(node, first_chunk, downloadpath, log):
+        return False
+
+    write_response_body(node, response, transfer, downloadpath, content, first_chunk)
+    if not install_downloaded_file(downloadpath, transfer, action, log):
+        return True
+    record_download_metadata(node, downloadpath, etag_header)
+    ctx.downloaded_paths.add(downloadpath)
+    return True
+
+
+def _classify_download_response(
+    ctx: SyncContext,
+    node: Node,
+    response: Any,
+    request_origin: str | None,
+    log: logging.Logger,
+) -> HttpFailureKind | None:
+    response_origin = normalized_http_origin(response.url or node.url) or request_origin
+    if request_origin and response_origin != request_origin:
+        ctx.service_outages.record_available(request_origin)
+    failure_kind = classify_http_failure(response.status_code)
+    if response_origin is None:
+        return failure_kind
+    if failure_kind is None:
+        ctx.service_outages.record_available(response_origin)
+    else:
+        record_service_failure(
+            ctx.service_outages,
+            response_origin,
+            f"Download origin {response_origin}",
+            failure_kind,
+            f"GET {redact_url_secrets(node.url)} returned HTTP {response.status_code}",
+            log,
+        )
+    return failure_kind
+
+
 def download_file(
     ctx: SyncContext,
     node: Node,
@@ -579,18 +772,12 @@ def download_file(
 
     if not node.url:
         return False
+    download_origin = normalized_http_origin(node.url)
+    if download_origin and ctx.service_outages.should_skip(download_origin):
+        return False
 
-    if should_skip_before_decision(ctx, node, downloadpath, log):
-        return True
-    if known_remote_size_violates_limit(ctx, node, downloadpath, log):
-        return True
-
-    decision = decide_download(ctx, node, downloadpath, log)
-    if decision.skip:
-        return True
-
-    action = conflict_action(ctx, decision, downloadpath, log)
-    if action == ConflictAction.SKIP:
+    action = planned_download_action(ctx, node, downloadpath, log)
+    if action is None:
         return True
 
     if ctx.config.dry_run and not size_limits_configured(ctx):
@@ -605,59 +792,55 @@ def download_file(
         if transfer is not None
         else {}
     )
-    with closing(
-        ctx.require_session().get(node.url, headers=headers, stream=True)
-    ) as response:
-        etag_header = response.headers.get("ETag")
-
-        if transfer is not None and not validate_resume_response(response, transfer):
-            return False
-
-        resume_size = transfer.resume_size if transfer is not None else 0
-        if not download_response_is_usable(node, response, downloadpath, log):
-            return True if ctx.config.dry_run else False
-        if download_violates_size_limits(
-            ctx, node, response, resume_size, downloadpath, log
-        ):
-            return True
-
-        if ctx.config.dry_run:
-            print(f"Would download {downloadpath} [{node.type}]")
-            return True
-
-        assert transfer is not None
-        content = response.iter_content(DEFAULT_BLOCK_SIZE)
-        first_chunk = next((chunk for chunk in content if chunk), b"")
-        if not response_body_is_usable(node, first_chunk, downloadpath, log):
-            return False
-
-        write_response_body(
-            node, response, transfer, downloadpath, content, first_chunk
+    try:
+        response = request_node_url(
+            ctx,
+            node,
+            log,
+            headers=headers,
+            stream=True,
+            timeout=HTTP_TIMEOUT_SECONDS,
         )
-        if not install_downloaded_file(downloadpath, transfer, action, log):
-            return True
-        record_download_metadata(node, downloadpath, etag_header)
-        ctx.downloaded_paths.add(downloadpath)
-        return True
+    except requests.RequestException as error:
+        _report_download_request_failure(
+            ctx,
+            download_origin,
+            node.url,
+            error,
+            log,
+        )
+        return False
+
+    with closing(response):
+        failure_kind = _classify_download_response(
+            ctx, node, response, download_origin, log
+        )
+        if failure_kind is HttpFailureKind.TRANSIENT:
+            return False
+        return process_download_response(
+            ctx,
+            node,
+            response,
+            transfer,
+            downloadpath,
+            action,
+            log,
+        )
 
 
 def download_all_files(
     ctx: SyncContext,
     log: logging.Logger = logger,
 ) -> None:
-    if not ctx.session:
-        raise Exception("You need to login() first.")
-    if not ctx.wstoken:
-        raise Exception("You need to get_moodle_wstoken() first.")
-    if not ctx.user_id:
-        raise Exception("You need to get_userid() first.")
+    ctx.require_session()
+    ctx.require_moodle_account()
     if not ctx.root_node:
         raise Exception("You need to sync() first.")
 
     download_node_tree(ctx, ctx.root_node, log)
 
 
-def download_node_tree(
+def download_node_tree(  # noqa: C901 - legacy traversal awaiting decomposition
     ctx: SyncContext,
     cur_node: Node,
     log: logging.Logger = logger,
@@ -718,7 +901,13 @@ def scan_and_download_youtube(
         return True
     video_id = links.youtube_video_id_from_node(node)
     if path.exists():
-        if video_id and any(video_id in f.name for f in path.iterdir()):
+        completed_name = re.compile(rf"-{re.escape(video_id or '')}\.[^.]+$")
+        if video_id and any(
+            file.is_file()
+            and file.suffix.lower() not in YOUTUBE_AUXILIARY_EXTENSIONS
+            and completed_name.search(file.name)
+            for file in path.iterdir()
+        ):
             return False
     if ctx.config.dry_run and not size_limits_configured(ctx):
         print(f"Would download YouTube video {link} to {path} [Youtube]")

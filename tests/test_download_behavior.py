@@ -2,8 +2,12 @@ import hashlib
 import logging
 import os
 
-from syncmymoodle import course_cache, downloader, links, pathing
+import pytest
+import requests
+
+from syncmymoodle import course_cache, downloader, links, moodle, pathing
 from syncmymoodle.constants import COURSE_CACHE_FILENAME, YOUTUBE_WATCH_URL
+from syncmymoodle.downloader import download_file
 from syncmymoodle.node import Node, RemoteMarkerKind
 from syncmymoodle.storage import write_private_gzip_json
 
@@ -11,7 +15,6 @@ from .helpers import (
     FakeResponse,
     FakeSession,
     build_single_file_tree,
-    download_file,
     make_context,
     node_path,
 )
@@ -110,6 +113,67 @@ def test_youtube_outtmpl_applies_windows_prefix_after_template_suffix(
     assert captured["links"] == ["https://youtu.be/abcdefghijk"]
 
 
+def test_youtube_partial_file_does_not_block_resume(tmp_path, monkeypatch):
+    ctx = make_context({"paths.sync_directory": str(tmp_path)})
+    _, section, video_node = build_youtube_tree("https://youtu.be/abcdefghijk")
+    video_path = node_path(ctx, section)
+    video_path.mkdir(parents=True)
+    (video_path / "Lecture-abcdefghijk.mp4.part").write_bytes(b"partial")
+    (video_path / "Lecture-abcdefghijk.webp").write_bytes(b"thumbnail")
+    downloads = []
+
+    class FakeYoutubeDL:
+        def __init__(self, opts):
+            self.opts = opts
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def download(self, urls):
+            downloads.append(urls)
+
+    monkeypatch.setattr(downloader.yt_dlp, "YoutubeDL", FakeYoutubeDL)
+
+    assert downloader.scan_and_download_youtube(ctx, video_node) is True
+    assert downloads == [["https://www.youtube.com/watch?v=abcdefghijk"]]
+
+
+def test_tokenized_request_failure_does_not_log_token(caplog):
+    secret = "request-token-must-not-leak"
+    ctx = make_context()
+    ctx.session = moodle.create_token_session(
+        moodle.MoodleTokens(
+            "fake-user",
+            secret,
+            "private-token",
+            moodle_user_id=10001,
+        )
+    )
+    _, file_node = build_single_file_tree("slides.pdf", URL)
+
+    class FailingAdapter(requests.adapters.BaseAdapter):
+        def send(self, request, **kwargs):
+            raise requests.ConnectionError(
+                f"failed request to {request.url}",
+                request=request,
+            )
+
+        def close(self):
+            pass
+
+    ctx.session.mount("https://", FailingAdapter())
+    caplog.set_level(logging.WARNING, logger="syncmymoodle.downloader")
+
+    assert (
+        downloader.conditional_get_confirms_unchanged(ctx, file_node, '"old"') is False
+    )
+    assert secret not in caplog.text
+    assert "[REDACTED]" in caplog.text
+
+
 def test_human_readable_size_formats_binary_units():
     assert downloader.human_readable_size(10) == "10 B"
     assert downloader.human_readable_size(1024) == "1 KiB"
@@ -118,18 +182,19 @@ def test_human_readable_size_formats_binary_units():
     assert downloader.human_readable_size(1024**5) == "1 PiB"
 
 
-def seed_course_cache(config, *, timemodified, etag, is_downloaded=True):
+def seed_course_cache(config, *, timemodified, etag, handled=True):
     """Write a per-course cache to disk describing a previously synced file.
 
     A real cache is written after the download walk, so a file that was
-    successfully fetched is marked is_downloaded=True; pass False to simulate a
-    previous run whose download failed.
+    successfully fetched is handled; pass False to simulate a previous run
+    whose download failed.
     """
     cache_syncer = make_context(config)
     cached_root, cached_file = build_single_file_tree(
         "slides.pdf", URL, timemodified=timemodified, etag=etag
     )
-    cached_file.is_downloaded = is_downloaded
+    if handled:
+        cached_file.mark_handled()
     cache_syncer.root_node = cached_root
     course_cache.cache_root_node(cache_syncer)
 
@@ -417,6 +482,105 @@ def test_download_within_max_file_size_proceeds(tmp_path):
     assert file_node.remote_size == 4
 
 
+def test_invalid_content_length_does_not_abort_download(tmp_path):
+    syncer, file_node = make_run_syncer(
+        {"paths.sync_directory": str(tmp_path)},
+        timemodified=1710000500,
+    )
+    syncer.session.add(
+        "GET",
+        URL,
+        FakeResponse(
+            headers={"Content-Type": "application/pdf", "content-length": "invalid"},
+            chunks=[b"data"],
+        ),
+    )
+
+    assert download_file(syncer, file_node) is True
+    assert node_path(syncer, file_node).read_bytes() == b"data"
+
+
+def test_repeated_download_503_opens_origin_circuit(caplog, tmp_path):
+    syncer, file_node = make_run_syncer(
+        {"paths.sync_directory": str(tmp_path)},
+        timemodified=1710000500,
+    )
+    syncer.session.add("GET", URL, FakeResponse(status_code=503))
+    caplog.set_level(logging.WARNING, logger="syncmymoodle.downloader")
+
+    for _ in range(4):
+        assert download_file(syncer, file_node) is False
+
+    assert syncer.session.count("GET", URL) == 3
+    assert caplog.messages == [
+        "Download origin https://moodle.rwth-aachen.de transient failure: GET "
+        f"{URL} returned HTTP 503",
+        "Download origin https://moodle.rwth-aachen.de transient failure: GET "
+        f"{URL} returned HTTP 503",
+        "Download origin https://moodle.rwth-aachen.de unavailable after 3 "
+        f"consecutive transient failures: GET {URL} returned HTTP 503; skipping "
+        "remaining requests for this sync",
+    ]
+
+
+def test_download_rejects_redirect_outside_allowed_domains(tmp_path):
+    syncer, file_node = make_run_syncer(
+        {
+            "paths.sync_directory": str(tmp_path),
+            "filters.allowed_domains": ["moodle.rwth-aachen.de"],
+        },
+        timemodified=1710000500,
+    )
+    external_url = "https://files.example.test/private.pdf"
+    syncer.session.add(
+        "GET",
+        URL,
+        FakeResponse(status_code=302, headers={"Location": external_url}),
+    )
+
+    assert download_file(syncer, file_node) is False
+    assert syncer.session.calls == [("GET", URL)]
+    assert not node_path(syncer, file_node).exists()
+
+
+def test_cross_origin_redirect_strips_download_credentials(tmp_path):
+    external_url = "https://cdn.example.test/slides.pdf"
+    syncer, file_node = make_run_syncer(
+        {
+            "paths.sync_directory": str(tmp_path),
+            "filters.allowed_domains": [
+                "moodle.rwth-aachen.de",
+                "cdn.example.test",
+            ],
+        },
+        timemodified=1710000500,
+    )
+    file_node.download_headers = {
+        "Authorization": "Basic secret",
+        "requesttoken": "request-secret",
+        "Range": "bytes=0-",
+    }
+
+    def redirect_response(url, kwargs):
+        assert kwargs["headers"]["Authorization"] == "Basic secret"
+        return FakeResponse(status_code=302, headers={"Location": external_url})
+
+    def download_response(url, kwargs):
+        assert "Authorization" not in kwargs["headers"]
+        assert "requesttoken" not in kwargs["headers"]
+        assert kwargs["headers"]["Range"] == "bytes=0-"
+        return FakeResponse(
+            headers={"Content-Type": "application/pdf"},
+            chunks=[b"data"],
+        )
+
+    syncer.session.add("GET", URL, redirect_response)
+    syncer.session.add("GET", external_url, download_response)
+
+    assert download_file(syncer, file_node) is True
+    assert node_path(syncer, file_node).read_bytes() == b"data"
+
+
 def test_dry_run_reports_downloads_without_writing(tmp_path, capsys):
     config = {"paths.sync_directory": str(tmp_path), "downloads.dry_run": True}
     syncer, file_node = make_run_syncer(config, timemodified=1710000500)
@@ -567,10 +731,10 @@ def test_unchanged_timemodified_skips_download_despite_local_edit(tmp_path):
 
 def test_failed_previous_download_is_retried_not_skipped(tmp_path):
     # The cache records Moodle's timemodified even when the previous download
-    # failed (is_downloaded=False). Such an entry must not suppress a retry,
+    # failed (still pending). Such an entry must not suppress a retry,
     # otherwise a stale file would be kept forever.
     config = {"paths.sync_directory": str(tmp_path), "downloads.update_files": True}
-    seed_course_cache(config, timemodified=1710000300, etag=None, is_downloaded=False)
+    seed_course_cache(config, timemodified=1710000300, etag=None, handled=False)
     syncer, file_node = make_run_syncer(config, timemodified=1710000300)
     download_path = node_path(syncer, file_node)
     download_path.parent.mkdir(parents=True, exist_ok=True)
@@ -588,20 +752,6 @@ def test_failed_previous_download_is_retried_not_skipped(tmp_path):
     assert download_path.read_bytes() == b"NEW CORRECT VERSION"
 
 
-def test_successful_previous_download_with_same_timemodified_is_skipped(tmp_path):
-    # The complement: a downloaded cache entry with an unchanged timemodified is
-    # still skipped without contacting the server.
-    config = {"paths.sync_directory": str(tmp_path), "downloads.update_files": True}
-    seed_course_cache(config, timemodified=1710000300, etag=None, is_downloaded=True)
-    syncer, file_node = make_run_syncer(config, timemodified=1710000300)
-    download_path = node_path(syncer, file_node)
-    download_path.parent.mkdir(parents=True, exist_ok=True)
-    download_path.write_bytes(b"already downloaded")
-
-    assert download_file(syncer, file_node) is True
-    assert syncer.session.calls == []
-
-
 def test_unchanged_linked_file_etag_skips_download(tmp_path):
     # Direct linked files do not have Moodle timemodified metadata. The HEAD
     # ETag discovered while scanning is their remote version marker, so an
@@ -609,7 +759,7 @@ def test_unchanged_linked_file_etag_skips_download(tmp_path):
     config = {"paths.sync_directory": str(tmp_path), "downloads.update_files": True}
     etag = '"linked-file-v1"'
     content = b"already downloaded linked file"
-    seed_course_cache(config, timemodified=None, etag=etag, is_downloaded=True)
+    seed_course_cache(config, timemodified=None, etag=etag)
     syncer, file_node = make_run_syncer(config, timemodified=None, etag=etag)
     download_path = node_path(syncer, file_node)
     download_path.parent.mkdir(parents=True, exist_ok=True)
@@ -627,7 +777,7 @@ def test_get_only_etag_304_skips_download(tmp_path):
     config = {"paths.sync_directory": str(tmp_path), "downloads.update_files": True}
     etag = '"opencast-v1"'
     content = b"already downloaded video"
-    seed_course_cache(config, timemodified=None, etag=etag, is_downloaded=True)
+    seed_course_cache(config, timemodified=None, etag=etag)
     syncer, file_node = make_run_syncer(config, timemodified=None, etag=None)
     download_path = node_path(syncer, file_node)
     download_path.parent.mkdir(parents=True, exist_ok=True)
@@ -655,7 +805,7 @@ def test_get_only_etag_same_200_skips_download(tmp_path):
     config = {"paths.sync_directory": str(tmp_path), "downloads.update_files": True}
     etag = '"video-v1"'
     content = b"already downloaded video"
-    seed_course_cache(config, timemodified=None, etag=etag, is_downloaded=True)
+    seed_course_cache(config, timemodified=None, etag=etag)
     syncer, file_node = make_run_syncer(config, timemodified=None, etag=None)
     download_path = node_path(syncer, file_node)
     download_path.parent.mkdir(parents=True, exist_ok=True)
@@ -680,7 +830,7 @@ def test_get_only_etag_changed_200_downloads_update(tmp_path):
     original = b"already downloaded video"
     old_etag = sha1(original)
     new_etag = '"video-v2"'
-    seed_course_cache(config, timemodified=None, etag=old_etag, is_downloaded=True)
+    seed_course_cache(config, timemodified=None, etag=old_etag)
     syncer, file_node = make_run_syncer(config, timemodified=None, etag=None)
     download_path = node_path(syncer, file_node)
     download_path.parent.mkdir(parents=True, exist_ok=True)
@@ -714,8 +864,8 @@ def test_unchanged_duplicate_section_file_uses_matching_cache_node(tmp_path):
     content = b"same case study pdf bytes"
 
     cached_root, cached_first, cached_second = build_duplicate_section_file_tree()
-    cached_first.is_downloaded = True
-    cached_second.is_downloaded = True
+    cached_first.mark_handled()
+    cached_second.mark_handled()
     cached_second.content_hash = sha256(content)
     cache_syncer = make_context(config)
     cache_syncer.root_node = cached_root
@@ -737,6 +887,37 @@ def test_unchanged_duplicate_section_file_uses_matching_cache_node(tmp_path):
     assert syncer.session.calls == []
     assert list(download_path.parent.glob("*.syncconflict.*")) == []
     assert download_path.read_bytes() == content
+
+
+def test_distinct_files_in_merged_sections_are_both_downloaded(tmp_path):
+    syncer = make_context({"paths.sync_directory": str(tmp_path)})
+    syncer.session = FakeSession()
+    root, first_file, second_file = build_duplicate_section_file_tree()
+    root.remove_children_nameclashes()
+    first_path = node_path(syncer, first_file)
+    second_path = node_path(syncer, second_file)
+    syncer.session.add(
+        "GET",
+        DUPLICATE_SECTION_URL_A,
+        FakeResponse(
+            headers={"Content-Type": "application/pdf"},
+            chunks=[b"first section"],
+        ),
+    )
+    syncer.session.add(
+        "GET",
+        DUPLICATE_SECTION_URL_B,
+        FakeResponse(
+            headers={"Content-Type": "application/pdf"},
+            chunks=[b"second section"],
+        ),
+    )
+
+    assert first_path != second_path
+    assert download_file(syncer, first_file) is True
+    assert download_file(syncer, second_file) is True
+    assert first_path.read_bytes() == b"first section"
+    assert second_path.read_bytes() == b"second section"
 
 
 def test_etag_failure_falls_back_to_timestamp_heuristic_conflict(tmp_path, monkeypatch):
@@ -866,7 +1047,11 @@ def test_resume_appends_when_remote_unchanged(tmp_path):
         URL,
         FakeResponse(
             status_code=206,
-            headers={"Content-Type": "application/pdf", "ETag": '"v1"'},
+            headers={
+                "Content-Type": "application/pdf",
+                "Content-Range": "bytes 5-8/9",
+                "ETag": '"v1"',
+            },
             chunks=[b"TAIL"],
         ),
     )
@@ -874,6 +1059,29 @@ def test_resume_appends_when_remote_unchanged(tmp_path):
     assert download_file(syncer, file_node) is True
     # The partial head is kept and the resumed tail appended.
     assert download_path.read_bytes() == b"HEAD-TAIL"
+    assert list(download_path.parent.glob(".*.smmpart*")) == []
+
+
+def test_resume_aborts_when_partial_response_starts_at_wrong_offset(tmp_path):
+    config = {"paths.sync_directory": str(tmp_path)}
+    syncer, file_node = make_run_syncer(config, timemodified=1710000500)
+    download_path = _seed_partial(syncer, file_node, b"HEAD-", '"v1"')
+    syncer.session.add(
+        "GET",
+        URL,
+        FakeResponse(
+            status_code=206,
+            headers={
+                "Content-Type": "application/pdf",
+                "Content-Range": "bytes 0-3/4",
+                "ETag": '"v1"',
+            },
+            chunks=[b"FULL"],
+        ),
+    )
+
+    assert download_file(syncer, file_node) is False
+    assert not download_path.exists()
     assert list(download_path.parent.glob(".*.smmpart*")) == []
 
 
@@ -898,42 +1106,30 @@ def test_resume_discards_partial_when_remote_served_full_content(tmp_path):
     assert list(download_path.parent.glob(".*.smmpart*")) == []
 
 
-def test_resume_aborts_when_server_ignores_if_range(tmp_path):
-    # Some servers honor Range but ignore If-Range, returning a 206 tail of a
-    # changed file. The mismatched ETag must be detected so we discard the
-    # partial and retry fresh next run instead of corrupting the file.
+@pytest.mark.parametrize(
+    "response_etag",
+    ['"v2"', None],
+    ids=["mismatched-etag", "missing-etag"],
+)
+def test_resume_aborts_when_partial_etag_cannot_be_verified(tmp_path, response_etag):
+    # A changed or missing response ETag cannot prove that the returned tail
+    # belongs to the same remote version as the saved partial.
     config = {"paths.sync_directory": str(tmp_path)}
     syncer, file_node = make_run_syncer(config, timemodified=1710000500)
     download_path = _seed_partial(syncer, file_node, b"OLD-PARTIAL", '"v1"')
+    headers = {
+        "Content-Type": "application/pdf",
+        "Content-Range": "bytes 11-14/15",
+    }
+    if response_etag is not None:
+        headers["ETag"] = response_etag
     syncer.session.add(
         "GET",
         URL,
         FakeResponse(
             status_code=206,
-            headers={"Content-Type": "application/pdf", "ETag": '"v2"'},
-            chunks=[b"TAIL-OF-NEW-VERSION"],
-        ),
-    )
-
-    assert download_file(syncer, file_node) is False
-    # Nothing corrupt is left behind; the stale partial is gone.
-    assert not download_path.exists()
-    assert list(download_path.parent.glob(".*.smmpart*")) == []
-
-
-def test_resume_aborts_when_partial_response_has_no_etag(tmp_path):
-    # A 206 response without an ETag cannot prove that the returned tail belongs
-    # to the same remote version as the saved partial.
-    config = {"paths.sync_directory": str(tmp_path)}
-    syncer, file_node = make_run_syncer(config, timemodified=1710000500)
-    download_path = _seed_partial(syncer, file_node, b"OLD-PARTIAL", '"v1"')
-    syncer.session.add(
-        "GET",
-        URL,
-        FakeResponse(
-            status_code=206,
-            headers={"Content-Type": "application/pdf"},
-            chunks=[b"UNVERIFIED-TAIL"],
+            headers=headers,
+            chunks=[b"TAIL"],
         ),
     )
 
@@ -968,7 +1164,7 @@ def test_unrecognized_partial_without_sidecar_is_not_resumed(tmp_path):
 SCIEBO_URL = "https://rwth-aachen.sciebo.de/public.php/webdav/notes.pdf"
 
 
-def _sciebo_tree(etag, is_downloaded=False, content_hash=None, etag_kind=None):
+def _sciebo_tree(etag, handled=False, content_hash=None, etag_kind=None):
     root = Node("", -1, "Root", None)
     semester = root.add_child("26ss", None, "Semester")
     course = semester.add_child("Download Course", 301, "Course")
@@ -982,7 +1178,8 @@ def _sciebo_tree(etag, is_downloaded=False, content_hash=None, etag_kind=None):
         etag=etag,
         etag_kind=etag_kind,
     )
-    file_node.is_downloaded = is_downloaded
+    if handled:
+        file_node.mark_handled()
     file_node.content_hash = content_hash
     return root, file_node
 
@@ -991,7 +1188,7 @@ def _seed_sciebo_cache(config, etag, content, content_hash=None, etag_kind=None)
     cache_syncer = make_context(config)
     root, file_node = _sciebo_tree(
         etag,
-        is_downloaded=True,
+        handled=True,
         content_hash=content_hash,
         etag_kind=etag_kind,
     )
@@ -1060,26 +1257,6 @@ def test_sciebo_unchanged_opaque_getetag_skips_without_conflict(tmp_path):
     assert syncer.session.calls == []
     assert download_path.read_bytes() == content
     assert list(download_path.parent.glob("*.syncconflict.*")) == []
-
-
-def test_sciebo_download_records_content_hash(tmp_path):
-    # A fresh download stores a sha256 of exactly the bytes we wrote, so later
-    # runs can detect local edits even though the ETag is opaque.
-    config = {"paths.sync_directory": str(tmp_path), "downloads.update_files": True}
-    download_path = _seed_sciebo_cache(config, GETETAG_V1, b"old")
-    syncer = make_context(config)
-    syncer.session = FakeSession()
-    new = b"new content"
-    syncer.session.add(
-        "GET",
-        SCIEBO_URL,
-        FakeResponse(headers={"Content-Type": "application/pdf"}, chunks=[new]),
-    )
-    _, current = _sciebo_tree(GETETAG_V2)  # remote changed (opaque etag differs)
-
-    assert download_file(syncer, current) is True
-    assert download_path.read_bytes() == new
-    assert current.content_hash == sha256(new)
 
 
 def test_sciebo_download_keeps_propfind_etag_when_get_etag_differs(tmp_path):
@@ -1205,7 +1382,7 @@ def _cached_file_node(config, course_node):
 def test_cache_preserves_markers_for_failed_download_over_existing_file(tmp_path):
     config = {"paths.sync_directory": str(tmp_path), "downloads.update_files": True}
     v1 = b"version one"
-    seed_course_cache(config, timemodified=100, etag=sha1(v1), is_downloaded=True)
+    seed_course_cache(config, timemodified=100, etag=sha1(v1))
     download_path = node_path(
         make_context(config), build_single_file_tree("slides.pdf", URL)[1]
     )
@@ -1213,12 +1390,11 @@ def test_cache_preserves_markers_for_failed_download_over_existing_file(tmp_path
     download_path.write_bytes(v1)
 
     # A run where Moodle reports a new version (200) but the download did not
-    # happen (is_downloaded=False) and the old file is still on disk.
+    # happen (the node is still pending) and the old file is still on disk.
     syncer = make_context(config)
-    root, file_node = build_single_file_tree(
+    root, _ = build_single_file_tree(
         "slides.pdf", URL, timemodified=200, etag="poisoned"
     )
-    file_node.is_downloaded = False
     syncer.root_node = root
     course_cache.cache_root_node(syncer)
 
@@ -1226,7 +1402,7 @@ def test_cache_preserves_markers_for_failed_download_over_existing_file(tmp_path
     # The cache keeps the on-disk version's markers, not Moodle's new ones.
     assert cached_file.timemodified == 100
     assert cached_file.etag == sha1(v1)
-    assert cached_file.is_downloaded is True
+    assert cached_file.is_handled is True
 
 
 def test_legacy_is_downloaded_cache_key_is_read_as_handled(tmp_path):
@@ -1241,7 +1417,7 @@ def test_legacy_is_downloaded_cache_key_is_read_as_handled(tmp_path):
     write_private_gzip_json(
         course_path / COURSE_CACHE_FILENAME,
         {
-            "format": "syncmymoodle.course-cache.v1",
+            "format": course_cache.COURSE_CACHE_FORMAT,
             "course": {
                 "name": course_node.name,
                 "id": course_node.id,
@@ -1285,7 +1461,7 @@ def test_course_cache_round_trips_remote_size(tmp_path):
     cached_root, cached_file = build_single_file_tree(
         "slides.pdf", URL, timemodified=100, etag='"v1"', remote_size=2048
     )
-    cached_file.is_downloaded = True
+    cached_file.mark_handled()
     cache_syncer.root_node = cached_root
     course_cache.cache_root_node(cache_syncer)
 
@@ -1303,7 +1479,7 @@ def test_cache_preserves_content_hash_for_skipped_existing_file(tmp_path):
     cached_root, cached_file = build_single_file_tree(
         "slides.pdf", URL, timemodified=100, etag='"v1"'
     )
-    cached_file.is_downloaded = True
+    cached_file.mark_handled()
     cached_file.content_hash = v1_hash
     cache_syncer.root_node = cached_root
     course_cache.cache_root_node(cache_syncer)
@@ -1318,7 +1494,7 @@ def test_cache_preserves_content_hash_for_skipped_existing_file(tmp_path):
     root, file_node = build_single_file_tree(
         "slides.pdf", URL, timemodified=100, etag='"v1"'
     )
-    file_node.is_downloaded = True
+    file_node.mark_handled()
     syncer.root_node = root
     course_cache.cache_root_node(syncer)
 
@@ -1326,22 +1502,19 @@ def test_cache_preserves_content_hash_for_skipped_existing_file(tmp_path):
     assert cached_file.timemodified == 100
     assert cached_file.etag == '"v1"'
     assert cached_file.content_hash == v1_hash
-    assert cached_file.is_downloaded is True
+    assert cached_file.is_handled is True
 
 
 def test_cache_does_not_preserve_markers_when_file_absent(tmp_path):
     config = {"paths.sync_directory": str(tmp_path), "downloads.update_files": True}
-    seed_course_cache(config, timemodified=100, etag="old", is_downloaded=True)
+    seed_course_cache(config, timemodified=100, etag="old")
 
     # Failed download with no file on disk: nothing to preserve.
     syncer = make_context(config)
-    root, file_node = build_single_file_tree(
-        "slides.pdf", URL, timemodified=200, etag="new"
-    )
-    file_node.is_downloaded = False
+    root, _ = build_single_file_tree("slides.pdf", URL, timemodified=200, etag="new")
     syncer.root_node = root
     course_cache.cache_root_node(syncer)
 
     cached_file = _cached_file_node(config, root.children[0].children[0])
     assert cached_file.timemodified == 200
-    assert cached_file.is_downloaded is False
+    assert cached_file.is_handled is False

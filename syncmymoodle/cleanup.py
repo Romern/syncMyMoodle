@@ -31,25 +31,18 @@ def file_hash(path: Path) -> str:
         return hashlib.file_digest(handle, "sha256").hexdigest()
 
 
-def canonical_conflict_path(path: Path) -> Path | None:
-    conflict_path = parse_conflict_path(path)
-    if conflict_path is None:
-        return None
-    return conflict_path.canonical
-
-
 def iter_conflicts(root: Path) -> list[ConflictFile]:
     conflicts: list[ConflictFile] = []
     for path in root.rglob(CONFLICT_GLOB):
         if not path.is_file():
             continue
-        canonical = canonical_conflict_path(path)
-        if canonical is None:
+        conflict_path = parse_conflict_path(path)
+        if conflict_path is None:
             continue
         conflicts.append(
             ConflictFile(
                 path=path,
-                canonical=canonical,
+                canonical=conflict_path.canonical,
                 content_hash=file_hash(path),
             )
         )
