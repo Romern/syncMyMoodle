@@ -7,6 +7,7 @@ import secrets
 import sys
 import urllib.parse
 from dataclasses import dataclass
+from email.utils import parsedate_to_datetime
 from enum import Enum
 from typing import Any
 
@@ -33,6 +34,8 @@ MOODLE_MOBILE_LAUNCH_URL = f"{MOODLE_URL}admin/tool/mobile/launch.php"
 MOODLE_MANAGE_TOKEN_URL = f"{MOODLE_URL}user/managetoken.php"
 MOBILE_URL_SCHEME = "syncmymoodle"
 MOODLE_MOBILE_USER_AGENT = "MoodleMobile syncMyMoodle"
+MOODLE_UPDATE_FUNCTION = "core_course_get_updates_since"
+MOODLE_UPDATE_OVERLAP_SECONDS = 5
 
 
 class MobileLaunchError(RuntimeError):
@@ -80,9 +83,14 @@ class MoodleTokenAuth(AuthBase):
                 return request
         else:
             return request
-        query = urllib.parse.parse_qsl(parsed.query, keep_blank_values=True)
-        if not any(key in {"token", "wstoken"} for key, _ in query):
-            query.append(("token", token))
+        query = [
+            (key, value)
+            for key, value in urllib.parse.parse_qsl(
+                parsed.query, keep_blank_values=True
+            )
+            if key.lower() not in {"token", "wstoken"}
+        ]
+        query.append(("token", token))
         request.url = urllib.parse.urlunsplit(
             (
                 parsed.scheme,
@@ -104,6 +112,22 @@ def create_token_session(
     return session
 
 
+def _http_date_timestamp(value: str | None) -> int | None:
+    if value is None:
+        return None
+    try:
+        parsed = parsedate_to_datetime(value)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    if parsed.tzinfo is None:
+        return None
+    try:
+        timestamp = int(parsed.timestamp())
+    except (OSError, OverflowError, ValueError):
+        return None
+    return timestamp if timestamp >= 0 else None
+
+
 class TokenValidationKind(Enum):
     VALID = "valid"
     INVALID = "invalid"
@@ -115,6 +139,23 @@ class TokenValidation:
     kind: TokenValidationKind
     detail: str | None = None
     site_info: dict[str, Any] | None = None
+    server_time: int | None = None
+
+
+@dataclass(frozen=True)
+class CourseUpdates:
+    """A conservative view of Moodle's per-module update feed."""
+
+    since: int
+    changed_module_ids: frozenset[int]
+    unknown_module_ids: frozenset[int]
+
+    def confirms_unchanged(self, module_id: int, cached_since: int) -> bool:
+        return (
+            cached_since >= self.since
+            and module_id not in self.changed_module_ids
+            and module_id not in self.unknown_module_ids
+        )
 
 
 def mobile_site_signature(passport: str, site: str = MOODLE_URL) -> str:
@@ -298,12 +339,18 @@ def validate_mobile_tokens(
             TokenValidationKind.UNKNOWN,
             f"Moodle token validation returned HTTP {response.status_code}",
         )
-    return validate_mobile_token_payload(payload, tokens)
+    return validate_mobile_token_payload(
+        payload,
+        tokens,
+        server_time=_http_date_timestamp(response.headers.get("Date")),
+    )
 
 
 def validate_mobile_token_payload(
     payload: Any,
     tokens: MoodleTokens,
+    *,
+    server_time: int | None = None,
 ) -> TokenValidation:
     if not isinstance(payload, dict):
         return TokenValidation(TokenValidationKind.UNKNOWN, "unexpected response shape")
@@ -340,7 +387,11 @@ def validate_mobile_token_payload(
             TokenValidationKind.INVALID,
             "token belongs to another Moodle account",
         )
-    return TokenValidation(TokenValidationKind.VALID, site_info=payload)
+    return TokenValidation(
+        TokenValidationKind.VALID,
+        site_info=payload,
+        server_time=server_time,
+    )
 
 
 def _open_moodle_autologin(
@@ -450,6 +501,8 @@ def call_webservice(
     function: str,
     data: dict[str, Any],
     log: logging.Logger = logger,
+    *,
+    warn_on_failure: bool = True,
 ) -> Any:
     request_data = {"wstoken": wstoken, "wsfunction": function, **data}
     try:
@@ -461,17 +514,89 @@ def call_webservice(
         )
         payload = response.json()
     except (requests.RequestException, ValueError) as error:
-        log.warning(
-            "Moodle web service %s failed: %s",
-            function,
-            safe_error_message(error),
-        )
+        if warn_on_failure:
+            log.warning(
+                "Moodle web service %s failed: %s",
+                function,
+                safe_error_message(error),
+            )
         return None
     api_error = api_error_message(payload)
     if api_error is not None:
-        log.warning("Moodle web service %s failed: %s", function, api_error)
+        if warn_on_failure:
+            log.warning("Moodle web service %s failed: %s", function, api_error)
         return None
     return payload
+
+
+def _positive_id(value: Any) -> int | None:
+    return (
+        value
+        if isinstance(value, int) and not isinstance(value, bool) and value > 0
+        else None
+    )
+
+
+def _changed_module_ids(instances: Any) -> frozenset[int] | None:
+    if not isinstance(instances, list):
+        return None
+    changed: set[int] = set()
+    for instance in instances:
+        if not isinstance(instance, dict) or instance.get("contextlevel") != "module":
+            return None
+        module_id = _positive_id(instance.get("id"))
+        updates = instance.get("updates")
+        if module_id is None or not isinstance(updates, list):
+            return None
+        if any(
+            not isinstance(update, dict)
+            or not isinstance(update.get("name"), str)
+            or not update["name"]
+            for update in updates
+        ):
+            return None
+        if updates:
+            changed.add(module_id)
+    return frozenset(changed)
+
+
+def _unknown_module_ids(warnings: Any) -> frozenset[int] | None:
+    if not isinstance(warnings, list):
+        return None
+    unknown: set[int] = set()
+    for warning in warnings:
+        if not isinstance(warning, dict) or warning.get("item") != "module":
+            return None
+        module_id = _positive_id(warning.get("itemid"))
+        if module_id is None:
+            return None
+        unknown.add(module_id)
+    return frozenset(unknown)
+
+
+def get_course_updates_since(
+    session: requests.Session,
+    wstoken: str,
+    course_id: int,
+    since: int,
+    log: logging.Logger = logger,
+) -> CourseUpdates | None:
+    """Return trustworthy module changes, or ``None`` when Moodle cannot tell."""
+    payload = call_webservice(
+        session,
+        wstoken,
+        MOODLE_UPDATE_FUNCTION,
+        {"courseid": course_id, "since": since},
+        log,
+        warn_on_failure=False,
+    )
+    if not isinstance(payload, dict):
+        return None
+    changed = _changed_module_ids(payload.get("instances"))
+    unknown = _unknown_module_ids(payload.get("warnings"))
+    if changed is None or unknown is None:
+        return None
+    return CourseUpdates(since, changed, unknown)
 
 
 def get_ltis_by_course(
@@ -524,15 +649,16 @@ def get_quizzes_by_course(
 
 def get_quiz_attempts(
     session: requests.Session, wstoken: str, quiz_id: int
-) -> list[dict[str, Any]]:
+) -> list[dict[str, Any]] | None:
     payload = call_webservice(
         session,
         wstoken,
         "mod_quiz_get_user_attempts",
         {"quizid": quiz_id, "status": "finished", "includepreviews": 0},
     )
-    attempts = payload.get("attempts") if isinstance(payload, dict) else None
-    return [item for item in attempts or [] if isinstance(item, dict)]
+    if not isinstance(payload, dict) or not isinstance(payload.get("attempts"), list):
+        return None
+    return [item for item in payload["attempts"] if isinstance(item, dict)]
 
 
 def get_quiz_attempt_review(
@@ -776,7 +902,7 @@ def get_assignment_submission_files(
     user_id: Any,
     assignment_id: Any,
     log: logging.Logger = logger,
-) -> list[Any]:
+) -> list[Any] | None:
     payload = call_webservice(
         session,
         wstoken,
@@ -790,7 +916,7 @@ def get_assignment_submission_files(
         log,
     )
     if not isinstance(payload, dict):
-        return []
+        return None
     # Per-assignment errors (e.g. no permission to view the submission) keep
     # their historical behavior of contributing no files. The "or {}" also
     # guards against JSON null values, which .get(key, {}) does not.

@@ -58,7 +58,9 @@ def valid(tokens: MoodleTokens) -> cli.moodle_api.TokenValidation:
             "username": tokens.username,
             "siteurl": "https://moodle.rwth-aachen.de/",
             "userprivateaccesskey": "download-key",
+            "functions": [{"name": cli.moodle_api.MOODLE_UPDATE_FUNCTION}],
         },
+        server_time=1_000,
     )
 
 
@@ -942,6 +944,8 @@ def test_normal_sync_uses_valid_stored_token_without_sso(monkeypatch):
     assert calls == ["sync", "download", "cache"]
     assert ctx.session is token_session
     assert ctx.moodle_account == MoodleAccount(stored)
+    assert ctx.moodle_functions == frozenset({cli.moodle_api.MOODLE_UPDATE_FUNCTION})
+    assert ctx.moodle_update_watermark == 995
     assert store.writes == []
 
 

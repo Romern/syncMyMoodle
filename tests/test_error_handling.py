@@ -112,6 +112,79 @@ def test_get_assignment_skips_course_on_api_error(caplog):
     assert "invalidtoken" in caplog.text
 
 
+def test_course_updates_distinguish_changed_unknown_and_unchanged_modules():
+    session = FakeSession()
+
+    def update_response(url, kwargs):
+        assert kwargs["data"]["courseid"] == 101
+        assert kwargs["data"]["since"] == 500
+        return FakeResponse(
+            json_payload={
+                "instances": [
+                    {
+                        "contextlevel": "module",
+                        "id": 42,
+                        "updates": [{"name": "submissions", "itemids": [7]}],
+                    }
+                ],
+                "warnings": [
+                    {
+                        "item": "module",
+                        "itemid": 99,
+                        "warningcode": "missingcallback",
+                        "message": "unsupported",
+                    }
+                ],
+            }
+        )
+
+    session.add("POST", MOODLE_REST_URL, update_response)
+
+    updates = moodle.get_course_updates_since(session, "token", 101, 500)
+
+    assert updates is not None
+    assert updates.confirms_unchanged(42, 500) is False
+    assert updates.confirms_unchanged(99, 500) is False
+    assert updates.confirms_unchanged(43, 500) is True
+    assert updates.confirms_unchanged(43, 499) is False
+
+
+def test_course_updates_fail_closed_on_non_module_warning():
+    session = FakeSession()
+    session.add(
+        "POST",
+        MOODLE_REST_URL,
+        FakeResponse(
+            json_payload={
+                "instances": [],
+                "warnings": [{"item": "course", "itemid": 101}],
+            }
+        ),
+    )
+
+    assert moodle.get_course_updates_since(session, "token", 101, 500) is None
+
+
+def test_course_update_api_failure_is_silent_optional_cache_miss(caplog):
+    session = FakeSession()
+    session.add(
+        "POST",
+        MOODLE_REST_URL,
+        FakeResponse(
+            json_payload={
+                "exception": "TypeError",
+                "message": (
+                    "array_keys(): Argument #1 ($array) must be of type array, "
+                    "mysqli_native_moodle_recordset given"
+                ),
+            }
+        ),
+    )
+
+    assert moodle.get_course_updates_since(session, "token", 101, 500) is None
+    assert "array_keys" not in caplog.text
+
+
 def test_get_folders_skips_course_on_api_error(caplog):
     assert moodle.get_folders_by_courses(_error_session(), "token", 101) == []
     assert "invalidtoken" in caplog.text
@@ -165,6 +238,13 @@ def test_submission_response_is_not_logged(caplog):
     assert moodle.get_assignment_submission_files(session, "token", 1, 2) == []
 
     assert "private-assignment-response" not in caplog.text
+
+
+def test_submission_api_error_is_not_cached_as_an_empty_submission(caplog):
+    assert (
+        moodle.get_assignment_submission_files(_error_session(), "token", 1, 2) is None
+    )
+    assert "invalidtoken" in caplog.text
 
 
 def test_equivalent_moodle_folder_entities_share_one_raw_node():

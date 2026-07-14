@@ -1,5 +1,6 @@
 import base64
 import hashlib
+from datetime import UTC, datetime
 
 import pytest
 import requests
@@ -95,12 +96,14 @@ def test_acquire_mobile_tokens_requires_browser_account_identity():
     assert session.count("GET", moodle.MOODLE_MOBILE_LAUNCH_URL) == 0
 
 
-def validation_session(payload, status_code=200):
+def validation_session(payload, status_code=200, headers=None):
     session = FakeSession()
     session.add(
         "POST",
         moodle.MOODLE_REST_URL,
-        FakeResponse(status_code=status_code, json_payload=payload),
+        FakeResponse(
+            status_code=status_code, json_payload=payload, headers=headers or {}
+        ),
     )
     return session
 
@@ -129,6 +132,24 @@ def test_token_validation_returns_site_info_for_matching_account():
 
     assert result.kind is moodle.TokenValidationKind.VALID
     assert result.site_info == payload
+
+
+def test_token_validation_records_moodle_server_time():
+    payload = {
+        "userid": 123,
+        "username": "opaque-id",
+        "siteurl": MOODLE_URL.rstrip("/"),
+    }
+
+    result = moodle.validate_mobile_tokens(
+        bound_tokens(),
+        session=validation_session(
+            payload,
+            headers={"Date": "Tue, 14 Jul 2026 12:00:00 GMT"},
+        ),
+    )
+
+    assert result.server_time == int(datetime(2026, 7, 14, 12, tzinfo=UTC).timestamp())
 
 
 def test_token_validation_distinguishes_revocation_from_server_failure():
@@ -334,6 +355,23 @@ def test_token_session_uses_user_private_key_for_tokenpluginfile_urls():
     assert request.url == (
         f"{MOODLE_URL}tokenpluginfile.php/42/question/questiontext/file.png"
         "?token=download-key"
+    )
+
+
+def test_token_session_replaces_stale_cached_file_tokens():
+    request = requests.Request(
+        "GET",
+        (
+            f"{MOODLE_URL}webservice/pluginfile.php/42/mod_resource/content/1/file.pdf"
+            "?forced=1&token=old-token"
+        ),
+    ).prepare()
+
+    moodle.MoodleTokenAuth("current-token")(request)
+
+    assert request.url == (
+        f"{MOODLE_URL}webservice/pluginfile.php/42/mod_resource/content/1/file.pdf"
+        "?forced=1&token=current-token"
     )
 
 

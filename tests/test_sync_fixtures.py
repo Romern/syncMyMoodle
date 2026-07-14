@@ -4,7 +4,15 @@ import zipfile
 
 import requests
 
-from syncmymoodle import course_cache, links, opencast, sciebo, sync, sync_handlers
+from syncmymoodle import (
+    course_cache,
+    links,
+    moodle,
+    opencast,
+    sciebo,
+    sync,
+    sync_handlers,
+)
 from syncmymoodle.constants import HTTP_TIMEOUT_SECONDS
 from syncmymoodle.node import Node
 
@@ -22,6 +30,9 @@ from .helpers import (
 
 H5P_PACKAGE_URL = "https://moodle.rwth-aachen.de/pluginfile.php/activity.h5p"
 PAGE_URL = "https://moodle.rwth-aachen.de/mod/page/view.php?id=123"
+PAGE_CONTENT_URL = (
+    "https://moodle.rwth-aachen.de/pluginfile.php/1/mod_page/content/315/index.html"
+)
 
 
 def run_page_handler(response):
@@ -144,6 +155,48 @@ def run_cached_h5p_handler(
         module_context,
         {"id": 317, "modname": "h5pactivity", "name": "Interactive video"},
     )
+
+    return ctx, section_node, session
+
+
+def run_cached_page_handler(tmp_path, timemodified, response=None):
+    ctx = make_context(
+        {
+            "paths.sync_directory": str(tmp_path),
+            "links.youtube": True,
+            "links.opencast": False,
+            "links.sciebo": False,
+        }
+    )
+    session = FakeSession()
+    if response is not None:
+        session.add("GET", PAGE_CONTENT_URL, response)
+    ctx.session = session
+    root = Node("", -1, "Root", None)
+    semester_node = root.add_child("26ss", None, "Semester")
+    assert semester_node is not None
+    course_node = semester_node.add_child("Course", 1, "Course")
+    assert course_node is not None
+    section_node = course_node.add_child("Section", 2, "Section")
+    assert section_node is not None
+    ctx.root_node = root
+    module_context = sync_handlers.ModuleContext(
+        ctx, 1, course_node, section_node, {}, {}
+    )
+    module = {
+        "id": 315,
+        "modname": "page",
+        "name": "Page",
+        "contents": [
+            {
+                "filename": "index.html",
+                "fileurl": PAGE_CONTENT_URL,
+                "timemodified": timemodified,
+            }
+        ],
+    }
+
+    sync_handlers.handle_embedded_link_module(module_context, module)
 
     return ctx, section_node, session
 
@@ -291,6 +344,249 @@ def test_h5p_without_a_revision_marker_is_downloaded_each_run(monkeypatch, tmp_p
 
     assert first_session.count("GET", H5P_PACKAGE_URL) == 1
     assert second_session.count("GET", H5P_PACKAGE_URL) == 1
+
+
+def test_page_content_cache_reuses_unchanged_and_refreshes_changed_pages(tmp_path):
+    first_url = "https://www.youtube.com/watch?v=abcdefghijk"
+    first, first_section, first_session = run_cached_page_handler(
+        tmp_path,
+        100,
+        FakeResponse(text=f'<a href="{first_url}">first</a>'),
+    )
+    course_cache.cache_root_node(first)
+
+    cached, cached_section, cached_session = run_cached_page_handler(tmp_path, 100)
+    course_cache.cache_root_node(cached)
+
+    assert first_session.count("GET", PAGE_CONTENT_URL) == 1
+    assert cached_session.count("GET", PAGE_CONTENT_URL) == 0
+    assert [child.url for child in first_section.children] == [first_url]
+    assert [child.url for child in cached_section.children] == [first_url]
+
+    changed_url = "https://www.youtube.com/watch?v=zyxwvutsrqp"
+    _, changed_section, changed_session = run_cached_page_handler(
+        tmp_path,
+        101,
+        FakeResponse(text=f'<a href="{changed_url}">changed</a>'),
+    )
+
+    assert changed_session.count("GET", PAGE_CONTENT_URL) == 1
+    assert [child.url for child in changed_section.children] == [changed_url]
+
+
+def test_page_without_revision_marker_is_fetched_each_run(tmp_path):
+    page = FakeResponse(
+        text='<a href="https://www.youtube.com/watch?v=abcdefghijk">video</a>'
+    )
+    first, _, first_session = run_cached_page_handler(tmp_path, None, page)
+    course_cache.cache_root_node(first)
+
+    _, _, second_session = run_cached_page_handler(tmp_path, None, page)
+
+    assert first_session.count("GET", PAGE_CONTENT_URL) == 1
+    assert second_session.count("GET", PAGE_CONTENT_URL) == 1
+
+
+def test_update_feed_reuses_and_refreshes_assignment_and_quiz_data(
+    monkeypatch, tmp_path
+):
+    courses = [
+        {
+            "id": 901,
+            "shortname": "Cached Course",
+            "idnumber": "26ss-course",
+        }
+    ]
+    course = [
+        {
+            "id": 902,
+            "name": "General",
+            "modules": [
+                {"id": 42, "instance": 7, "modname": "assign", "name": "Assignment"},
+                {"id": 43, "instance": 8, "modname": "quiz", "name": "Quiz"},
+            ],
+        }
+    ]
+    assignments = {
+        "assignments": [
+            {
+                "id": 7,
+                "cmid": 42,
+                "intro": "",
+                "introattachments": [],
+                "teamsubmission": 0,
+            }
+        ]
+    }
+    install_moodle_fixtures(
+        monkeypatch,
+        courses,
+        {901: course},
+        {901: assignments},
+    )
+    state = {"version": 1, "changed": frozenset()}
+    calls = {"submission": 0, "attempts": 0, "review": 0}
+    update_calls = []
+
+    def submission_files(session, wstoken, user_id, assignment_id):
+        calls["submission"] += 1
+        version = state["version"]
+        return [
+            {
+                "filename": f"feedback-v{version}.pdf",
+                "filepath": "/",
+                "fileurl": (
+                    "https://moodle.rwth-aachen.de/pluginfile.php/1/"
+                    f"mod_assign/feedback/feedback-v{version}.pdf"
+                ),
+                "timemodified": 100 + int(version),
+            }
+        ]
+
+    def quiz_attempts(session, wstoken, quiz_id):
+        calls["attempts"] += 1
+        return [{"id": 5}]
+
+    def quiz_review(session, wstoken, attempt_id):
+        calls["review"] += 1
+        return {"questions": [{"html": f"<p>Review v{state['version']}</p>"}]}
+
+    def course_updates(session, wstoken, course_id, since, log):
+        update_calls.append(since)
+        return moodle.CourseUpdates(since, state["changed"], frozenset())
+
+    monkeypatch.setattr(moodle, "get_assignment_submission_files", submission_files)
+    monkeypatch.setattr(moodle, "get_quiz_attempts", quiz_attempts)
+    monkeypatch.setattr(moodle, "get_quiz_attempt_review", quiz_review)
+    monkeypatch.setattr(moodle, "get_course_updates_since", course_updates)
+
+    def run_at(watermark):
+        context = make_context(
+            {
+                "paths.sync_directory": str(tmp_path),
+                "modules.assignment": True,
+                "modules.quiz": "html",
+            }
+        )
+        context.session = FakeSession()
+        context.moodle_functions = frozenset({moodle.MOODLE_UPDATE_FUNCTION})
+        context.moodle_update_watermark = watermark
+        sync.sync(context)
+        return context
+
+    first = run_at(100)
+    course_cache.cache_root_node(first)
+    second = run_at(200)
+
+    assert update_calls == [100]
+    assert calls == {"submission": 1, "attempts": 1, "review": 1}
+    node_at_path(
+        second.root_node,
+        [
+            "26ss",
+            "Cached Course",
+            "General",
+            "Assignment",
+            "feedback-v1.pdf",
+        ],
+    )
+    review_url = "https://moodle.rwth-aachen.de/mod/quiz/review.php?attempt=5"
+    assert "Review v1" in second.quiz_review_cache[review_url]
+    course_cache.cache_root_node(second)
+
+    state["version"] = 2
+    state["changed"] = frozenset({42, 43})
+    third = run_at(300)
+
+    assert update_calls == [100, 200]
+    assert calls == {"submission": 2, "attempts": 2, "review": 2}
+    node_at_path(
+        third.root_node,
+        [
+            "26ss",
+            "Cached Course",
+            "General",
+            "Assignment",
+            "feedback-v2.pdf",
+        ],
+    )
+    assert "Review v2" in third.quiz_review_cache[review_url]
+
+    # Moodle's update callback does not reliably cover a teammate changing the
+    # shared group submission, so those assignments must keep using live data.
+    course_cache.cache_root_node(third)
+    assignments["assignments"][0]["teamsubmission"] = 1
+    state["version"] = 3
+    state["changed"] = frozenset()
+    team_run = run_at(400)
+
+    assert update_calls == [100, 200, 300]
+    assert calls == {"submission": 3, "attempts": 2, "review": 2}
+    node_at_path(
+        team_run.root_node,
+        [
+            "26ss",
+            "Cached Course",
+            "General",
+            "Assignment",
+            "feedback-v3.pdf",
+        ],
+    )
+
+
+def test_failed_update_feed_is_tried_only_once_per_run(monkeypatch, caplog):
+    courses = [
+        {"id": 901, "shortname": "First", "idnumber": "26ss-first"},
+        {"id": 902, "shortname": "Second", "idnumber": "26ss-second"},
+    ]
+    course_contents = {
+        course_id: [
+            {
+                "id": 1000 + course_id,
+                "name": "General",
+                "modules": [
+                    {
+                        "id": course_id,
+                        "instance": course_id,
+                        "modname": "assign",
+                        "name": "Assignment",
+                    }
+                ],
+            }
+        ]
+        for course_id in (901, 902)
+    }
+    install_moodle_fixtures(monkeypatch, courses, course_contents)
+    monkeypatch.setattr(
+        course_cache,
+        "get_assignment_cache_entry",
+        lambda ctx, course_node, module_id, log: course_cache.AssignmentCacheEntry(
+            100, []
+        ),
+    )
+    update_calls = []
+
+    def failed_update(session, wstoken, course_id, since, log):
+        update_calls.append(course_id)
+        return None
+
+    monkeypatch.setattr(moodle, "get_course_updates_since", failed_update)
+    context = make_context({"modules.assignment": True})
+    context.session = FakeSession()
+    context.moodle_functions = frozenset({moodle.MOODLE_UPDATE_FUNCTION})
+    caplog.set_level(logging.INFO, logger="syncmymoodle.sync")
+
+    sync.sync(context)
+
+    assert update_calls == [901]
+    assert moodle.MOODLE_UPDATE_FUNCTION not in context.moodle_functions
+    assert (
+        caplog.messages.count(
+            "Moodle incremental update checks are unavailable; using full module "
+            "queries for this run"
+        )
+        == 1
+    )
 
 
 def test_nested_moodle_folder_paths_are_preserved(monkeypatch):

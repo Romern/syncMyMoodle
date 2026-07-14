@@ -16,7 +16,9 @@ from syncmymoodle import opencast as opencast_api
 from syncmymoodle.constants import HTTP_TIMEOUT_SECONDS, MOODLE_URL
 from syncmymoodle.context import SyncContext
 from syncmymoodle.http_utils import (
+    HTML_CONTENT_TYPES,
     content_length,
+    content_type_without_parameters,
     copy_capped_body,
     parse_html,
     safe_request_error,
@@ -37,6 +39,7 @@ class ModuleContext:
     section_node: Node
     assignments_by_cmid: Any
     folders_by_coursemodule: Any
+    course_updates: moodle_api.CourseUpdates | None = None
     log: logging.Logger = logger
 
     def status(self, message: str) -> None:
@@ -77,6 +80,49 @@ def _h5p_content_marker(
         else "unknown"
     )
     return f"timemodified:{modified}:filesize:{size_marker}"
+
+
+def _page_content_marker(content: dict[str, Any]) -> str | None:
+    file_url = content.get("fileurl")
+    if not isinstance(file_url, str) or not file_url:
+        return None
+    content_hash = content.get("contenthash")
+    if isinstance(content_hash, str) and content_hash:
+        return f"contenthash:{content_hash}:url:{file_url}"
+
+    modified = content.get("timemodified")
+    if not isinstance(modified, int) or isinstance(modified, bool) or modified < 0:
+        return None
+    size = content.get("filesize")
+    size_marker = (
+        str(size)
+        if isinstance(size, int) and not isinstance(size, bool) and size >= 0
+        else "unknown"
+    )
+    return f"timemodified:{modified}:filesize:{size_marker}:url:{file_url}"
+
+
+def _page_response_cacheable(response: Any, requested_url: str) -> bool:
+    content_type = content_type_without_parameters(response)
+    if content_type and content_type not in HTML_CONTENT_TYPES:
+        return False
+
+    requested = urllib.parse.urlsplit(requested_url)
+    final = urllib.parse.urlsplit(response.url or requested_url)
+
+    def moodle_file_path(path: str) -> str:
+        prefix = "/webservice/pluginfile.php/"
+        return (
+            f"/pluginfile.php/{path.removeprefix(prefix)}"
+            if path.startswith(prefix)
+            else path
+        )
+
+    return (
+        requested.scheme.lower() == final.scheme.lower()
+        and requested.netloc.lower() == final.netloc.lower()
+        and moodle_file_path(requested.path) == moodle_file_path(final.path)
+    )
 
 
 def _opencast_series_episodes(
@@ -221,6 +267,61 @@ def module_instance(
     return cache.get(module_id)
 
 
+def _assignment_submission_files(
+    module_context: ModuleContext,
+    module_id: int,
+    assignment_id: Any,
+    *,
+    allow_cache: bool,
+) -> list[dict[str, Any]] | None:
+    ctx = module_context.ctx
+    cached = course_cache.get_assignment_cache_entry(
+        ctx, module_context.course_node, module_id, module_context.log
+    )
+    if (
+        allow_cache
+        and cached is not None
+        and module_context.course_updates is not None
+        and module_context.course_updates.confirms_unchanged(module_id, cached.since)
+    ):
+        module_context.status("scanning cached assignment submissions")
+        return cached.files
+
+    account = ctx.require_moodle_account()
+    module_context.status("loading assignment submissions")
+    fetched = moodle_api.get_assignment_submission_files(
+        ctx.require_session(),
+        account.wstoken,
+        account.user_id,
+        assignment_id,
+    )
+    if fetched is None:
+        return None
+    return [item for item in fetched if isinstance(item, dict)]
+
+
+def _add_assignment_file_nodes(
+    ctx: SyncContext,
+    assignment_node: Node,
+    files: list[Any],
+) -> None:
+    for item in files:
+        if not isinstance(item, dict):
+            continue
+        if filters.should_skip_url(ctx, item.get("fileurl"), "assignment file"):
+            continue
+        moodle_files.add_moodle_file_node(
+            assignment_node,
+            item.get("filepath", "/"),
+            item["filename"],
+            item["fileurl"],
+            "Assignment File",
+            item["fileurl"],
+            timemodified=item.get("timemodified"),
+            remote_size=item.get("filesize"),
+        )
+
+
 @register_handler
 def handle_assignment_module(
     module_context: ModuleContext,
@@ -237,6 +338,9 @@ def handle_assignment_module(
         if not ass:
             return
         assignment_id = ass["id"]
+        module_id = module["id"]
+        if not isinstance(module_id, int) or isinstance(module_id, bool):
+            return
         assignment_name = module["name"]
         assignment_node = section_node.add_child(
             assignment_name, assignment_id, "Assignment"
@@ -255,26 +359,36 @@ def handle_assignment_module(
                 module_title=assignment_name,
             )
 
-        account = ctx.require_moodle_account()
-        module_context.status("loading assignment submissions")
-        ass = ass["introattachments"] + moodle_api.get_assignment_submission_files(
-            ctx.require_session(),
-            account.wstoken,
-            account.user_id,
+        # Moodle's update callback checks the current user's submission row,
+        # while a team submission can be changed through the shared group row.
+        cache_allowed = not bool(ass.get("teamsubmission"))
+        submission_files = _assignment_submission_files(
+            module_context,
+            module_id,
             assignment_id,
+            allow_cache=cache_allowed,
         )
-        for c in ass:
-            if filters.should_skip_url(ctx, c.get("fileurl"), "assignment file"):
-                continue
-            moodle_files.add_moodle_file_node(
-                assignment_node,
-                c.get("filepath", "/"),
-                c["filename"],
-                c["fileurl"],
-                "Assignment File",
-                c["fileurl"],
-                timemodified=c.get("timemodified"),
-                remote_size=c.get("filesize"),
+        if submission_files is None:
+            return
+
+        intro_attachments = ass.get("introattachments") or []
+        _add_assignment_file_nodes(
+            ctx, assignment_node, [*intro_attachments, *submission_files]
+        )
+        if cache_allowed:
+            course_cache.store_assignment_cache_entry(
+                ctx,
+                module_context.course_node,
+                module_id,
+                submission_files,
+                module_context.log,
+            )
+        else:
+            course_cache.discard_assignment_cache_entry(
+                ctx,
+                module_context.course_node,
+                module_id,
+                module_context.log,
             )
 
 
@@ -394,37 +508,72 @@ def handle_embedded_link_module(  # noqa: C901 - legacy handler awaiting decompo
         )
         scan_page_links = not filters.should_skip_url(ctx, html_url, "page link")
         if opencast_enabled or scan_page_links:
-            module_context.status("fetching page")
-            try:
-                response = ctx.require_session().get(
-                    html_url,
-                    timeout=HTTP_TIMEOUT_SECONDS,
+            module_id = module["id"]
+            cache_module_id = (
+                module_id
+                if isinstance(module_id, int) and not isinstance(module_id, bool)
+                else None
+            )
+            marker = (
+                _page_content_marker(index_content)
+                if index_content is not None
+                else None
+            )
+            cached = (
+                course_cache.get_page_content(
+                    ctx,
+                    module_context.course_node,
+                    cache_module_id,
+                    marker,
+                    log,
                 )
-            except requests.RequestException as error:
-                log.warning(
-                    "Failed to fetch page module %s: %s",
-                    module["id"],
-                    safe_request_error(error),
-                )
-                ctx.stats.failed += 1
-                response = None
-            if response is not None and not (200 <= response.status_code < 300):
-                log.warning(
-                    "Page module %s returned status %s",
-                    module["id"],
-                    response.status_code,
-                )
-                ctx.stats.failed += 1
-                response = None
-            if response is not None:
+                if cache_module_id is not None and marker is not None
+                else None
+            )
+            page_content: str | None = None
+            page_base_url = html_url
+            cacheable = cached is not None
+            if cached is not None:
+                module_context.status("scanning cached page")
+                page_content = cached.content
+                page_base_url = cached.base_url
+            else:
+                module_context.status("fetching page")
+                try:
+                    response = ctx.require_session().get(
+                        html_url,
+                        timeout=HTTP_TIMEOUT_SECONDS,
+                    )
+                except requests.RequestException as error:
+                    log.warning(
+                        "Failed to fetch page module %s: %s",
+                        module_id,
+                        safe_request_error(error),
+                    )
+                    ctx.stats.failed += 1
+                    response = None
+                if response is not None and not (200 <= response.status_code < 300):
+                    log.warning(
+                        "Page module %s returned status %s",
+                        module_id,
+                        response.status_code,
+                    )
+                    ctx.stats.failed += 1
+                    response = None
+                if response is not None:
+                    page_content = response.text
+                    page_base_url = response.url or html_url
+                    cacheable = _page_response_cacheable(response, html_url)
+
+            if page_content is not None:
                 if opencast_enabled:
-                    html = parse_html(response.text)
+                    html = parse_html(page_content)
                     for iframe in html.find_all("iframe"):
                         iframe_src_value = iframe.get("src")
                         if not iframe_src_value:
                             continue
                         iframe_src = urllib.parse.urljoin(
-                            response.url or html_url,
+                            page_base_url,
                             cast(str, iframe_src_value),
                         )
                         vid_id = opencast_api.extract_episode_id(iframe_src)
@@ -448,11 +597,21 @@ def handle_embedded_link_module(  # noqa: C901 - legacy handler awaiting decompo
                     module_context.status("scanning page links")
                     links_api.scan_html_text_for_links(
                         ctx,
-                        response.text,
-                        response.url or html_url,
+                        page_content,
+                        page_base_url,
                         section_node,
                         course_id,
                         module_title=module["name"],
+                    )
+                if cache_module_id is not None and marker is not None and cacheable:
+                    course_cache.store_page_content(
+                        ctx,
+                        module_context.course_node,
+                        cache_module_id,
+                        marker,
+                        page_content,
+                        page_base_url,
+                        log,
                     )
     # "Interactive" h5p videos
     elif module["modname"] == "h5pactivity":
@@ -639,6 +798,110 @@ def handle_opencast_lti_module(  # noqa: C901 - legacy handler awaiting decompos
             )
 
 
+def _quiz_review_html(name: str, review: dict[str, Any]) -> str:
+    parts: list[str] = []
+    grade = review.get("grade")
+    if grade not in (None, ""):
+        parts.append(
+            '<section class="quiz-grade"><h2>Grade</h2><p>'
+            f"{html.escape(str(grade))}</p></section>"
+        )
+    parts.extend(
+        str(question.get("html") or "")
+        for question in review.get("questions") or []
+        if isinstance(question, dict)
+    )
+    for item in review.get("additionaldata") or []:
+        if not isinstance(item, dict):
+            continue
+        title = item.get("title")
+        if title not in (None, ""):
+            parts.append(f"<h2>{html.escape(str(title))}</h2>")
+        parts.append(str(item.get("content") or ""))
+    return (
+        "<!doctype html><html><head><title>"
+        f"{html.escape(name)}</title></head><body>{''.join(parts)}</body></html>"
+    )
+
+
+def _cached_quiz_data(
+    module_context: ModuleContext,
+    module_id: int,
+) -> tuple[list[dict[str, Any]], dict[int, dict[str, Any]]] | None:
+    cached = course_cache.get_quiz_cache_entry(
+        module_context.ctx,
+        module_context.course_node,
+        module_id,
+        module_context.log,
+    )
+    if (
+        cached is None
+        or module_context.course_updates is None
+        or not module_context.course_updates.confirms_unchanged(module_id, cached.since)
+    ):
+        return None
+    valid_attempt_ids = {
+        attempt_id
+        for attempt in cached.attempts
+        if isinstance((attempt_id := attempt.get("id")), int)
+        and not isinstance(attempt_id, bool)
+    }
+    if not valid_attempt_ids.issubset(cached.reviews):
+        return None
+    return cached.attempts, cached.reviews
+
+
+def _load_quiz_data(
+    module_context: ModuleContext,
+    quiz_id: int,
+) -> tuple[list[dict[str, Any]], dict[int, dict[str, Any]], bool] | None:
+    ctx = module_context.ctx
+    module_context.status("loading quiz attempts")
+    attempts = moodle_api.get_quiz_attempts(
+        ctx.require_session(), ctx.require_moodle_account().wstoken, quiz_id
+    )
+    if attempts is None:
+        return None
+
+    reviews: dict[int, dict[str, Any]] = {}
+    complete = True
+    for index, attempt in enumerate(attempts, 1):
+        attempt_id = attempt.get("id")
+        if not isinstance(attempt_id, int) or isinstance(attempt_id, bool):
+            continue
+        module_context.status(f"loading quiz attempt {index}/{len(attempts)}")
+        review = moodle_api.get_quiz_attempt_review(
+            ctx.require_session(),
+            ctx.require_moodle_account().wstoken,
+            attempt_id,
+        )
+        if review is None:
+            complete = False
+        else:
+            reviews[attempt_id] = review
+    return attempts, reviews, complete
+
+
+def _add_quiz_nodes(
+    ctx: SyncContext,
+    section_node: Node,
+    module_name: str,
+    attempts: list[dict[str, Any]],
+    reviews: dict[int, dict[str, Any]],
+) -> None:
+    for index, attempt in enumerate(attempts, 1):
+        attempt_id = attempt.get("id")
+        if not isinstance(attempt_id, int) or isinstance(attempt_id, bool):
+            continue
+        review = reviews.get(attempt_id)
+        if review is None:
+            continue
+        name = f"{module_name}, Versuch {index}"
+        review_url = f"{MOODLE_URL}mod/quiz/review.php?attempt={attempt_id}"
+        ctx.quiz_review_cache[review_url] = _quiz_review_html(name, review)
+        section_node.add_child(name, attempt_id, "Quiz", url=review_url)
+
+
 @register_handler
 def handle_quiz_module(
     module_context: ModuleContext,
@@ -651,62 +914,42 @@ def handle_quiz_module(
     if module["modname"] != "quiz" or ctx.config.quiz_mode == "off":
         return
 
-    module_context.status("loading quiz activity")
-    instance = module_instance(
-        ctx,
-        module,
-        module_context.course_id,
-        ctx.quiz_instance_cache,
-        moodle_api.get_quizzes_by_course,
-    )
-    quiz_id = instance.get("id") if instance else module.get("instance")
-    if not isinstance(quiz_id, int):
+    module_id = module.get("id")
+    quiz_id = module.get("instance")
+    if not isinstance(module_id, int) or isinstance(module_id, bool):
         return
-    module_context.status("loading quiz attempts")
-    attempts = moodle_api.get_quiz_attempts(
-        ctx.require_session(), ctx.require_moodle_account().wstoken, quiz_id
-    )
-    for index, attempt in enumerate(attempts, 1):
-        attempt_id = attempt.get("id")
-        if not isinstance(attempt_id, int):
-            continue
-        module_context.status(f"loading quiz attempt {index}/{len(attempts)}")
-        review = moodle_api.get_quiz_attempt_review(
-            ctx.require_session(), ctx.require_moodle_account().wstoken, attempt_id
+    if not isinstance(quiz_id, int) or isinstance(quiz_id, bool):
+        module_context.status("loading quiz activity")
+        instance = module_instance(
+            ctx,
+            module,
+            module_context.course_id,
+            ctx.quiz_instance_cache,
+            moodle_api.get_quizzes_by_course,
         )
-        if review is None:
-            continue
-        parts: list[str] = []
-        grade = review.get("grade")
-        if grade not in (None, ""):
-            parts.append(
-                '<section class="quiz-grade"><h2>Grade</h2><p>'
-                f"{html.escape(str(grade))}</p></section>"
-            )
-        parts.extend(
-            str(question.get("html") or "")
-            for question in review.get("questions") or []
-            if isinstance(question, dict)
-        )
-        for item in review.get("additionaldata") or []:
-            if not isinstance(item, dict):
-                continue
-            title = item.get("title")
-            if title not in (None, ""):
-                parts.append(f"<h2>{html.escape(str(title))}</h2>")
-            parts.append(str(item.get("content") or ""))
-        body = "".join(parts)
-        name = f"{module['name']}, Versuch {index}"
-        review_url = f"{MOODLE_URL}mod/quiz/review.php?attempt={attempt_id}"
-        ctx.quiz_review_cache[review_url] = (
-            "<!doctype html><html><head><title>"
-            f"{html.escape(name)}</title></head><body>{body}</body></html>"
-        )
-        section_node.add_child(
-            name,
-            attempt_id,
-            "Quiz",
-            url=review_url,
+        quiz_id = instance.get("id") if instance else None
+    if not isinstance(quiz_id, int) or isinstance(quiz_id, bool):
+        return
+    cached_data = _cached_quiz_data(module_context, module_id)
+    if cached_data is not None:
+        module_context.status("scanning cached quiz attempts")
+        attempts, reviews = cached_data
+        complete = True
+    else:
+        loaded = _load_quiz_data(module_context, quiz_id)
+        if loaded is None:
+            return
+        attempts, reviews, complete = loaded
+
+    _add_quiz_nodes(ctx, section_node, module["name"], attempts, reviews)
+    if complete:
+        course_cache.store_quiz_cache_entry(
+            ctx,
+            module_context.course_node,
+            module_id,
+            attempts,
+            reviews,
+            module_context.log,
         )
 
 

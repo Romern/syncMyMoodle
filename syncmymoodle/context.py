@@ -15,6 +15,7 @@ from syncmymoodle.outcomes import RunStatistics
 from syncmymoodle.output import TerminalOutput, get_output
 
 if TYPE_CHECKING:
+    from syncmymoodle.course_cache import CourseModuleCache
     from syncmymoodle.emedia import EmediaVideo
     from syncmymoodle.opencast import OpencastTrack
 
@@ -106,6 +107,12 @@ class SyncContext:
         default_factory=dict,
         repr=False,
     )
+    course_module_caches: dict[Path, CourseModuleCache] = field(
+        default_factory=dict,
+        repr=False,
+    )
+    moodle_functions: frozenset[str] = field(default_factory=frozenset, repr=False)
+    moodle_update_watermark: int | None = field(default=None, repr=False)
     browser_bootstrap_error_logged: bool = False
     # None negatively caches a share that already failed during this run.
     sciebo_link_cache: dict[str, Node | None] = field(default_factory=dict)

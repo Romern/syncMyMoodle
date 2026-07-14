@@ -2,7 +2,7 @@ import logging
 import time
 from typing import cast
 
-from syncmymoodle import filters, sync_handlers
+from syncmymoodle import course_cache, filters, sync_handlers
 from syncmymoodle import moodle as moodle_api
 from syncmymoodle.context import SyncContext
 from syncmymoodle.http_utils import redact_url_secrets
@@ -144,12 +144,54 @@ def sync(ctx: SyncContext) -> None:  # noqa: C901 - legacy sync awaiting decompo
             Node, semester_node.add_child(course_name, course_id, "Course")
         )
 
-        module_names = {
-            module.get("modname")
+        course_modules = [
+            module
             for section in course_sections
             if isinstance(section, dict)
             for module in section.get("modules", [])
-        }
+            if isinstance(module, dict)
+        ]
+        module_names = {module.get("modname") for module in course_modules}
+
+        cached_update_times: list[int] = []
+        for module in course_modules:
+            module_id = module.get("id")
+            if not isinstance(module_id, int) or isinstance(module_id, bool):
+                continue
+            if config.module_assignment and module.get("modname") == "assign":
+                assignment_entry = course_cache.get_assignment_cache_entry(
+                    ctx, course_node, module_id, logger
+                )
+                if assignment_entry is not None:
+                    cached_update_times.append(assignment_entry.since)
+            elif config.quiz_mode != "off" and module.get("modname") == "quiz":
+                quiz_entry = course_cache.get_quiz_cache_entry(
+                    ctx, course_node, module_id, logger
+                )
+                if quiz_entry is not None:
+                    cached_update_times.append(quiz_entry.since)
+
+        course_updates = None
+        if (
+            cached_update_times
+            and moodle_api.MOODLE_UPDATE_FUNCTION in ctx.moodle_functions
+        ):
+            progress.module_status("checking for Moodle updates")
+            course_updates = moodle_api.get_course_updates_since(
+                session,
+                wstoken,
+                int(course_id),
+                min(cached_update_times),
+                logger,
+            )
+            if course_updates is None:
+                ctx.moodle_functions = ctx.moodle_functions - {
+                    moodle_api.MOODLE_UPDATE_FUNCTION
+                }
+                logger.info(
+                    "Moodle incremental update checks are unavailable; using "
+                    "full module queries for this run"
+                )
 
         assignments = None
         if config.module_assignment and ("assign" in module_names):
@@ -207,6 +249,7 @@ def sync(ctx: SyncContext) -> None:  # noqa: C901 - legacy sync awaiting decompo
                 section_node=section_node,
                 assignments_by_cmid=assignments_by_cmid,
                 folders_by_coursemodule=folders_by_coursemodule,
+                course_updates=course_updates,
                 log=logger,
             )
             for module in section["modules"]:

@@ -208,10 +208,6 @@ def install_moodle_fixtures(
         "syncmymoodle.moodle.get_ltis_by_course",
         lambda session, wstoken, course_id: [],
     )
-    monkeypatch.setattr(
-        "syncmymoodle.moodle.get_quizzes_by_course",
-        lambda session, wstoken, course_id: [],
-    )
     # The assignment handler fetches submission files via the moodle module
     # directly, so stub it there (leak-safe via monkeypatch).
     monkeypatch.setattr(
