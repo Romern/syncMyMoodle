@@ -15,9 +15,14 @@ from syncmymoodle.outcomes import RunStatistics
 from syncmymoodle.output import TerminalOutput, get_output
 
 if TYPE_CHECKING:
-    from syncmymoodle.course_cache import CourseModuleCache
+    from syncmymoodle.course_cache import CourseCacheState
     from syncmymoodle.emedia import EmediaVideo
     from syncmymoodle.opencast import OpencastTrack
+
+
+# Retain a small overlap so a change committed at the integer-second token
+# validation boundary cannot fall between incremental update queries.
+MOODLE_UPDATE_OVERLAP_SECONDS = 5
 
 
 class BrowserSessionUnavailable(RuntimeError):
@@ -98,21 +103,12 @@ class SyncContext:
     )
     emedia_api_session: requests.Session | None = field(default=None, repr=False)
     root_node: Node | None = None
-    course_caches: dict[Path, Node] = field(default_factory=dict)
-    course_cache_payloads: dict[Path, dict[str, Any] | None] = field(
-        default_factory=dict,
-        repr=False,
-    )
-    h5p_content_caches: dict[Path, dict[int, tuple[str, str]]] = field(
-        default_factory=dict,
-        repr=False,
-    )
-    course_module_caches: dict[Path, CourseModuleCache] = field(
+    course_cache_states: dict[Node, CourseCacheState] = field(
         default_factory=dict,
         repr=False,
     )
     moodle_functions: frozenset[str] = field(default_factory=frozenset, repr=False)
-    moodle_update_watermark: int | None = field(default=None, repr=False)
+    moodle_server_time: int | None = field(default=None, repr=False)
     browser_bootstrap_error_logged: bool = False
     # None negatively caches a share that already failed during this run.
     sciebo_link_cache: dict[str, Node | None] = field(default_factory=dict)
@@ -133,6 +129,13 @@ class SyncContext:
 
     def __post_init__(self) -> None:
         self.auth = AuthState.from_config(self.config)
+
+    @property
+    def moodle_update_watermark(self) -> int | None:
+        """Timestamp used for incremental queries, including a safe overlap."""
+        if self.moodle_server_time is None:
+            return None
+        return max(0, self.moodle_server_time - MOODLE_UPDATE_OVERLAP_SECONDS)
 
     def record_filtered(
         self,

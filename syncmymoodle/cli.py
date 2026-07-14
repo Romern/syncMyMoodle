@@ -2010,14 +2010,7 @@ def run(ctx: SyncContext, *, show_filtered: bool = False) -> None:
         for item in available_functions
         if isinstance(item, dict) and isinstance(item.get("name"), str) and item["name"]
     )
-    ctx.moodle_update_watermark = (
-        max(
-            0,
-            validation.server_time - moodle_api.MOODLE_UPDATE_OVERLAP_SECONDS,
-        )
-        if validation.server_time is not None
-        else None
-    )
+    ctx.moodle_server_time = validation.server_time
     private_access_key = validation.site_info.get("userprivateaccesskey")
     user_private_access_key = (
         private_access_key

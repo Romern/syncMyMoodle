@@ -12,6 +12,29 @@ logger = logging.getLogger(__name__)
 SLOW_MODULE_SECONDS = 1.0
 
 
+def _has_complete_module_inventory(course_sections: list[object]) -> bool:
+    for section in course_sections:
+        if not isinstance(section, dict):
+            return False
+        modules = section.get("modules")
+        if not isinstance(modules, list):
+            return False
+        for module in modules:
+            if not isinstance(module, dict):
+                return False
+            module_id = module.get("id")
+            module_kind = module.get("modname")
+            if (
+                not isinstance(module_id, int)
+                or isinstance(module_id, bool)
+                or module_id <= 0
+                or not isinstance(module_kind, str)
+                or not module_kind
+            ):
+                return False
+    return True
+
+
 def sync(ctx: SyncContext) -> None:  # noqa: C901 - legacy sync awaiting decomposition
     """Retrieve the file tree for all courses into ``ctx.root_node``."""
     config = ctx.config
@@ -103,17 +126,40 @@ def sync(ctx: SyncContext) -> None:  # noqa: C901 - legacy sync awaiting decompo
                 continue
         courses_to_sync.append((course_name, course_id, semestername))
 
+    semester_nodes: dict[str, Node] = {}
+    prepared_courses: list[tuple[str, int, Node]] = []
+    for course_name, course_id, semestername in courses_to_sync:
+        semester_node = semester_nodes.get(semestername)
+        if semester_node is None:
+            semester_node = cast(
+                Node, root_node.add_child(semestername, None, "Semester")
+            )
+            semester_nodes[semestername] = semester_node
+        course_node = cast(
+            Node, semester_node.add_child(course_name, course_id, "Course")
+        )
+        prepared_courses.append((course_name, int(course_id), course_node))
+
+    # Course paths are cache keys on disk. Resolve all course collisions before
+    # any cache is read or updated so their paths cannot change mid-run.
+    root_node.remove_children_nameclashes()
+
     progress = ctx.output.sync_progress
-    progress.begin_courses(len(courses_to_sync))
+    progress.begin_courses(len(prepared_courses))
     # Syncing all courses that passed the local course filters.
-    for course_index, (course_name, course_id, semestername) in enumerate(
-        courses_to_sync, start=1
+    for course_index, (course_name, course_id, course_node) in enumerate(
+        prepared_courses, start=1
     ):
         ctx.stats.courses += 1
         progress.start_course(course_index, course_name)
         course_sections = moodle_api.get_course(session, wstoken, course_id)
         if course_sections is None:
             ctx.stats.failed += 1
+            semester_node = course_node.parent
+            if semester_node is not None:
+                semester_node.children.remove(course_node)
+                if not semester_node.children:
+                    root_node.children.remove(semester_node)
             progress.finish_course(course_index)
             continue
 
@@ -132,18 +178,6 @@ def sync(ctx: SyncContext) -> None:  # noqa: C901 - legacy sync awaiting decompo
             modules=module_total,
         )
 
-        semester_nodes = [s for s in root_node.children if s.name == semestername]
-        if len(semester_nodes) == 0:
-            semester_node = cast(
-                Node, root_node.add_child(semestername, None, "Semester")
-            )
-        else:
-            semester_node = semester_nodes[0]
-
-        course_node = cast(
-            Node, semester_node.add_child(course_name, course_id, "Course")
-        )
-
         course_modules = [
             module
             for section in course_sections
@@ -151,6 +185,10 @@ def sync(ctx: SyncContext) -> None:  # noqa: C901 - legacy sync awaiting decompo
             for module in section.get("modules", [])
             if isinstance(module, dict)
         ]
+        if _has_complete_module_inventory(course_sections):
+            course_cache.retain_current_modules(
+                ctx, course_node, course_modules, logger
+            )
         module_names = {module.get("modname") for module in course_modules}
 
         cached_update_times: list[int] = []

@@ -35,7 +35,6 @@ MOODLE_MANAGE_TOKEN_URL = f"{MOODLE_URL}user/managetoken.php"
 MOBILE_URL_SCHEME = "syncmymoodle"
 MOODLE_MOBILE_USER_AGENT = "MoodleMobile syncMyMoodle"
 MOODLE_UPDATE_FUNCTION = "core_course_get_updates_since"
-MOODLE_UPDATE_OVERLAP_SECONDS = 5
 
 
 class MobileLaunchError(RuntimeError):
@@ -555,8 +554,10 @@ def _changed_module_ids(instances: Any) -> frozenset[int] | None:
             for update in updates
         ):
             return None
-        if updates:
-            changed.add(module_id)
+        # A returned module instance is itself evidence that Moodle cannot
+        # confirm it unchanged. Some deployments return an empty update list,
+        # so treating that as unchanged would fail open.
+        changed.add(module_id)
     return frozenset(changed)
 
 

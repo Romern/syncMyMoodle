@@ -16,15 +16,18 @@ from syncmymoodle.storage import read_private_gzip_json, write_private_gzip_json
 
 logger = logging.getLogger(__name__)
 COURSE_CACHE_FORMAT = "syncmymoodle.course-cache.v1"
-H5P_CONTENT_CACHE_KEY = "h5p_content"
 MODULE_CACHE_KEY = "module_data"
+CACHED_TEXT_CACHE_KEY = "cached_text"
+H5P_CONTENT_KIND = "h5p"
+PAGE_CONTENT_KIND = "page"
+CACHED_TEXT_KINDS = (H5P_CONTENT_KIND, PAGE_CONTENT_KIND)
 
 
 @dataclass(frozen=True)
-class PageContentCacheEntry:
+class CachedTextEntry:
     marker: str
     content: str
-    base_url: str
+    base_url: str | None = None
 
 
 @dataclass(frozen=True)
@@ -38,93 +41,22 @@ class QuizCacheEntry:
     since: int
     attempts: list[dict[str, Any]]
     reviews: dict[int, dict[str, Any]]
+    timeclose: int
+    refresh_after: int | None
 
 
 @dataclass
-class CourseModuleCache:
-    pages: dict[int, PageContentCacheEntry] = field(default_factory=dict)
+class CourseCacheState:
+    course_root: Node | None = None
+    cached_text: dict[str, dict[int, CachedTextEntry]] = field(
+        default_factory=lambda: {kind: {} for kind in CACHED_TEXT_KINDS}
+    )
     assignments: dict[int, AssignmentCacheEntry] = field(default_factory=dict)
     quizzes: dict[int, QuizCacheEntry] = field(default_factory=dict)
 
 
 def _node_path(ctx: SyncContext, node: Node) -> Path:
     return get_sanitized_node_path(node, Path(ctx.config.sync_directory))
-
-
-def _cache_payload(
-    ctx: SyncContext,
-    course_node: Node,
-    log: logging.Logger,
-) -> dict[str, Any] | None:
-    course_path = _node_path(ctx, course_node)
-    if course_path in ctx.course_cache_payloads:
-        return ctx.course_cache_payloads[course_path]
-
-    cache_path = course_path / COURSE_CACHE_FILENAME
-    payload = (
-        read_private_gzip_json(cache_path, "course cache")
-        if cache_path.exists()
-        else None
-    )
-    if not isinstance(payload, dict):
-        payload = None
-    elif payload.get("format") != COURSE_CACHE_FORMAT:
-        log.warning("Ignoring unsupported course cache format: %s", cache_path)
-        payload = None
-    ctx.course_cache_payloads[course_path] = payload
-    return payload
-
-
-def _h5p_content_cache(
-    ctx: SyncContext,
-    course_node: Node,
-    log: logging.Logger,
-) -> dict[int, tuple[str, str]]:
-    course_path = _node_path(ctx, course_node)
-    if course_path in ctx.h5p_content_caches:
-        return ctx.h5p_content_caches[course_path]
-
-    cache: dict[int, tuple[str, str]] = {}
-    payload = _cache_payload(ctx, course_node, log)
-    cached_items = payload.get(H5P_CONTENT_CACHE_KEY) if payload else None
-    if isinstance(cached_items, dict):
-        for raw_module_id, raw_entry in cached_items.items():
-            try:
-                module_id = int(raw_module_id)
-            except (TypeError, ValueError):
-                continue
-            if not isinstance(raw_entry, dict):
-                continue
-            marker = raw_entry.get("marker")
-            content = raw_entry.get("content")
-            if module_id >= 0 and isinstance(marker, str) and isinstance(content, str):
-                cache[module_id] = (marker, content)
-    ctx.h5p_content_caches[course_path] = cache
-    return cache
-
-
-def get_h5p_content(
-    ctx: SyncContext,
-    course_node: Node,
-    module_id: int,
-    marker: str,
-    log: logging.Logger = logger,
-) -> str | None:
-    """Return cached extracted H5P content when its package is unchanged."""
-    cached = _h5p_content_cache(ctx, course_node, log).get(module_id)
-    return cached[1] if cached is not None and cached[0] == marker else None
-
-
-def store_h5p_content(
-    ctx: SyncContext,
-    course_node: Node,
-    module_id: int,
-    marker: str,
-    content: str,
-    log: logging.Logger = logger,
-) -> None:
-    """Retain extracted H5P content for the next per-course cache write."""
-    _h5p_content_cache(ctx, course_node, log)[module_id] = (marker, content)
 
 
 def _module_id(value: Any) -> int | None:
@@ -149,8 +81,11 @@ def _dict_list(value: Any) -> list[dict[str, Any]] | None:
     return [dict(item) for item in value]
 
 
-def _page_cache_entries(value: Any) -> dict[int, PageContentCacheEntry]:
-    entries: dict[int, PageContentCacheEntry] = {}
+def _cached_text_entries(
+    value: Any,
+    kind: str,
+) -> dict[int, CachedTextEntry]:
+    entries: dict[int, CachedTextEntry] = {}
     if not isinstance(value, dict):
         return entries
     for raw_module_id, raw_entry in value.items():
@@ -160,14 +95,18 @@ def _page_cache_entries(value: Any) -> dict[int, PageContentCacheEntry]:
         marker = raw_entry.get("marker")
         content = raw_entry.get("content")
         base_url = raw_entry.get("url")
+        base_url_valid = isinstance(base_url, str) and bool(base_url)
         if (
             isinstance(marker, str)
             and marker
             and isinstance(content, str)
-            and isinstance(base_url, str)
-            and base_url
+            and (kind != PAGE_CONTENT_KIND or base_url_valid)
         ):
-            entries[module_id] = PageContentCacheEntry(marker, content, base_url)
+            entries[module_id] = CachedTextEntry(
+                marker,
+                content,
+                base_url if base_url_valid else None,
+            )
     return entries
 
 
@@ -209,58 +148,117 @@ def _quiz_cache_entries(value: Any) -> dict[int, QuizCacheEntry]:
         since = _cache_since(raw_entry.get("since"))
         attempts = _dict_list(raw_entry.get("attempts"))
         reviews = _quiz_reviews(raw_entry.get("reviews"))
-        if since is not None and attempts is not None and reviews is not None:
-            entries[module_id] = QuizCacheEntry(since, attempts, reviews)
+        timeclose = _cache_since(raw_entry.get("timeclose"))
+        if "refresh_after" not in raw_entry:
+            continue
+        refresh_after = raw_entry.get("refresh_after")
+        if refresh_after is not None:
+            refresh_after = _cache_since(refresh_after)
+            if refresh_after is None:
+                continue
+        if (
+            since is not None
+            and attempts is not None
+            and reviews is not None
+            and timeclose is not None
+        ):
+            entries[module_id] = QuizCacheEntry(
+                since,
+                attempts,
+                reviews,
+                timeclose,
+                refresh_after,
+            )
     return entries
 
 
-def _course_module_cache(
+def _course_cache_state(
     ctx: SyncContext,
     course_node: Node,
     log: logging.Logger,
-) -> CourseModuleCache:
+) -> CourseCacheState:
+    if course_node in ctx.course_cache_states:
+        return ctx.course_cache_states[course_node]
+
     course_path = _node_path(ctx, course_node)
-    if course_path in ctx.course_module_caches:
-        return ctx.course_module_caches[course_path]
-
-    payload = _cache_payload(ctx, course_node, log)
-    raw_cache = payload.get(MODULE_CACHE_KEY) if payload else None
-    cache = (
-        CourseModuleCache(
-            pages=_page_cache_entries(raw_cache.get("pages")),
-            assignments=_assignment_cache_entries(raw_cache.get("assignments")),
-            quizzes=_quiz_cache_entries(raw_cache.get("quizzes")),
-        )
-        if isinstance(raw_cache, dict)
-        else CourseModuleCache()
+    cache_path = course_path / COURSE_CACHE_FILENAME
+    payload = (
+        read_private_gzip_json(cache_path, "course cache")
+        if cache_path.exists()
+        else None
     )
+    if not isinstance(payload, dict):
+        payload = None
+    elif payload.get("format") != COURSE_CACHE_FORMAT:
+        log.warning("Ignoring unsupported course cache format: %s", cache_path)
+        payload = None
 
-    ctx.course_module_caches[course_path] = cache
-    return cache
+    course_root = None
+    course_data = payload.get("course") if payload else None
+    if isinstance(course_data, dict):
+        try:
+            course_root = node_from_cache_data(course_data)
+        except (TypeError, ValueError):
+            log.warning("Ignoring malformed course cache: %s", cache_path)
+
+    raw_cache = payload.get(MODULE_CACHE_KEY) if payload else None
+    raw_cache = raw_cache if isinstance(raw_cache, dict) else {}
+    raw_cached_text = raw_cache.get(CACHED_TEXT_CACHE_KEY)
+    raw_cached_text = raw_cached_text if isinstance(raw_cached_text, dict) else {}
+    current_user_id = (
+        ctx.moodle_account.user_id if ctx.moodle_account is not None else None
+    )
+    personal_cache_matches = (
+        current_user_id is not None
+        and raw_cache.get("owner_user_id") == current_user_id
+    )
+    state = CourseCacheState(
+        course_root=course_root,
+        cached_text={
+            kind: _cached_text_entries(raw_cached_text.get(kind), kind)
+            for kind in CACHED_TEXT_KINDS
+        },
+        assignments=(
+            _assignment_cache_entries(raw_cache.get("assignments"))
+            if personal_cache_matches
+            else {}
+        ),
+        quizzes=(
+            _quiz_cache_entries(raw_cache.get("quizzes"))
+            if personal_cache_matches
+            else {}
+        ),
+    )
+    ctx.course_cache_states[course_node] = state
+    return state
 
 
-def get_page_content(
+def get_cached_text(
     ctx: SyncContext,
     course_node: Node,
+    kind: str,
     module_id: int,
     marker: str,
     log: logging.Logger = logger,
-) -> PageContentCacheEntry | None:
-    entry = _course_module_cache(ctx, course_node, log).pages.get(module_id)
+) -> CachedTextEntry | None:
+    entry = _course_cache_state(ctx, course_node, log).cached_text[kind].get(module_id)
     return entry if entry is not None and entry.marker == marker else None
 
 
-def store_page_content(
+def store_cached_text(
     ctx: SyncContext,
     course_node: Node,
+    kind: str,
     module_id: int,
     marker: str,
     content: str,
-    base_url: str,
+    base_url: str | None = None,
     log: logging.Logger = logger,
 ) -> None:
-    _course_module_cache(ctx, course_node, log).pages[module_id] = (
-        PageContentCacheEntry(marker, content, base_url)
+    if kind == PAGE_CONTENT_KIND and not base_url:
+        raise ValueError("cached page content requires its base URL")
+    _course_cache_state(ctx, course_node, log).cached_text[kind][module_id] = (
+        CachedTextEntry(marker, content, base_url)
     )
 
 
@@ -270,7 +268,7 @@ def get_assignment_cache_entry(
     module_id: int,
     log: logging.Logger = logger,
 ) -> AssignmentCacheEntry | None:
-    return _course_module_cache(ctx, course_node, log).assignments.get(module_id)
+    return _course_cache_state(ctx, course_node, log).assignments.get(module_id)
 
 
 def store_assignment_cache_entry(
@@ -280,10 +278,11 @@ def store_assignment_cache_entry(
     files: list[dict[str, Any]],
     log: logging.Logger = logger,
 ) -> None:
-    if ctx.moodle_update_watermark is None:
+    since = ctx.moodle_update_watermark
+    if since is None:
         return
-    _course_module_cache(ctx, course_node, log).assignments[module_id] = (
-        AssignmentCacheEntry(ctx.moodle_update_watermark, files)
+    _course_cache_state(ctx, course_node, log).assignments[module_id] = (
+        AssignmentCacheEntry(since, files)
     )
 
 
@@ -293,7 +292,7 @@ def discard_assignment_cache_entry(
     module_id: int,
     log: logging.Logger = logger,
 ) -> None:
-    _course_module_cache(ctx, course_node, log).assignments.pop(module_id, None)
+    _course_cache_state(ctx, course_node, log).assignments.pop(module_id, None)
 
 
 def get_quiz_cache_entry(
@@ -302,7 +301,7 @@ def get_quiz_cache_entry(
     module_id: int,
     log: logging.Logger = logger,
 ) -> QuizCacheEntry | None:
-    return _course_module_cache(ctx, course_node, log).quizzes.get(module_id)
+    return _course_cache_state(ctx, course_node, log).quizzes.get(module_id)
 
 
 def store_quiz_cache_entry(
@@ -311,44 +310,110 @@ def store_quiz_cache_entry(
     module_id: int,
     attempts: list[dict[str, Any]],
     reviews: dict[int, dict[str, Any]],
+    timeclose: int,
+    refresh_after: int | None,
     log: logging.Logger = logger,
 ) -> None:
-    if ctx.moodle_update_watermark is None:
+    since = ctx.moodle_update_watermark
+    if since is None:
         return
-    _course_module_cache(ctx, course_node, log).quizzes[module_id] = QuizCacheEntry(
-        ctx.moodle_update_watermark,
+    _course_cache_state(ctx, course_node, log).quizzes[module_id] = QuizCacheEntry(
+        since,
         attempts,
         reviews,
+        timeclose,
+        refresh_after,
     )
 
 
-def _course_module_cache_data(cache: CourseModuleCache) -> dict[str, Any]:
-    data: dict[str, Any] = {}
-    if cache.pages:
-        data["pages"] = {
-            str(module_id): {
-                "marker": entry.marker,
-                "content": entry.content,
-                "url": entry.base_url,
-            }
-            for module_id, entry in sorted(cache.pages.items())
+def discard_quiz_cache_entry(
+    ctx: SyncContext,
+    course_node: Node,
+    module_id: int,
+    log: logging.Logger = logger,
+) -> None:
+    _course_cache_state(ctx, course_node, log).quizzes.pop(module_id, None)
+
+
+def retain_current_modules(
+    ctx: SyncContext,
+    course_node: Node,
+    modules: list[dict[str, Any]],
+    log: logging.Logger = logger,
+) -> None:
+    """Discard cached data for modules no longer present in the course."""
+    module_ids: dict[str, set[int]] = {
+        "h5pactivity": set(),
+        "page": set(),
+        "assign": set(),
+        "quiz": set(),
+    }
+    for module in modules:
+        module_id = _module_id(module.get("id"))
+        modname = module.get("modname")
+        if module_id is not None and modname in module_ids:
+            module_ids[modname].add(module_id)
+
+    state = _course_cache_state(ctx, course_node, log)
+    caches = (
+        (state.cached_text[H5P_CONTENT_KIND], module_ids["h5pactivity"]),
+        (state.cached_text[PAGE_CONTENT_KIND], module_ids["page"]),
+        (state.assignments, module_ids["assign"]),
+        (state.quizzes, module_ids["quiz"]),
+    )
+    for cache, current_ids in caches:
+        for module_id in cache.keys() - current_ids:
+            del cache[module_id]
+
+
+def _cached_text_data(
+    entries: dict[int, CachedTextEntry],
+    kind: str,
+) -> dict[str, Any]:
+    return {
+        str(module_id): {
+            "marker": entry.marker,
+            "content": entry.content,
+            **({"url": entry.base_url} if kind == PAGE_CONTENT_KIND else {}),
         }
-    if cache.assignments:
+        for module_id, entry in sorted(entries.items())
+    }
+
+
+def _course_module_cache_data(
+    ctx: SyncContext,
+    state: CourseCacheState,
+) -> dict[str, Any]:
+    data: dict[str, Any] = {}
+    cached_text = {
+        kind: _cached_text_data(state.cached_text[kind], kind)
+        for kind in CACHED_TEXT_KINDS
+        if state.cached_text[kind]
+    }
+    if cached_text:
+        data[CACHED_TEXT_CACHE_KEY] = cached_text
+    if state.assignments or state.quizzes:
+        if ctx.moodle_account is None:
+            return data
+        data["owner_user_id"] = ctx.moodle_account.user_id
+    if state.assignments:
         data["assignments"] = {
             str(module_id): {"since": entry.since, "files": entry.files}
-            for module_id, entry in sorted(cache.assignments.items())
+            for module_id, entry in sorted(state.assignments.items())
         }
-    if cache.quizzes:
+    if state.quizzes:
         data["quizzes"] = {
             str(module_id): {
                 "since": entry.since,
                 "attempts": entry.attempts,
+                "timeclose": entry.timeclose,
+                "refresh_after": entry.refresh_after,
                 "reviews": {
                     str(attempt_id): review
                     for attempt_id, review in sorted(entry.reviews.items())
                 },
             }
-            for module_id, entry in sorted(cache.quizzes.items())
+            for module_id, entry in sorted(state.quizzes.items())
         }
     return data
 
@@ -480,28 +545,7 @@ def get_course_cache_root(
     log: logging.Logger = logger,
 ) -> Node | None:
     """Load and return the cached course root for the given course node."""
-    course_path = _node_path(ctx, course_node)
-    if course_path in ctx.course_caches:
-        return ctx.course_caches[course_path]
-
-    payload = _cache_payload(ctx, course_node, log)
-    if payload is None:
-        return None
-    course_data = payload.get("course")
-    if not isinstance(course_data, dict):
-        return None
-
-    try:
-        cached_course_root = node_from_cache_data(course_data)
-    except (TypeError, ValueError):
-        log.warning(
-            "Ignoring malformed course cache: %s",
-            course_path / COURSE_CACHE_FILENAME,
-        )
-        return None
-
-    ctx.course_caches[course_path] = cached_course_root
-    return cached_course_root
+    return _course_cache_state(ctx, course_node, log).course_root
 
 
 def get_old_node_for(
@@ -557,29 +601,15 @@ def cache_root_node(
             if course_node.type != "Course":
                 continue
             course_path = _node_path(ctx, course_node)
-            # Read the previous course cache before overwriting it, so we can
-            # preserve version markers for files that were not downloaded
-            # this run (see node_to_cache_data).
-            old_course_root = get_course_cache_root(ctx, course_node, log)
+            state = _course_cache_state(ctx, course_node, log)
             course_path.mkdir(parents=True, exist_ok=True)
             cache_path = course_path / COURSE_CACHE_FILENAME
             payload: dict[str, Any] = {
                 "format": COURSE_CACHE_FORMAT,
-                "course": node_to_cache_data(ctx, course_node, old_course_root),
+                "course": node_to_cache_data(ctx, course_node, state.course_root),
             }
-            h5p_content = _h5p_content_cache(ctx, course_node, log)
-            if h5p_content:
-                payload[H5P_CONTENT_CACHE_KEY] = {
-                    str(module_id): {"marker": marker, "content": content}
-                    for module_id, (marker, content) in sorted(h5p_content.items())
-                }
-            module_cache = _course_module_cache_data(
-                _course_module_cache(ctx, course_node, log)
-            )
+            module_cache = _course_module_cache_data(ctx, state)
             if module_cache:
                 payload[MODULE_CACHE_KEY] = module_cache
-            write_private_gzip_json(
-                cache_path,
-                payload,
-            )
-            ctx.course_cache_payloads[course_path] = payload
+            write_private_gzip_json(cache_path, payload)
+            state.course_root = node_from_cache_data(payload["course"])

@@ -29,6 +29,7 @@ logger = logging.getLogger(__name__)
 H5P_PACKAGE_MAX_BYTES = 2 * 1024**3
 H5P_PACKAGE_MEMORY_BYTES = 16 * 1024**2
 H5P_CONTENT_MAX_BYTES = 10 * 1024 * 1024
+QUIZ_IMMEDIATE_REVIEW_SECONDS = 2 * 60
 
 
 @dataclass
@@ -46,6 +47,12 @@ class ModuleContext:
         self.ctx.output.sync_progress.module_status(message)
 
 
+@dataclass(frozen=True)
+class QuizCacheTiming:
+    timeclose: int
+    refresh_after: int | None
+
+
 Handler = Callable[[ModuleContext, dict[str, Any]], None]
 
 # Handlers register themselves here via @register_handler and run, per module,
@@ -60,46 +67,30 @@ def register_handler(handler: Handler) -> Handler:
     return handler
 
 
-def _h5p_content_marker(
-    activity: dict[str, Any],
-    package_file: dict[str, Any],
+def _content_marker(
+    metadata: dict[str, Any],
+    file_metadata: dict[str, Any],
+    *,
+    url: str | None = None,
 ) -> str | None:
-    # Moodle exposes the package SHA-1 directly; older deployments may only
-    # provide file modification metadata.
-    content_hash = activity.get("contenthash")
+    content_hash = metadata.get("contenthash")
+    if not isinstance(content_hash, str) or not content_hash:
+        content_hash = file_metadata.get("contenthash")
     if isinstance(content_hash, str) and content_hash:
-        return f"contenthash:{content_hash}"
+        marker = f"contenthash:{content_hash}"
+    else:
+        modified = file_metadata.get("timemodified", metadata.get("timemodified"))
+        if not isinstance(modified, int) or isinstance(modified, bool) or modified < 0:
+            return None
+        size = file_metadata.get("filesize")
+        size_marker = (
+            str(size)
+            if isinstance(size, int) and not isinstance(size, bool) and size >= 0
+            else "unknown"
+        )
+        marker = f"timemodified:{modified}:filesize:{size_marker}"
 
-    modified = package_file.get("timemodified", activity.get("timemodified"))
-    if not isinstance(modified, int) or isinstance(modified, bool) or modified < 0:
-        return None
-    size = package_file.get("filesize")
-    size_marker = (
-        str(size)
-        if isinstance(size, int) and not isinstance(size, bool) and size >= 0
-        else "unknown"
-    )
-    return f"timemodified:{modified}:filesize:{size_marker}"
-
-
-def _page_content_marker(content: dict[str, Any]) -> str | None:
-    file_url = content.get("fileurl")
-    if not isinstance(file_url, str) or not file_url:
-        return None
-    content_hash = content.get("contenthash")
-    if isinstance(content_hash, str) and content_hash:
-        return f"contenthash:{content_hash}:url:{file_url}"
-
-    modified = content.get("timemodified")
-    if not isinstance(modified, int) or isinstance(modified, bool) or modified < 0:
-        return None
-    size = content.get("filesize")
-    size_marker = (
-        str(size)
-        if isinstance(size, int) and not isinstance(size, bool) and size >= 0
-        else "unknown"
-    )
-    return f"timemodified:{modified}:filesize:{size_marker}:url:{file_url}"
+    return f"{marker}:url:{url}" if url is not None else marker
 
 
 def _page_response_cacheable(response: Any, requested_url: str) -> bool:
@@ -497,7 +488,9 @@ def handle_embedded_link_module(  # noqa: C901 - legacy handler awaiting decompo
             (
                 content
                 for content in module.get("contents") or []
-                if content.get("filename") == "index.html" and content.get("fileurl")
+                if content.get("filename") == "index.html"
+                and isinstance(content.get("fileurl"), str)
+                and content["fileurl"]
             ),
             None,
         )
@@ -515,14 +508,19 @@ def handle_embedded_link_module(  # noqa: C901 - legacy handler awaiting decompo
                 else None
             )
             marker = (
-                _page_content_marker(index_content)
+                _content_marker(
+                    index_content,
+                    index_content,
+                    url=index_content["fileurl"],
+                )
                 if index_content is not None
                 else None
             )
             cached = (
-                course_cache.get_page_content(
+                course_cache.get_cached_text(
                     ctx,
                     module_context.course_node,
+                    course_cache.PAGE_CONTENT_KIND,
                     cache_module_id,
                     marker,
                     log,
@@ -536,7 +534,7 @@ def handle_embedded_link_module(  # noqa: C901 - legacy handler awaiting decompo
             if cached is not None:
                 module_context.status("scanning cached page")
                 page_content = cached.content
-                page_base_url = cached.base_url
+                page_base_url = cached.base_url or html_url
             else:
                 module_context.status("fetching page")
                 try:
@@ -604,9 +602,10 @@ def handle_embedded_link_module(  # noqa: C901 - legacy handler awaiting decompo
                         module_title=module["name"],
                     )
                 if cache_module_id is not None and marker is not None and cacheable:
-                    course_cache.store_page_content(
+                    course_cache.store_cached_text(
                         ctx,
                         module_context.course_node,
+                        course_cache.PAGE_CONTENT_KIND,
                         cache_module_id,
                         marker,
                         page_content,
@@ -643,11 +642,12 @@ def handle_embedded_link_module(  # noqa: C901 - legacy handler awaiting decompo
                 if isinstance(module_id, int) and not isinstance(module_id, bool)
                 else None
             )
-            marker = _h5p_content_marker(activity, package_file)
-            content = (
-                course_cache.get_h5p_content(
+            marker = _content_marker(activity, package_file)
+            cached = (
+                course_cache.get_cached_text(
                     ctx,
                     module_context.course_node,
+                    course_cache.H5P_CONTENT_KIND,
                     cache_module_id,
                     marker,
                     log,
@@ -655,7 +655,8 @@ def handle_embedded_link_module(  # noqa: C901 - legacy handler awaiting decompo
                 if cache_module_id is not None and marker is not None
                 else None
             )
-            from_cache = content is not None
+            content = cached.content if cached is not None else None
+            from_cache = cached is not None
             if content is None:
                 module_context.status("downloading H5P package")
                 content = _read_h5p_content(
@@ -666,13 +667,14 @@ def handle_embedded_link_module(  # noqa: C901 - legacy handler awaiting decompo
                     and cache_module_id is not None
                     and marker is not None
                 ):
-                    course_cache.store_h5p_content(
+                    course_cache.store_cached_text(
                         ctx,
                         module_context.course_node,
+                        course_cache.H5P_CONTENT_KIND,
                         cache_module_id,
                         marker,
                         content,
-                        log,
+                        log=log,
                     )
             if content is not None:
                 module_context.status(
@@ -824,18 +826,65 @@ def _quiz_review_html(name: str, review: dict[str, Any]) -> str:
     )
 
 
+def _quiz_cache_timing(
+    attempts: list[dict[str, Any]],
+    quiz: dict[str, Any] | None,
+    server_time: int | None,
+) -> QuizCacheTiming | None:
+    """Return cache timing metadata, or ``None`` when it cannot be trusted."""
+    if quiz is None or server_time is None:
+        return None
+    timeclose = quiz.get("timeclose")
+    if not isinstance(timeclose, int) or isinstance(timeclose, bool) or timeclose < 0:
+        return None
+
+    boundaries = [timeclose] if timeclose > server_time else []
+    for attempt in attempts:
+        attempt_id = attempt.get("id")
+        timefinish = attempt.get("timefinish")
+        if (
+            not isinstance(attempt_id, int)
+            or isinstance(attempt_id, bool)
+            or attempt_id <= 0
+            or not isinstance(timefinish, int)
+            or isinstance(timefinish, bool)
+            or timefinish <= 0
+        ):
+            return None
+        immediate_review_end = timefinish + QUIZ_IMMEDIATE_REVIEW_SECONDS
+        if immediate_review_end > server_time:
+            boundaries.append(immediate_review_end)
+    return QuizCacheTiming(timeclose, min(boundaries, default=None))
+
+
 def _cached_quiz_data(
     module_context: ModuleContext,
     module_id: int,
-) -> tuple[list[dict[str, Any]], dict[int, dict[str, Any]]] | None:
+    quiz: dict[str, Any] | None,
+) -> (
+    tuple[
+        list[dict[str, Any]],
+        dict[int, dict[str, Any]],
+        QuizCacheTiming,
+    ]
+    | None
+):
     cached = course_cache.get_quiz_cache_entry(
         module_context.ctx,
         module_context.course_node,
         module_id,
         module_context.log,
     )
+    timing = _quiz_cache_timing(
+        cached.attempts if cached is not None else [],
+        quiz,
+        module_context.ctx.moodle_server_time,
+    )
     if (
         cached is None
+        or timing is None
+        or timing.timeclose != cached.timeclose
+        or timing.refresh_after != cached.refresh_after
         or module_context.course_updates is None
         or not module_context.course_updates.confirms_unchanged(module_id, cached.since)
     ):
@@ -848,7 +897,7 @@ def _cached_quiz_data(
     }
     if not valid_attempt_ids.issubset(cached.reviews):
         return None
-    return cached.attempts, cached.reviews
+    return cached.attempts, cached.reviews, timing
 
 
 def _load_quiz_data(
@@ -867,7 +916,12 @@ def _load_quiz_data(
     complete = True
     for index, attempt in enumerate(attempts, 1):
         attempt_id = attempt.get("id")
-        if not isinstance(attempt_id, int) or isinstance(attempt_id, bool):
+        if (
+            not isinstance(attempt_id, int)
+            or isinstance(attempt_id, bool)
+            or attempt_id <= 0
+        ):
+            complete = False
             continue
         module_context.status(f"loading quiz attempt {index}/{len(attempts)}")
         review = moodle_api.get_quiz_attempt_review(
@@ -915,40 +969,56 @@ def handle_quiz_module(
         return
 
     module_id = module.get("id")
-    quiz_id = module.get("instance")
     if not isinstance(module_id, int) or isinstance(module_id, bool):
         return
-    if not isinstance(quiz_id, int) or isinstance(quiz_id, bool):
-        module_context.status("loading quiz activity")
-        instance = module_instance(
-            ctx,
-            module,
-            module_context.course_id,
-            ctx.quiz_instance_cache,
-            moodle_api.get_quizzes_by_course,
-        )
-        quiz_id = instance.get("id") if instance else None
+
+    # Effective quiz closing times include user/group overrides and determine
+    # when Moodle changes which review fields are visible.
+    module_context.status("loading quiz activity")
+    instance = module_instance(
+        ctx,
+        module,
+        module_context.course_id,
+        ctx.quiz_instance_cache,
+        moodle_api.get_quizzes_by_course,
+    )
+    quiz_id = instance.get("id") if instance else module.get("instance")
     if not isinstance(quiz_id, int) or isinstance(quiz_id, bool):
         return
-    cached_data = _cached_quiz_data(module_context, module_id)
+    cached_data = _cached_quiz_data(module_context, module_id, instance)
+    timing: QuizCacheTiming | None
     if cached_data is not None:
         module_context.status("scanning cached quiz attempts")
-        attempts, reviews = cached_data
+        attempts, reviews, timing = cached_data
         complete = True
     else:
         loaded = _load_quiz_data(module_context, quiz_id)
         if loaded is None:
             return
         attempts, reviews, complete = loaded
+        timing = _quiz_cache_timing(
+            attempts,
+            instance,
+            ctx.moodle_server_time,
+        )
 
     _add_quiz_nodes(ctx, section_node, module["name"], attempts, reviews)
-    if complete:
+    if complete and timing is not None:
         course_cache.store_quiz_cache_entry(
             ctx,
             module_context.course_node,
             module_id,
             attempts,
             reviews,
+            timing.timeclose,
+            timing.refresh_after,
+            module_context.log,
+        )
+    else:
+        course_cache.discard_quiz_cache_entry(
+            ctx,
+            module_context.course_node,
+            module_id,
             module_context.log,
         )
 

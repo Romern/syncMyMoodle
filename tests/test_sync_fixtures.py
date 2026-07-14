@@ -14,6 +14,8 @@ from syncmymoodle import (
     sync_handlers,
 )
 from syncmymoodle.constants import HTTP_TIMEOUT_SECONDS
+from syncmymoodle.context import MoodleAccount
+from syncmymoodle.moodle_tokens import MoodleTokens
 from syncmymoodle.node import Node
 
 from .helpers import (
@@ -445,7 +447,7 @@ def test_update_feed_reuses_and_refreshes_assignment_and_quiz_data(
 
     def quiz_attempts(session, wstoken, quiz_id):
         calls["attempts"] += 1
-        return [{"id": 5}]
+        return [{"id": 5, "timefinish": 1}]
 
     def quiz_review(session, wstoken, attempt_id):
         calls["review"] += 1
@@ -459,8 +461,15 @@ def test_update_feed_reuses_and_refreshes_assignment_and_quiz_data(
     monkeypatch.setattr(moodle, "get_quiz_attempts", quiz_attempts)
     monkeypatch.setattr(moodle, "get_quiz_attempt_review", quiz_review)
     monkeypatch.setattr(moodle, "get_course_updates_since", course_updates)
+    monkeypatch.setattr(
+        moodle,
+        "get_quizzes_by_course",
+        lambda session, wstoken, course_id: [
+            {"coursemodule": 43, "id": 8, "timeclose": 10_000}
+        ],
+    )
 
-    def run_at(watermark):
+    def run_at(watermark, user_id=10001):
         context = make_context(
             {
                 "paths.sync_directory": str(tmp_path),
@@ -468,17 +477,25 @@ def test_update_feed_reuses_and_refreshes_assignment_and_quiz_data(
                 "modules.quiz": "html",
             }
         )
+        context.moodle_account = MoodleAccount(
+            MoodleTokens(
+                "fake-user",
+                "fake-webservice-token",
+                "fake-private-token",
+                moodle_user_id=user_id,
+            )
+        )
         context.session = FakeSession()
         context.moodle_functions = frozenset({moodle.MOODLE_UPDATE_FUNCTION})
-        context.moodle_update_watermark = watermark
+        context.moodle_server_time = watermark + 5
         sync.sync(context)
         return context
 
-    first = run_at(100)
+    first = run_at(200)
     course_cache.cache_root_node(first)
-    second = run_at(200)
+    second = run_at(300)
 
-    assert update_calls == [100]
+    assert update_calls == [200]
     assert calls == {"submission": 1, "attempts": 1, "review": 1}
     node_at_path(
         second.root_node,
@@ -494,12 +511,20 @@ def test_update_feed_reuses_and_refreshes_assignment_and_quiz_data(
     assert "Review v1" in second.quiz_review_cache[review_url]
     course_cache.cache_root_node(second)
 
+    # Assignment submissions and quiz attempts are private to the Moodle user.
+    # A second account using the same sync directory must not reuse them.
+    other_user = run_at(350, user_id=20002)
+
+    assert update_calls == [200]
+    assert calls == {"submission": 2, "attempts": 2, "review": 2}
+    assert "Review v1" in other_user.quiz_review_cache[review_url]
+
     state["version"] = 2
     state["changed"] = frozenset({42, 43})
-    third = run_at(300)
+    third = run_at(400)
 
-    assert update_calls == [100, 200]
-    assert calls == {"submission": 2, "attempts": 2, "review": 2}
+    assert update_calls == [200, 300]
+    assert calls == {"submission": 3, "attempts": 3, "review": 3}
     node_at_path(
         third.root_node,
         [
@@ -518,10 +543,10 @@ def test_update_feed_reuses_and_refreshes_assignment_and_quiz_data(
     assignments["assignments"][0]["teamsubmission"] = 1
     state["version"] = 3
     state["changed"] = frozenset()
-    team_run = run_at(400)
+    team_run = run_at(500)
 
-    assert update_calls == [100, 200, 300]
-    assert calls == {"submission": 3, "attempts": 2, "review": 2}
+    assert update_calls == [200, 300, 400]
+    assert calls == {"submission": 4, "attempts": 3, "review": 3}
     node_at_path(
         team_run.root_node,
         [
@@ -532,6 +557,84 @@ def test_update_feed_reuses_and_refreshes_assignment_and_quiz_data(
             "feedback-v3.pdf",
         ],
     )
+
+
+def test_quiz_cache_refreshes_at_review_phase_boundary(monkeypatch, tmp_path):
+    calls = {"attempts": 0, "review": 0}
+    quiz_state = {"timeclose": 0}
+
+    monkeypatch.setattr(
+        moodle,
+        "get_quizzes_by_course",
+        lambda session, wstoken, course_id: [
+            {"coursemodule": 43, "id": 8, "timeclose": quiz_state["timeclose"]}
+        ],
+    )
+
+    def quiz_attempts(session, wstoken, quiz_id):
+        calls["attempts"] += 1
+        return [{"id": 5, "timefinish": 50}]
+
+    def quiz_review(session, wstoken, attempt_id):
+        calls["review"] += 1
+        return {"questions": [{"html": f"<p>Review {calls['review']}</p>"}]}
+
+    monkeypatch.setattr(moodle, "get_quiz_attempts", quiz_attempts)
+    monkeypatch.setattr(moodle, "get_quiz_attempt_review", quiz_review)
+
+    def run_at(server_time, updates):
+        context = make_context(
+            {
+                "paths.sync_directory": str(tmp_path),
+                "modules.quiz": "html",
+            }
+        )
+        context.session = FakeSession()
+        context.moodle_server_time = server_time
+        root = Node("", -1, "Root", None)
+        semester = root.add_child("26ss", None, "Semester")
+        course_node = semester.add_child("Cached Course", 901, "Course")
+        section_node = course_node.add_child("General", 902, "Section")
+        context.root_node = root
+        module_context = sync_handlers.ModuleContext(
+            context,
+            901,
+            course_node,
+            section_node,
+            {},
+            {},
+            course_updates=updates,
+        )
+        sync_handlers.handle_quiz_module(
+            module_context,
+            {"id": 43, "instance": 8, "modname": "quiz", "name": "Quiz"},
+        )
+        return context
+
+    first = run_at(100, None)
+    course_cache.cache_root_node(first)
+
+    unchanged = moodle.CourseUpdates(95, frozenset(), frozenset())
+    before_boundary = run_at(160, unchanged)
+    review_url = "https://moodle.rwth-aachen.de/mod/quiz/review.php?attempt=5"
+
+    assert calls == {"attempts": 1, "review": 1}
+    assert "Review 1" in before_boundary.quiz_review_cache[review_url]
+
+    at_boundary = run_at(170, unchanged)
+
+    assert calls == {"attempts": 2, "review": 2}
+    assert "Review 2" in at_boundary.quiz_review_cache[review_url]
+
+    course_cache.cache_root_node(at_boundary)
+    quiz_state["timeclose"] = 160
+    after_override_change = run_at(
+        180,
+        moodle.CourseUpdates(165, frozenset(), frozenset()),
+    )
+
+    assert calls == {"attempts": 3, "review": 3}
+    assert "Review 3" in after_override_change.quiz_review_cache[review_url]
 
 
 def test_failed_update_feed_is_tried_only_once_per_run(monkeypatch, caplog):

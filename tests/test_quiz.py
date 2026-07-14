@@ -94,7 +94,18 @@ def quiz_node():
     return node
 
 
+def install_quiz_activity(monkeypatch):
+    monkeypatch.setattr(
+        sync_handlers.moodle_api,
+        "get_quizzes_by_course",
+        lambda session, wstoken, course_id: [
+            {"coursemodule": 42, "id": 7, "timeclose": 0}
+        ],
+    )
+
+
 def test_quiz_api_review_preserves_grade_and_feedback_titles(monkeypatch, tmp_path):
+    install_quiz_activity(monkeypatch)
     ctx = make_context(
         {
             "paths.sync_directory": str(tmp_path),
@@ -142,6 +153,7 @@ def test_quiz_api_review_preserves_grade_and_feedback_titles(monkeypatch, tmp_pa
 
 
 def test_quiz_node_keeps_remote_name_until_path_materialization(monkeypatch):
+    install_quiz_activity(monkeypatch)
     ctx = make_context({"modules.quiz": "html"})
     ctx.session = FakeSession()
     course_node = Node("Course", 1, "Course", None)

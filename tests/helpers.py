@@ -205,6 +205,10 @@ def install_moodle_fixtures(
         lambda session, wstoken, course_id: [],
     )
     monkeypatch.setattr(
+        "syncmymoodle.moodle.get_quizzes_by_course",
+        lambda session, wstoken, course_id: [],
+    )
+    monkeypatch.setattr(
         "syncmymoodle.moodle.get_ltis_by_course",
         lambda session, wstoken, course_id: [],
     )

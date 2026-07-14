@@ -125,7 +125,12 @@ def test_course_updates_distinguish_changed_unknown_and_unchanged_modules():
                         "contextlevel": "module",
                         "id": 42,
                         "updates": [{"name": "submissions", "itemids": [7]}],
-                    }
+                    },
+                    {
+                        "contextlevel": "module",
+                        "id": 44,
+                        "updates": [],
+                    },
                 ],
                 "warnings": [
                     {
@@ -144,6 +149,7 @@ def test_course_updates_distinguish_changed_unknown_and_unchanged_modules():
 
     assert updates is not None
     assert updates.confirms_unchanged(42, 500) is False
+    assert updates.confirms_unchanged(44, 500) is False
     assert updates.confirms_unchanged(99, 500) is False
     assert updates.confirms_unchanged(43, 500) is True
     assert updates.confirms_unchanged(43, 499) is False
