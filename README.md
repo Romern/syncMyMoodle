@@ -1,11 +1,12 @@
 # syncMyMoodle
 
 <p>
-  <img src="docs/assets/syncmymoodle-logo.png" alt="syncMyMoodle logo" width="280">
+  <img src="https://raw.githubusercontent.com/Romern/syncMyMoodle/30a29fdcf7206713e49bdd47f1d0dee1a8887294/docs/assets/syncmymoodle-logo.png" alt="syncMyMoodle logo" width="280">
 </p>
 Synchronization client for RWTH Moodle.
 
-syncMyMoodle downloads course materials from RWTH Moodle into a local directory, without storing your credentials.
+syncMyMoodle downloads course materials from RWTH Moodle into a local directory.
+It stores Moodle API tokens locally so normal syncs do not need your RWTH password or TOTP.
 Run it again later to add new materials and update files that changed
 remotely while preserving local edits according to your conflict settings.
 
@@ -372,5 +373,5 @@ existing destination.
 
 - [Source code](https://github.com/Romern/syncMyMoodle)
 - [Issue tracker](https://github.com/Romern/syncMyMoodle/issues)
-- [Release documentation](docs/releasing.md)
-- License: [GPL-3.0-only](LICENSE)
+- [Release documentation](https://github.com/Romern/syncMyMoodle/blob/master/docs/releasing.md)
+- License: [GPL-3.0-only](https://github.com/Romern/syncMyMoodle/blob/master/LICENSE)
