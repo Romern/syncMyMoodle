@@ -4,7 +4,7 @@ import zipfile
 
 import requests
 
-from syncmymoodle import links, opencast, sciebo, sync, sync_handlers
+from syncmymoodle import course_cache, links, opencast, sciebo, sync, sync_handlers
 from syncmymoodle.constants import HTTP_TIMEOUT_SECONDS
 from syncmymoodle.node import Node
 
@@ -66,6 +66,13 @@ def test_page_http_failure_is_counted(caplog):
     assert "Page module 123 returned status 503" in caplog.text
 
 
+def h5p_package(content: str) -> bytes:
+    package = io.BytesIO()
+    with zipfile.ZipFile(package, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+        archive.writestr("content/content.json", content)
+    return package.getvalue()
+
+
 def run_h5p_handler(monkeypatch, response):
     ctx = make_context()
     session = FakeSession()
@@ -94,6 +101,51 @@ def run_h5p_handler(monkeypatch, response):
     )
 
     return section_node
+
+
+def run_cached_h5p_handler(
+    monkeypatch,
+    tmp_path,
+    content_hash,
+    response=None,
+    *,
+    timemodified=None,
+):
+    ctx = make_context({"paths.sync_directory": str(tmp_path)})
+    session = FakeSession()
+    if response is not None:
+        session.add("GET", H5P_PACKAGE_URL, response)
+    ctx.session = session
+    monkeypatch.setattr(
+        sync_handlers.moodle_api,
+        "get_h5pactivities_by_course",
+        lambda session, wstoken, course_id: [
+            {
+                "coursemodule": 317,
+                "contenthash": content_hash,
+                "timemodified": timemodified,
+                "package": [{"fileurl": H5P_PACKAGE_URL}],
+            }
+        ],
+    )
+    root = Node("", -1, "Root", None)
+    semester_node = root.add_child("26ss", None, "Semester")
+    assert semester_node is not None
+    course_node = semester_node.add_child("Course", 1, "Course")
+    assert course_node is not None
+    section_node = course_node.add_child("Section", 2, "Section")
+    assert section_node is not None
+    ctx.root_node = root
+    module_context = sync_handlers.ModuleContext(
+        ctx, 1, course_node, section_node, {}, {}
+    )
+
+    sync_handlers.handle_embedded_link_module(
+        module_context,
+        {"id": 317, "modname": "h5pactivity", "name": "Interactive video"},
+    )
+
+    return ctx, section_node, session
 
 
 def test_h5p_package_download_is_streamed_and_capped(monkeypatch, caplog):
@@ -149,6 +201,96 @@ def test_large_h5p_package_is_spooled_and_inspected(monkeypatch):
     assert section_node.children[0].url == (
         "https://www.youtube.com/watch?v=abcdefghijk"
     )
+
+
+def test_h5p_content_cache_reuses_unchanged_and_refreshes_changed_packages(
+    monkeypatch, tmp_path
+):
+    first_url = "https://www.youtube.com/watch?v=abcdefghijk"
+    first, first_section, first_session = run_cached_h5p_handler(
+        monkeypatch,
+        tmp_path,
+        "a" * 40,
+        FakeResponse(content=h5p_package(first_url)),
+    )
+    course_cache.cache_root_node(first)
+
+    _, cached_section, cached_session = run_cached_h5p_handler(
+        monkeypatch,
+        tmp_path,
+        "a" * 40,
+    )
+
+    assert first_session.count("GET", H5P_PACKAGE_URL) == 1
+    assert cached_session.count("GET", H5P_PACKAGE_URL) == 0
+    assert [child.url for child in first_section.children] == [first_url]
+    assert [child.url for child in cached_section.children] == [first_url]
+
+    changed_url = "https://www.youtube.com/watch?v=zyxwvutsrqp"
+    changed, changed_section, changed_session = run_cached_h5p_handler(
+        monkeypatch,
+        tmp_path,
+        "b" * 40,
+        FakeResponse(content=h5p_package(changed_url)),
+    )
+    course_cache.cache_root_node(changed)
+
+    assert changed_session.count("GET", H5P_PACKAGE_URL) == 1
+    assert [child.url for child in changed_section.children] == [changed_url]
+
+    _, refreshed_section, refreshed_session = run_cached_h5p_handler(
+        monkeypatch,
+        tmp_path,
+        "b" * 40,
+    )
+
+    assert refreshed_session.count("GET", H5P_PACKAGE_URL) == 0
+    assert [child.url for child in refreshed_section.children] == [changed_url]
+
+
+def test_h5p_timestamp_marker_is_used_when_content_hash_is_missing(
+    monkeypatch, tmp_path
+):
+    video_url = "https://www.youtube.com/watch?v=abcdefghijk"
+    first, _, _ = run_cached_h5p_handler(
+        monkeypatch,
+        tmp_path,
+        None,
+        FakeResponse(content=h5p_package(video_url)),
+        timemodified=1234,
+    )
+    course_cache.cache_root_node(first)
+
+    _, cached_section, cached_session = run_cached_h5p_handler(
+        monkeypatch,
+        tmp_path,
+        None,
+        timemodified=1234,
+    )
+
+    assert cached_session.count("GET", H5P_PACKAGE_URL) == 0
+    assert [child.url for child in cached_section.children] == [video_url]
+
+
+def test_h5p_without_a_revision_marker_is_downloaded_each_run(monkeypatch, tmp_path):
+    video_url = "https://www.youtube.com/watch?v=abcdefghijk"
+    first, _, first_session = run_cached_h5p_handler(
+        monkeypatch,
+        tmp_path,
+        None,
+        FakeResponse(content=h5p_package(video_url)),
+    )
+    course_cache.cache_root_node(first)
+
+    _, _, second_session = run_cached_h5p_handler(
+        monkeypatch,
+        tmp_path,
+        None,
+        FakeResponse(content=h5p_package(video_url)),
+    )
+
+    assert first_session.count("GET", H5P_PACKAGE_URL) == 1
+    assert second_session.count("GET", H5P_PACKAGE_URL) == 1
 
 
 def test_nested_moodle_folder_paths_are_preserved(monkeypatch):

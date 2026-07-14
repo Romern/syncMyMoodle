@@ -9,7 +9,7 @@ from typing import Any, Callable, cast
 
 import requests
 
-from syncmymoodle import filters, moodle_files
+from syncmymoodle import course_cache, filters, moodle_files
 from syncmymoodle import links as links_api
 from syncmymoodle import moodle as moodle_api
 from syncmymoodle import opencast as opencast_api
@@ -55,6 +55,28 @@ def register_handler(handler: Handler) -> Handler:
     """Register a sync module handler so ``handle_module`` dispatches to it."""
     MODULE_HANDLERS.append(handler)
     return handler
+
+
+def _h5p_content_marker(
+    activity: dict[str, Any],
+    package_file: dict[str, Any],
+) -> str | None:
+    # Moodle exposes the package SHA-1 directly; older deployments may only
+    # provide file modification metadata.
+    content_hash = activity.get("contenthash")
+    if isinstance(content_hash, str) and content_hash:
+        return f"contenthash:{content_hash}"
+
+    modified = package_file.get("timemodified", activity.get("timemodified"))
+    if not isinstance(modified, int) or isinstance(modified, bool) or modified < 0:
+        return None
+    size = package_file.get("filesize")
+    size_marker = (
+        str(size)
+        if isinstance(size, int) and not isinstance(size, bool) and size >= 0
+        else "unknown"
+    )
+    return f"timemodified:{modified}:filesize:{size_marker}"
 
 
 def _opencast_series_episodes(
@@ -445,21 +467,60 @@ def handle_embedded_link_module(  # noqa: C901 - legacy handler awaiting decompo
         package_files = activity.get("package") if activity else None
         if isinstance(package_files, dict):
             package_files = [package_files]
-        package_url = next(
+        package_file = next(
             (
-                item.get("fileurl")
+                item
                 for item in package_files or []
-                if isinstance(item, dict) and item.get("fileurl")
+                if isinstance(item, dict) and isinstance(item.get("fileurl"), str)
             ),
             None,
         )
-        if isinstance(package_url, str):
-            module_context.status("downloading H5P package")
-            content = _read_h5p_content(
-                ctx.require_session(), package_url, module["id"], log
+        if isinstance(activity, dict) and isinstance(package_file, dict):
+            package_url = package_file["fileurl"]
+            assert isinstance(package_url, str)
+            module_id = module["id"]
+            cache_module_id = (
+                module_id
+                if isinstance(module_id, int) and not isinstance(module_id, bool)
+                else None
             )
+            marker = _h5p_content_marker(activity, package_file)
+            content = (
+                course_cache.get_h5p_content(
+                    ctx,
+                    module_context.course_node,
+                    cache_module_id,
+                    marker,
+                    log,
+                )
+                if cache_module_id is not None and marker is not None
+                else None
+            )
+            from_cache = content is not None
+            if content is None:
+                module_context.status("downloading H5P package")
+                content = _read_h5p_content(
+                    ctx.require_session(), package_url, module_id, log
+                )
+                if (
+                    content is not None
+                    and cache_module_id is not None
+                    and marker is not None
+                ):
+                    course_cache.store_h5p_content(
+                        ctx,
+                        module_context.course_node,
+                        cache_module_id,
+                        marker,
+                        content,
+                        log,
+                    )
             if content is not None:
-                module_context.status("scanning H5P content")
+                module_context.status(
+                    "scanning cached H5P content"
+                    if from_cache
+                    else "scanning H5P content"
+                )
                 links_api.scan_for_links(
                     ctx,
                     content,

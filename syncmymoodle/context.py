@@ -98,6 +98,14 @@ class SyncContext:
     emedia_api_session: requests.Session | None = field(default=None, repr=False)
     root_node: Node | None = None
     course_caches: dict[Path, Node] = field(default_factory=dict)
+    course_cache_payloads: dict[Path, dict[str, Any] | None] = field(
+        default_factory=dict,
+        repr=False,
+    )
+    h5p_content_caches: dict[Path, dict[int, tuple[str, str]]] = field(
+        default_factory=dict,
+        repr=False,
+    )
     browser_bootstrap_error_logged: bool = False
     # None negatively caches a share that already failed during this run.
     sciebo_link_cache: dict[str, Node | None] = field(default_factory=dict)

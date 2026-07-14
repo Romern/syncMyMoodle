@@ -15,10 +15,87 @@ from syncmymoodle.storage import read_private_gzip_json, write_private_gzip_json
 
 logger = logging.getLogger(__name__)
 COURSE_CACHE_FORMAT = "syncmymoodle.course-cache.v1"
+H5P_CONTENT_CACHE_KEY = "h5p_content"
 
 
 def _node_path(ctx: SyncContext, node: Node) -> Path:
     return get_sanitized_node_path(node, Path(ctx.config.sync_directory))
+
+
+def _cache_payload(
+    ctx: SyncContext,
+    course_node: Node,
+    log: logging.Logger,
+) -> dict[str, Any] | None:
+    course_path = _node_path(ctx, course_node)
+    if course_path in ctx.course_cache_payloads:
+        return ctx.course_cache_payloads[course_path]
+
+    cache_path = course_path / COURSE_CACHE_FILENAME
+    payload = (
+        read_private_gzip_json(cache_path, "course cache")
+        if cache_path.exists()
+        else None
+    )
+    if not isinstance(payload, dict):
+        payload = None
+    elif payload.get("format") != COURSE_CACHE_FORMAT:
+        log.warning("Ignoring unsupported course cache format: %s", cache_path)
+        payload = None
+    ctx.course_cache_payloads[course_path] = payload
+    return payload
+
+
+def _h5p_content_cache(
+    ctx: SyncContext,
+    course_node: Node,
+    log: logging.Logger,
+) -> dict[int, tuple[str, str]]:
+    course_path = _node_path(ctx, course_node)
+    if course_path in ctx.h5p_content_caches:
+        return ctx.h5p_content_caches[course_path]
+
+    cache: dict[int, tuple[str, str]] = {}
+    payload = _cache_payload(ctx, course_node, log)
+    cached_items = payload.get(H5P_CONTENT_CACHE_KEY) if payload else None
+    if isinstance(cached_items, dict):
+        for raw_module_id, raw_entry in cached_items.items():
+            try:
+                module_id = int(raw_module_id)
+            except (TypeError, ValueError):
+                continue
+            if not isinstance(raw_entry, dict):
+                continue
+            marker = raw_entry.get("marker")
+            content = raw_entry.get("content")
+            if module_id >= 0 and isinstance(marker, str) and isinstance(content, str):
+                cache[module_id] = (marker, content)
+    ctx.h5p_content_caches[course_path] = cache
+    return cache
+
+
+def get_h5p_content(
+    ctx: SyncContext,
+    course_node: Node,
+    module_id: int,
+    marker: str,
+    log: logging.Logger = logger,
+) -> str | None:
+    """Return cached extracted H5P content when its package is unchanged."""
+    cached = _h5p_content_cache(ctx, course_node, log).get(module_id)
+    return cached[1] if cached is not None and cached[0] == marker else None
+
+
+def store_h5p_content(
+    ctx: SyncContext,
+    course_node: Node,
+    module_id: int,
+    marker: str,
+    content: str,
+    log: logging.Logger = logger,
+) -> None:
+    """Retain extracted H5P content for the next per-course cache write."""
+    _h5p_content_cache(ctx, course_node, log)[module_id] = (marker, content)
 
 
 def match_old_cache_child(old_node: Node | None, child: Node) -> Node | None:
@@ -152,15 +229,8 @@ def get_course_cache_root(
     if course_path in ctx.course_caches:
         return ctx.course_caches[course_path]
 
-    cache_path = course_path / COURSE_CACHE_FILENAME
-    if not cache_path.exists():
-        return None
-
-    payload = read_private_gzip_json(cache_path, "course cache")
-    if not isinstance(payload, dict):
-        return None
-    if payload.get("format") != COURSE_CACHE_FORMAT:
-        log.warning("Ignoring unsupported course cache format: %s", cache_path)
+    payload = _cache_payload(ctx, course_node, log)
+    if payload is None:
         return None
     course_data = payload.get("course")
     if not isinstance(course_data, dict):
@@ -169,7 +239,10 @@ def get_course_cache_root(
     try:
         cached_course_root = node_from_cache_data(course_data)
     except (TypeError, ValueError):
-        log.warning("Ignoring malformed course cache: %s", cache_path)
+        log.warning(
+            "Ignoring malformed course cache: %s",
+            course_path / COURSE_CACHE_FILENAME,
+        )
         return None
 
     ctx.course_caches[course_path] = cached_course_root
@@ -235,10 +308,18 @@ def cache_root_node(
             old_course_root = get_course_cache_root(ctx, course_node, log)
             course_path.mkdir(parents=True, exist_ok=True)
             cache_path = course_path / COURSE_CACHE_FILENAME
+            payload: dict[str, Any] = {
+                "format": COURSE_CACHE_FORMAT,
+                "course": node_to_cache_data(ctx, course_node, old_course_root),
+            }
+            h5p_content = _h5p_content_cache(ctx, course_node, log)
+            if h5p_content:
+                payload[H5P_CONTENT_CACHE_KEY] = {
+                    str(module_id): {"marker": marker, "content": content}
+                    for module_id, (marker, content) in sorted(h5p_content.items())
+                }
             write_private_gzip_json(
                 cache_path,
-                {
-                    "format": COURSE_CACHE_FORMAT,
-                    "course": node_to_cache_data(ctx, course_node, old_course_root),
-                },
+                payload,
             )
+            ctx.course_cache_payloads[course_path] = payload
