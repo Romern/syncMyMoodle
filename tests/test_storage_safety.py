@@ -1,4 +1,5 @@
 import gzip
+import importlib
 import json
 import os
 import stat
@@ -148,7 +149,8 @@ def test_private_gzip_json_roundtrip_uses_private_permissions(tmp_path):
 
     write_private_gzip_json(target, {"format": "test", "value": 1})
 
-    assert stat.S_IMODE(target.stat().st_mode) == 0o600
+    if os.name != "nt":
+        assert stat.S_IMODE(target.stat().st_mode) == 0o600
     with target.open("rb") as handle:
         assert json.loads(gzip.decompress(handle.read()).decode("utf-8")) == {
             "format": "test",
@@ -244,7 +246,8 @@ def test_malformed_cookie_fields_are_ignored_without_restore(caplog, field, valu
 def test_private_text_write_is_atomic_and_private(tmp_path, monkeypatch):
     target = tmp_path / "config.toml"
     write_private_text(target, "original", "config")
-    assert stat.S_IMODE(target.stat().st_mode) == 0o600
+    if os.name != "nt":
+        assert stat.S_IMODE(target.stat().st_mode) == 0o600
 
     def failed_replace(source, destination):
         raise OSError("simulated replace failure")
@@ -389,6 +392,51 @@ def test_private_chmod_uses_windows_acl(tmp_path, monkeypatch):
         None,
     )
     assert calls["closed"] == [("token", "process", 8)]
+
+
+@pytest.mark.skipif(os.name != "nt", reason="requires Windows ACL APIs")
+def test_private_text_write_persists_windows_acl(tmp_path):
+    win32api = importlib.import_module("win32api")
+    win32con = importlib.import_module("win32con")
+    win32security = importlib.import_module("win32security")
+    ntsecuritycon = importlib.import_module("ntsecuritycon")
+    target = tmp_path / "config.toml"
+    target.write_text("original", encoding="utf-8")
+
+    write_private_text(target, "secret", "config")
+
+    assert target.read_text(encoding="utf-8") == "secret"
+    descriptor = win32security.GetNamedSecurityInfo(
+        os.fspath(target),
+        win32security.SE_FILE_OBJECT,
+        win32security.DACL_SECURITY_INFORMATION,
+    )
+    control, _revision = descriptor.GetSecurityDescriptorControl()
+    assert control & win32security.SE_DACL_PROTECTED
+
+    dacl = descriptor.GetSecurityDescriptorDacl()
+    assert dacl is not None
+    assert dacl.IsValid()
+    assert dacl.GetAceCount() == 1
+    (ace_type, ace_flags), access_mask, ace_sid = dacl.GetAce(0)
+    assert ace_type == win32security.ACCESS_ALLOWED_ACE_TYPE
+    assert ace_flags == 0
+    assert access_mask == (
+        ntsecuritycon.FILE_GENERIC_READ
+        | ntsecuritycon.FILE_GENERIC_WRITE
+        | ntsecuritycon.DELETE
+    )
+
+    token = win32security.OpenProcessToken(
+        win32api.GetCurrentProcess(), win32con.TOKEN_QUERY
+    )
+    try:
+        user_sid = win32security.GetTokenInformation(token, win32security.TokenUser)[0]
+    finally:
+        win32api.CloseHandle(token)
+    assert win32security.ConvertSidToStringSid(ace_sid) == (
+        win32security.ConvertSidToStringSid(user_sid)
+    )
 
 
 def test_private_gzip_json_write_does_not_require_fchmod(tmp_path, monkeypatch):

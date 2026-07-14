@@ -1,4 +1,5 @@
 import json
+import os
 import stat
 
 import pytest
@@ -97,7 +98,8 @@ def test_env_file_token_store_roundtrip_is_atomic_and_private(tmp_path):
 
     store.store(tokens())
 
-    assert stat.S_IMODE(path.stat().st_mode) == 0o600
+    if os.name != "nt":
+        assert stat.S_IMODE(path.stat().st_mode) == 0o600
     assert path.read_text(encoding="utf-8") == (
         f"{ENV_FILE_USERNAME_KEY}=ab123456\n"
         f"{ENV_FILE_WSTOKEN_KEY}=webservice-token\n"

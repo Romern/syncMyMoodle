@@ -999,7 +999,7 @@ user = "toml-user"
 totp_serial = "toml-totp"
 
 [paths]
-sync_directory = "/tmp/moodle"
+sync_directory = "moodle"
 
 [courses]
 prefix_handling = "suffix"
@@ -1026,7 +1026,7 @@ quiz = "pdf"
     assert cli.load_config(args, parser) == {
         "auth.user": "toml-user",
         "auth.login.totp_serial": "toml-totp",
-        "paths.sync_directory": "/tmp/moodle",
+        "paths.sync_directory": str(tmp_path / "moodle"),
         "courses.prefix_handling": "suffix",
         "downloads.update_files": True,
         "filters.allowed_domains": ["moodle.rwth-aachen.de"],
@@ -1957,7 +1957,11 @@ env_file = {str(env_path)!r}
     assert "auth.login.env_file does not define SYNCMYMOODLE_PASSWORD" in caplog.text
 
 
-def test_cli_overrides_are_applied_after_config():
+def test_cli_overrides_are_applied_after_config(tmp_path):
+    login_env_file = tmp_path / "smm-secrets.env"
+    cookie_file = tmp_path / "session"
+    sync_directory = tmp_path / "moodle"
+    browser = tmp_path / "chromium"
     parser = cli.build_parser()
     args = parser.parse_args(
         [
@@ -1966,9 +1970,9 @@ def test_cli_overrides_are_applied_after_config():
             "--totp-serial",
             "cli-totp",
             "--login-env-file",
-            "/tmp/smm-secrets.env",
+            str(login_env_file),
             "--cookie-file",
-            "/tmp/session",
+            str(cookie_file),
             "--courses",
             "course-a,course-b",
             "--skip-courses",
@@ -1976,9 +1980,9 @@ def test_cli_overrides_are_applied_after_config():
             "--semesters",
             "25ws,26ss",
             "--sync-directory",
-            "/tmp/moodle",
+            str(sync_directory),
             "--browser",
-            "/usr/bin/chromium",
+            str(browser),
             "--course-prefix-handling",
             "suffix",
             "--no-follow-links",
@@ -2020,13 +2024,13 @@ def test_cli_overrides_are_applied_after_config():
 
     assert cfg.user == "cli-user"
     assert cfg.totp_serial == "cli-totp"
-    assert cfg.login_env_file == "/tmp/smm-secrets.env"
-    assert cfg.cookie_file == "/tmp/session"
+    assert cfg.login_env_file == str(login_env_file)
+    assert cfg.cookie_file == str(cookie_file)
     assert cfg.selected_courses == ["course-a", "course-b"]
     assert cfg.skip_courses == ["course-c", "course-d"]
     assert cfg.only_sync_semester == ["25ws", "26ss"]
-    assert cfg.sync_directory == "/tmp/moodle"
-    assert cfg.browser == "/usr/bin/chromium"
+    assert cfg.sync_directory == str(sync_directory)
+    assert cfg.browser == str(browser)
     assert cfg.course_prefix_handling == "suffix"
     assert cfg.keyring_store_totp_secret is False
     assert cfg.follow_links is False  # --no-follow-links

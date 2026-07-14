@@ -107,7 +107,7 @@ def test_clean_conflicts_dry_run_uses_config_without_credentials(tmp_path, capsy
     conflict = write(current.with_name("file.syncconflict.aaaaaaaa.pdf"), b"content")
     config_path = tmp_path / "config.toml"
     config_path.write_text(
-        f'[paths]\nsync_directory = "{root}"\n',
+        '[paths]\nsync_directory = "Moodle"\n',
         encoding="utf-8",
     )
 
