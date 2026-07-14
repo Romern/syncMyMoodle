@@ -39,6 +39,9 @@ class ModuleContext:
     folders_by_coursemodule: Any
     log: logging.Logger = logger
 
+    def status(self, message: str) -> None:
+        self.ctx.output.sync_progress.module_status(message)
+
 
 Handler = Callable[[ModuleContext, dict[str, Any]], None]
 
@@ -63,6 +66,9 @@ def _opencast_series_episodes(
     seen_episode_ids: set[str] = set()
     offset = 0
     while True:
+        ctx.output.sync_progress.module_status(
+            f"listing Opencast episodes ({len(episodes)} found)"
+        )
         query = urllib.parse.urlencode(
             {
                 "limit": OPENCAST_SERIES_PAGE_SIZE,
@@ -218,6 +224,7 @@ def handle_assignment_module(
 
         assignment_intro = ass.get("intro")
         if assignment_intro:
+            module_context.status("scanning assignment links")
             links_api.scan_for_links(
                 ctx,
                 assignment_intro,
@@ -227,6 +234,7 @@ def handle_assignment_module(
             )
 
         account = ctx.require_moodle_account()
+        module_context.status("loading assignment submissions")
         ass = ass["introattachments"] + moodle_api.get_assignment_submission_files(
             ctx.require_session(),
             account.wstoken,
@@ -277,6 +285,7 @@ def handle_resource_like_module(
         if moodle_files.is_direct_moodle_file_content(module, c):
             moodle_files.add_moodle_content_file_node(section_node, c)
         elif not (module["modname"] == "page" and c.get("filename") == "index.html"):
+            module_context.status("checking linked resource")
             links_api.scan_for_links(
                 ctx,
                 file_url,
@@ -306,6 +315,7 @@ def handle_folder_module(
         # Scan intro for links
         folder_info = folders_by_coursemodule.get(module["id"])
         if folder_info and folder_info.get("intro"):
+            module_context.status("scanning folder links")
             links_api.scan_for_links(ctx, folder_info["intro"], folder_node, course_id)
 
         for c in module.get("contents", []):
@@ -362,6 +372,7 @@ def handle_embedded_link_module(  # noqa: C901 - legacy handler awaiting decompo
         )
         scan_page_links = not filters.should_skip_url(ctx, html_url, "page link")
         if opencast_enabled or scan_page_links:
+            module_context.status("fetching page")
             try:
                 response = ctx.require_session().get(
                     html_url,
@@ -395,10 +406,12 @@ def handle_embedded_link_module(  # noqa: C901 - legacy handler awaiting decompo
                         vid_id = opencast_api.extract_episode_id(iframe_src)
                         if not vid_id:
                             continue
+                        module_context.status("authenticating embedded Opencast video")
                         if not opencast_api.authenticate_episode(
                             ctx, course_id, vid_id, log
                         ):
                             continue
+                        module_context.status("resolving embedded Opencast video")
                         opencast_api.add_episode_nodes(
                             ctx,
                             section_node,
@@ -408,6 +421,7 @@ def handle_embedded_link_module(  # noqa: C901 - legacy handler awaiting decompo
                         )
 
                 if scan_page_links:
+                    module_context.status("scanning page links")
                     links_api.scan_html_text_for_links(
                         ctx,
                         response.text,
@@ -418,6 +432,7 @@ def handle_embedded_link_module(  # noqa: C901 - legacy handler awaiting decompo
                     )
     # "Interactive" h5p videos
     elif module["modname"] == "h5pactivity":
+        module_context.status("loading H5P activity")
         activity = module_instance(
             ctx,
             module,
@@ -437,10 +452,12 @@ def handle_embedded_link_module(  # noqa: C901 - legacy handler awaiting decompo
             None,
         )
         if isinstance(package_url, str):
+            module_context.status("downloading H5P package")
             content = _read_h5p_content(
                 ctx.require_session(), package_url, module["id"], log
             )
             if content is not None:
+                module_context.status("scanning H5P content")
                 links_api.scan_for_links(
                     ctx,
                     content,
@@ -450,6 +467,7 @@ def handle_embedded_link_module(  # noqa: C901 - legacy handler awaiting decompo
                     single=False,
                 )
     else:
+        module_context.status("scanning embedded links")
         links_api.scan_for_links(
             ctx,
             module.get("description", ""),
@@ -473,6 +491,7 @@ def handle_opencast_lti_module(  # noqa: C901 - legacy handler awaiting decompos
     if module["modname"] != "lti" or not ctx.config.link_source_enabled("opencast"):
         return
 
+    module_context.status("loading Opencast activity")
     instance = module_instance(
         ctx,
         module,
@@ -484,6 +503,7 @@ def handle_opencast_lti_module(  # noqa: C901 - legacy handler awaiting decompos
     if not isinstance(tool_id, int):
         log.warning("Opencast: LTI module %s has no tool instance id", module["id"])
         return
+    module_context.status("loading Opencast launch data")
     launch_data = moodle_api.get_lti_launch_data(
         ctx.require_session(), ctx.require_moodle_account().wstoken, tool_id
     )
@@ -506,6 +526,7 @@ def handle_opencast_lti_module(  # noqa: C901 - legacy handler awaiting decompos
         # Found an Opencast "series" page
         series_id = engage_series_id
 
+        module_context.status("authenticating Opencast series")
         if not opencast_api.submit_lti_form(
             ctx,
             engage_data,
@@ -520,7 +541,8 @@ def handle_opencast_lti_module(  # noqa: C901 - legacy handler awaiting decompos
             return
         series_node = cast(Node, course_node.add_child(name, series_id, "Section"))
 
-        for episode_id, episode_title in episodes:
+        for index, (episode_id, episode_title) in enumerate(episodes, start=1):
+            module_context.status(f"resolving Opencast episode {index}/{len(episodes)}")
             opencast_api.add_episode_nodes(
                 ctx,
                 series_node,
@@ -535,6 +557,7 @@ def handle_opencast_lti_module(  # noqa: C901 - legacy handler awaiting decompos
                 module["id"],
             )
         else:
+            module_context.status("authenticating Opencast video")
             if not opencast_api.submit_lti_form(
                 ctx,
                 engage_data,
@@ -543,6 +566,7 @@ def handle_opencast_lti_module(  # noqa: C901 - legacy handler awaiting decompos
                 endpoint=endpoint,
             ):
                 return
+            module_context.status("resolving Opencast video")
             opencast_api.add_episode_nodes(
                 ctx,
                 section_node,
@@ -564,6 +588,7 @@ def handle_quiz_module(
     if module["modname"] != "quiz" or ctx.config.quiz_mode == "off":
         return
 
+    module_context.status("loading quiz activity")
     instance = module_instance(
         ctx,
         module,
@@ -574,6 +599,7 @@ def handle_quiz_module(
     quiz_id = instance.get("id") if instance else module.get("instance")
     if not isinstance(quiz_id, int):
         return
+    module_context.status("loading quiz attempts")
     attempts = moodle_api.get_quiz_attempts(
         ctx.require_session(), ctx.require_moodle_account().wstoken, quiz_id
     )
@@ -581,6 +607,7 @@ def handle_quiz_module(
         attempt_id = attempt.get("id")
         if not isinstance(attempt_id, int):
             continue
+        module_context.status(f"loading quiz attempt {index}/{len(attempts)}")
         review = moodle_api.get_quiz_attempt_review(
             ctx.require_session(), ctx.require_moodle_account().wstoken, attempt_id
         )

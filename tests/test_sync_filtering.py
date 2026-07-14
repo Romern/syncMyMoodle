@@ -94,6 +94,35 @@ def test_sync_does_not_log_raw_moodle_payloads(monkeypatch, caplog):
     assert "private-course-payload" not in caplog.text
 
 
+def test_verbose_sync_logging_identifies_slow_modules(monkeypatch, caplog):
+    course = {
+        "id": 201,
+        "shortname": "Course",
+        "idnumber": "26ss-current",
+    }
+    sections = [
+        {
+            "id": 301,
+            "name": "Week one",
+            "modules": [{"id": 401, "name": "Lecture recordings", "modname": "lti"}],
+        }
+    ]
+    syncer = make_context()
+    syncer.session = FakeSession()
+    monkeypatch.setattr(moodle, "get_all_courses", lambda *args: [course])
+    monkeypatch.setattr(moodle, "get_course", lambda *args: sections)
+    monkeypatch.setattr(sync.sync_handlers, "handle_module", lambda *args: None)
+    timestamps = iter([10.0, 11.25])
+    monkeypatch.setattr(sync.time, "monotonic", lambda: next(timestamps))
+    caplog.set_level(logging.INFO, logger="syncmymoodle.sync")
+
+    sync.sync(syncer)
+
+    assert caplog.messages == [
+        "Processed Moodle module 401 (lti) 'Lecture recordings' in 1.2s"
+    ]
+
+
 def test_skip_courses_and_semester_filter_limit_synced_courses(monkeypatch):
     synced_course_ids = []
     syncer = make_context(

@@ -751,6 +751,7 @@ def test_generic_link_error_pages_open_origin_circuit_without_being_scanned(capl
 def test_opencast_series_fetches_every_page(monkeypatch):
     syncer = make_context()
     requested_urls = []
+    statuses = []
 
     def fetch_result_list(ctx, url, context, log):
         requested_urls.append(url)
@@ -767,6 +768,11 @@ def test_opencast_series_fetches_every_page(monkeypatch):
         ]
 
     monkeypatch.setattr(opencast, "fetch_result_list", fetch_result_list)
+    monkeypatch.setattr(
+        syncer.output.sync_progress,
+        "module_status",
+        statuses.append,
+    )
 
     episodes = sync_handlers._opencast_series_episodes(
         syncer,
@@ -779,6 +785,10 @@ def test_opencast_series_fetches_every_page(monkeypatch):
     assert requested_urls == [
         f"{opencast.OPENCAST_SEARCH_URL}?limit=100&offset=0&sid=series-123",
         f"{opencast.OPENCAST_SEARCH_URL}?limit=100&offset=100&sid=series-123",
+    ]
+    assert statuses == [
+        "listing Opencast episodes (0 found)",
+        "listing Opencast episodes (100 found)",
     ]
 
 

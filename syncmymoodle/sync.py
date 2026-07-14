@@ -1,4 +1,5 @@
 import logging
+import time
 from typing import cast
 
 from syncmymoodle import filters, sync_handlers
@@ -8,6 +9,7 @@ from syncmymoodle.http_utils import redact_url_secrets
 from syncmymoodle.node import Node
 
 logger = logging.getLogger(__name__)
+SLOW_MODULE_SECONDS = 1.0
 
 
 def sync(ctx: SyncContext) -> None:  # noqa: C901 - legacy sync awaiting decomposition
@@ -208,6 +210,19 @@ def sync(ctx: SyncContext) -> None:  # noqa: C901 - legacy sync awaiting decompo
                 log=logger,
             )
             for module in section["modules"]:
+                module_name = str(
+                    module.get("name") or f"module {module.get('id', 'unknown')}"
+                )
+                module_kind = str(module.get("modname") or "unknown")
+                progress.update_course(
+                    course_name,
+                    section=section_index,
+                    sections=section_total,
+                    module=module_index,
+                    modules=module_total,
+                    current_module=f"{module_name} [{module_kind}]",
+                )
+                module_started_at = time.monotonic()
                 try:
                     if filters.should_skip_module(ctx, module, course_id):
                         continue
@@ -222,6 +237,15 @@ def sync(ctx: SyncContext) -> None:  # noqa: C901 - legacy sync awaiting decompo
                         module.get("modname"),
                     )
                 finally:
+                    elapsed = time.monotonic() - module_started_at
+                    if elapsed >= SLOW_MODULE_SECONDS:
+                        logger.info(
+                            "Processed Moodle module %s (%s) %r in %.1fs",
+                            module.get("id"),
+                            module_kind,
+                            module_name,
+                            elapsed,
+                        )
                     module_index += 1
                     progress.update_course(
                         course_name,

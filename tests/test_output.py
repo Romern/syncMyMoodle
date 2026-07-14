@@ -1,11 +1,13 @@
 import io
 import logging
+import re
 import sys
 import time
 
 import pytest
+from rich.progress import Progress
 
-from syncmymoodle.output import RunStatistics, TerminalOutput
+from syncmymoodle.output import RunStatistics, TerminalOutput, safe_terminal_text
 
 
 class TtyBuffer(io.StringIO):
@@ -187,6 +189,66 @@ def test_redirected_item_progress_is_throttled_for_large_runs(monkeypatch):
     assert output.count("] Processing File ") == 11
 
 
+def test_tty_sync_progress_coalesces_fast_item_checks(monkeypatch):
+    stderr = TtyBuffer()
+    monkeypatch.setattr(sys, "stderr", stderr)
+    terminal = TerminalOutput("never")
+
+    with terminal.sync_progress as progress:
+        progress.begin_items(200)
+        for index in range(1, 201):
+            progress.start_item(index, f"File {index}")
+            progress.finish_item(index)
+
+    rendered = stderr.getvalue()
+    rendered_labels = len(set(re.findall(r"File (\d+)", rendered)))
+    assert rendered_labels < 10
+    assert "200/200 items" in rendered
+
+
+def test_tty_sync_progress_still_shows_a_slow_item_check(monkeypatch):
+    stderr = TtyBuffer()
+    monkeypatch.setattr(sys, "stderr", stderr)
+    terminal = TerminalOutput("never")
+
+    with terminal.sync_progress as progress:
+        progress.begin_items(1)
+        progress.start_item(1, "File: slow metadata check")
+        time.sleep(0.25)
+        progress.finish_item(1)
+
+    assert "File: slow metadata check" in stderr.getvalue()
+
+
+def test_interrupted_sync_retains_the_active_transfer_frame(monkeypatch):
+    stderr = TtyBuffer()
+    monkeypatch.setattr(sys, "stderr", stderr)
+    stopped: list[tuple[bool, list[object]]] = []
+    original_stop = Progress.stop
+
+    def record_stop(progress):
+        stopped.append(
+            (
+                progress.live.transient,
+                [task.fields.get("kind") for task in progress.tasks],
+            )
+        )
+        original_stop(progress)
+
+    monkeypatch.setattr(Progress, "stop", record_stop)
+    terminal = TerminalOutput("never")
+
+    with pytest.raises(KeyboardInterrupt):
+        with terminal.sync_progress as progress:
+            progress.begin_items(1)
+            progress.start_item(1, "Video: interrupted.mp4")
+            with terminal.transfer("interrupted.mp4", total=100) as transfer:
+                transfer.advance(40)
+                raise KeyboardInterrupt
+
+    assert stopped == [(False, ["aggregate", "status", "transfer"])]
+
+
 def test_tty_sync_progress_combines_aggregate_detail_and_transfer(monkeypatch):
     stdout = TtyBuffer()
     stderr = TtyBuffer()
@@ -203,8 +265,10 @@ def test_tty_sync_progress_combines_aggregate_detail_and_transfer(monkeypatch):
             sections=3,
             module=2,
             modules=8,
+            current_module="Lecture recordings [lti]",
         )
-        time.sleep(0.15)
+        progress.module_status("resolving Opencast episode 2/5")
+        time.sleep(0.25)
         progress.finish_course(1)
         progress.begin_items(2)
         progress.start_item(1, "Video: Operating Systems/lecture.mp4")
@@ -215,10 +279,13 @@ def test_tty_sync_progress_combines_aggregate_detail_and_transfer(monkeypatch):
         progress.finish_item(1)
 
     rendered = stderr.getvalue()
+    normalized = " ".join(safe_terminal_text(rendered).split())
     assert "Scanning courses" in rendered
     assert "Operating Systems" in rendered
-    assert "2/8 modules" in rendered
+    assert "3/8 modules" in rendered
     assert "section 1/3" in rendered
+    assert "Lecture recordings [lti]" in normalized
+    assert "resolving Opencast episode 2/5" in normalized
     assert "Processing items" in rendered
     assert "lecture.mp4" in rendered
     assert "100/100 bytes" in rendered

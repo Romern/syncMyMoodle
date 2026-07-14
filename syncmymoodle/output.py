@@ -15,12 +15,13 @@ from pathlib import Path
 from types import TracebackType
 from typing import IO, Iterator, Literal, Protocol, Sequence
 
-from rich.console import Console
+from rich.console import Console, RenderableType
 from rich.progress import (
     BarColumn,
     DownloadColumn,
     Progress,
     ProgressColumn,
+    SpinnerColumn,
     Task,
     TaskID,
     TextColumn,
@@ -44,6 +45,19 @@ CONTROL_TRANSLATION = str.maketrans(
 def safe_terminal_text(value: str) -> str:
     """Remove terminal control sequences while preserving tabs and newlines."""
     return ANSI_ESCAPE_RE.sub("", value).translate(CONTROL_TRANSLATION)
+
+
+def _was_interrupted(exc_type: type[BaseException] | None) -> bool:
+    return exc_type is not None and issubclass(exc_type, KeyboardInterrupt)
+
+
+def _stop_progress(
+    progress: Progress,
+    exc_type: type[BaseException] | None,
+) -> None:
+    if _was_interrupted(exc_type):
+        progress.live.transient = False
+    progress.stop()
 
 
 class FilteredEntry(Protocol):
@@ -121,6 +135,15 @@ class WorkCountColumn(ProgressColumn):
         return Text(safe_terminal_text(str(task.fields.get("count", ""))))
 
 
+class WorkActivityColumn(SpinnerColumn):
+    """Show activity only for work that otherwise has no moving indicator."""
+
+    def render(self, task: Task) -> RenderableType:
+        if task.fields.get("kind") not in {"course", "status"}:
+            return Text()
+        return super().render(task)
+
+
 class WorkSpeedColumn(ProgressColumn):
     def __init__(self) -> None:
         super().__init__()
@@ -151,8 +174,12 @@ class SyncProgress:
         self._progress: Progress | None = None
         self._stage_task: TaskID | None = None
         self._detail_task: TaskID | None = None
+        self._transfer_task: TaskID | None = None
         self._active = False
         self._course_total = 0
+        self._course_section_detail = ""
+        self._current_module = ""
+        self._module_status = ""
         self._item_total = 0
         self._item_verb = "Processing"
         self._current_item_label = ""
@@ -163,6 +190,7 @@ class SyncProgress:
         self._active = True
         if self._terminal.interactive:
             self._progress = Progress(
+                WorkActivityColumn(),
                 TextColumn("{task.description}", markup=False),
                 BarColumn(),
                 WorkCountColumn(),
@@ -170,6 +198,7 @@ class SyncProgress:
                 WorkRemainingColumn(),
                 console=self._terminal.error_console,
                 transient=True,
+                refresh_per_second=5,
                 redirect_stdout=False,
                 redirect_stderr=False,
             )
@@ -182,12 +211,13 @@ class SyncProgress:
         exc_value: BaseException | None,
         traceback: TracebackType | None,
     ) -> None:
-        del exc_type, exc_value, traceback
+        del exc_value, traceback
         if self._progress is not None:
-            self._progress.stop()
+            _stop_progress(self._progress, exc_type)
         self._progress = None
         self._stage_task = None
         self._detail_task = None
+        self._transfer_task = None
         self._active = False
 
     @property
@@ -203,8 +233,10 @@ class SyncProgress:
             self._progress.remove_task(task_id)
 
     def _clear(self) -> None:
+        self._remove_task(self._transfer_task)
         self._remove_task(self._detail_task)
         self._remove_task(self._stage_task)
+        self._transfer_task = None
         self._detail_task = None
         self._stage_task = None
 
@@ -217,6 +249,7 @@ class SyncProgress:
         kind: str,
         count: str = "",
         detail: str = "",
+        visible: bool = True,
     ) -> TaskID | None:
         if self._progress is None:
             return None
@@ -227,9 +260,20 @@ class SyncProgress:
             kind=kind,
             count=safe_terminal_text(count),
             detail=safe_terminal_text(detail),
+            visible=visible,
         )
-        self._progress.refresh()
         return task_id
+
+    def _course_detail(self) -> str:
+        return " · ".join(
+            part
+            for part in (
+                self._course_section_detail,
+                self._current_module,
+                self._module_status,
+            )
+            if part
+        )
 
     def discovering_courses(self) -> None:
         self._clear()
@@ -243,6 +287,9 @@ class SyncProgress:
     def begin_courses(self, total: int) -> None:
         self._clear()
         self._course_total = total
+        self._course_section_detail = ""
+        self._current_module = ""
+        self._module_status = ""
         if self._progress is None:
             noun = "course" if total == 1 else "courses"
             self._terminal.phase(f"Scanning {total} {noun}...")
@@ -256,6 +303,9 @@ class SyncProgress:
         )
 
     def start_course(self, index: int, name: str) -> None:
+        self._course_section_detail = ""
+        self._current_module = ""
+        self._module_status = ""
         if self._progress is None:
             self._terminal.phase(f"[{index}/{self._course_total}] Scanning {name}...")
             return
@@ -281,18 +331,25 @@ class SyncProgress:
         sections: int,
         module: int,
         modules: int,
+        current_module: str = "",
     ) -> None:
         if self._progress is None:
             return
+        self._course_section_detail = (
+            f"section {section}/{sections}" if sections else ""
+        )
+        self._current_module = safe_terminal_text(current_module)
+        self._module_status = ""
         if modules:
             total = modules
             completed = module
-            count = f"{module}/{modules} modules"
+            displayed_module = min(module + bool(current_module), modules)
+            count = f"{displayed_module}/{modules} modules"
         else:
             total = max(sections, 1)
             completed = sections if sections == 0 else section
             count = f"{section}/{sections} sections"
-        detail = f"section {section}/{sections}" if sections else ""
+        detail = self._course_detail()
         if self._detail_task is None:
             self._detail_task = self._add_task(
                 name,
@@ -312,6 +369,16 @@ class SyncProgress:
                 count=safe_terminal_text(count),
                 detail=safe_terminal_text(detail),
             )
+
+    def module_status(self, status: str) -> None:
+        """Describe the active module's current potentially slow operation."""
+        if self._progress is None or self._detail_task is None:
+            return
+        self._module_status = safe_terminal_text(status)
+        self._progress.update(
+            self._detail_task,
+            detail=self._course_detail(),
+        )
 
     def finish_course(self, index: int) -> None:
         if self._progress is None:
@@ -342,6 +409,13 @@ class SyncProgress:
             kind="aggregate",
             count=f"0/{total} items",
         )
+        self._detail_task = self._add_task(
+            "",
+            total=None,
+            kind="status",
+            count="checking",
+            visible=False,
+        )
 
     def start_item(self, index: int, label: str) -> None:
         self._current_item_label = safe_terminal_text(label)
@@ -360,12 +434,14 @@ class SyncProgress:
             completed=index - 1,
             count=f"{index - 1}/{self._item_total} items",
         )
-        self._remove_task(self._detail_task)
-        self._detail_task = self._add_task(
-            label,
-            total=None,
+        assert self._detail_task is not None
+        self._progress.update(
+            self._detail_task,
+            description=self._current_item_label,
             kind="status",
             count="checking",
+            detail="",
+            visible=True,
         )
 
     def finish_item(self, index: int) -> None:
@@ -373,13 +449,12 @@ class SyncProgress:
         if self._progress is None:
             return
         assert self._stage_task is not None
-        self._remove_task(self._detail_task)
-        self._detail_task = None
+        assert self._detail_task is not None
+        self._progress.update(self._detail_task, visible=False)
         self._progress.update(
             self._stage_task,
             completed=index,
             count=f"{index}/{self._item_total} items",
-            refresh=True,
         )
 
     def begin_transfer(
@@ -390,19 +465,21 @@ class SyncProgress:
     ) -> TaskID | None:
         if self._progress is None:
             return None
-        self._remove_task(self._detail_task)
-        self._detail_task = self._add_task(
+        if self._detail_task is not None:
+            self._progress.update(self._detail_task, visible=False)
+        self._remove_task(self._transfer_task)
+        self._transfer_task = self._add_task(
             self._current_item_label or label,
             total=total,
             completed=completed,
             kind="transfer",
         )
-        return self._detail_task
+        return self._transfer_task
 
     def finish_transfer(self, task_id: TaskID | None) -> None:
         self._remove_task(task_id)
-        if task_id == self._detail_task:
-            self._detail_task = None
+        if task_id == self._transfer_task:
+            self._transfer_task = None
 
     def finalizing(self, detail: str) -> None:
         self._clear()
@@ -490,11 +567,12 @@ class TransferProgress:
         exc_value: BaseException | None,
         traceback: TracebackType | None,
     ) -> None:
-        del exc_type, exc_value, traceback
+        del exc_value, traceback
         if self._shared_progress:
-            self._terminal.sync_progress.finish_transfer(self._task_id)
+            if not _was_interrupted(exc_type):
+                self._terminal.sync_progress.finish_transfer(self._task_id)
         elif self._progress is not None:
-            self._progress.stop()
+            _stop_progress(self._progress, exc_type)
 
     def advance(self, amount: int) -> None:
         if amount <= 0:

@@ -80,6 +80,7 @@ def scan_public_shares(
             continue
         if _reuse_cached_share(ctx, link, parent_node):
             continue
+        ctx.output.sync_progress.module_status("connecting to Sciebo share")
         _scan_new_share(ctx, link, parent_node, log)
 
 
@@ -270,6 +271,7 @@ def _add_sciebo_files(
     auth_header: dict[str, str],
     log: logging.Logger = logger,
 ) -> bool:
+    ctx.output.sync_progress.module_status(f"scanning Sciebo folder {parent_node.name}")
     soup_xml = _fetch_webdav_listing(ctx, href, auth_header, log)
     if soup_xml is None:
         return False
