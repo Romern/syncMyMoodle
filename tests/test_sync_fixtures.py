@@ -86,18 +86,19 @@ def h5p_package(content: str) -> bytes:
     return package.getvalue()
 
 
-def run_h5p_handler(monkeypatch, response):
+def run_h5p_handler(monkeypatch, response, package_metadata=None):
     ctx = make_context()
     session = FakeSession()
     session.add("GET", H5P_PACKAGE_URL, response)
     ctx.session = session
+    package_file = {"fileurl": H5P_PACKAGE_URL, **(package_metadata or {})}
     monkeypatch.setattr(
         sync_handlers.moodle_api,
         "get_h5pactivities_by_course",
         lambda session, wstoken, course_id: [
             {
                 "coursemodule": 317,
-                "package": [{"fileurl": H5P_PACKAGE_URL}],
+                "package": [package_file],
             }
         ],
     )
@@ -114,6 +115,37 @@ def run_h5p_handler(monkeypatch, response):
     )
 
     return section_node
+
+
+def range_package_response(package, requested_ranges, bytes_served):
+    def respond(url, kwargs):
+        del url
+        headers = kwargs.get("headers", {})
+        assert headers.get("Accept-Encoding") == "identity"
+        range_header = headers.get("Range")
+        requested_ranges.append(range_header)
+        if range_header is None:
+            return FakeResponse(
+                content=package,
+                headers={"Content-Length": str(len(package))},
+            )
+        unit, bounds = range_header.split("=", 1)
+        start_text, end_text = bounds.split("-", 1)
+        assert unit == "bytes"
+        start, end = int(start_text), int(end_text)
+        body = package[start : end + 1]
+        bytes_served.append(len(body))
+        return FakeResponse(
+            content=body,
+            status_code=206,
+            headers={
+                "Accept-Ranges": "bytes",
+                "Content-Length": str(len(body)),
+                "Content-Range": f"bytes {start}-{end}/{len(package)}",
+            },
+        )
+
+    return respond
 
 
 def run_cached_h5p_handler(
@@ -224,14 +256,65 @@ def test_h5p_content_is_bounded_after_decompression(monkeypatch, caplog):
             "content/content.json",
             "https://www.youtube.com/watch?v=abcdefghijk",
         )
+    package_bytes = package.getvalue()
+    requested_ranges = []
+    bytes_served = []
 
     section_node = run_h5p_handler(
         monkeypatch,
-        FakeResponse(content=package.getvalue()),
+        range_package_response(package_bytes, requested_ranges, bytes_served),
+        {"filesize": len(package_bytes)},
     )
 
     assert section_node.children == []
+    assert requested_ranges and None not in requested_ranges
     assert "H5P content for module 317 is too large" in caplog.text
+
+
+def test_h5p_content_is_extracted_with_bounded_range_requests(monkeypatch):
+    video_url = "https://www.youtube.com/watch?v=abcdefghijk"
+    package = io.BytesIO()
+    with zipfile.ZipFile(package, "w", compression=zipfile.ZIP_STORED) as archive:
+        archive.writestr("content/video.mp4", b"x" * 1024**2)
+        archive.writestr("content/content.json", video_url)
+    package_bytes = package.getvalue()
+    requested_ranges = []
+    bytes_served = []
+
+    section_node = run_h5p_handler(
+        monkeypatch,
+        range_package_response(package_bytes, requested_ranges, bytes_served),
+        {"filesize": len(package_bytes)},
+    )
+
+    assert [child.url for child in section_node.children] == [video_url]
+    assert requested_ranges and None not in requested_ranges
+    assert sum(bytes_served) < len(package_bytes) // 10
+
+
+def test_h5p_range_requests_fall_back_when_the_server_ignores_them(monkeypatch):
+    video_url = "https://www.youtube.com/watch?v=abcdefghijk"
+    package = h5p_package(video_url)
+    requested_ranges = []
+
+    def ignore_range(url, kwargs):
+        del url
+        requested_ranges.append(kwargs.get("headers", {}).get("Range"))
+        return FakeResponse(
+            content=package,
+            headers={"Content-Length": str(len(package))},
+        )
+
+    section_node = run_h5p_handler(
+        monkeypatch,
+        ignore_range,
+        {"filesize": len(package)},
+    )
+
+    assert [child.url for child in section_node.children] == [video_url]
+    assert len(requested_ranges) == 2
+    assert requested_ranges[0] is not None
+    assert requested_ranges[1] is None
 
 
 def test_large_h5p_package_is_spooled_and_inspected(monkeypatch):

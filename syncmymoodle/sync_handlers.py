@@ -1,5 +1,7 @@
 import html
+import io
 import logging
+import re
 import tempfile
 import urllib.parse
 import zipfile
@@ -21,6 +23,7 @@ from syncmymoodle.http_utils import (
     content_type_without_parameters,
     copy_capped_body,
     parse_html,
+    read_capped_body,
     safe_request_error,
 )
 from syncmymoodle.node import Node
@@ -29,6 +32,9 @@ logger = logging.getLogger(__name__)
 H5P_PACKAGE_MAX_BYTES = 2 * 1024**3
 H5P_PACKAGE_MEMORY_BYTES = 16 * 1024**2
 H5P_CONTENT_MAX_BYTES = 10 * 1024 * 1024
+H5P_RANGE_CHUNK_BYTES = 64 * 1024
+H5P_RANGE_MAX_BYTES = 32 * 1024**2
+H5P_CONTENT_RANGE_RE = re.compile(r"bytes\s+(\d+)-(\d+)/(\d+)", re.IGNORECASE)
 QUIZ_IMMEDIATE_REVIEW_SECONDS = 2 * 60
 
 
@@ -183,50 +189,213 @@ def _opencast_series_episodes(
         offset += OPENCAST_SERIES_PAGE_SIZE
 
 
-def _read_h5p_content(
+class _H5PRangeUnavailable(Exception):
+    """The package cannot be exposed as a reliable HTTP range stream."""
+
+
+class _H5PRangeReader(io.BufferedIOBase):
+    """Seekable, bounded view of an HTTP resource backed by range requests."""
+
+    def __init__(self, session: Any, url: str, size: int) -> None:
+        super().__init__()
+        self._session = session
+        self._url = url
+        self._size = size
+        self._position = 0
+        self._cache_start = 0
+        self._cache = b""
+        self._transferred = 0
+
+    def readable(self) -> bool:
+        return True
+
+    def seekable(self) -> bool:
+        return True
+
+    def tell(self) -> int:
+        return self._position
+
+    def seek(self, offset: int, whence: int = io.SEEK_SET) -> int:
+        if self.closed:
+            raise ValueError("I/O operation on closed H5P package")
+        if whence == io.SEEK_SET:
+            position = offset
+        elif whence == io.SEEK_CUR:
+            position = self._position + offset
+        elif whence == io.SEEK_END:
+            position = self._size + offset
+        else:
+            raise ValueError(f"unsupported seek mode: {whence}")
+        if position < 0:
+            raise OSError("negative seek position")
+        self._position = position
+        return position
+
+    def _request_range(self, start: int, end: int) -> bytes:
+        expected_size = end - start + 1
+        try:
+            with closing(
+                self._session.get(
+                    self._url,
+                    headers={
+                        "Accept-Encoding": "identity",
+                        "Range": f"bytes={start}-{end}",
+                    },
+                    stream=True,
+                    timeout=HTTP_TIMEOUT_SECONDS,
+                )
+            ) as response:
+                if response.status_code != 206:
+                    raise _H5PRangeUnavailable
+                match = H5P_CONTENT_RANGE_RE.fullmatch(
+                    response.headers.get("Content-Range", "").strip()
+                )
+                if match is None or tuple(map(int, match.groups())) != (
+                    start,
+                    end,
+                    self._size,
+                ):
+                    raise _H5PRangeUnavailable
+                declared_size = content_length(response)
+                if declared_size is not None and declared_size != expected_size:
+                    raise _H5PRangeUnavailable
+                body = read_capped_body(response, expected_size)
+        except requests.RequestException as error:
+            raise _H5PRangeUnavailable from error
+        if body is None or len(body) != expected_size:
+            raise _H5PRangeUnavailable
+        self._transferred += len(body)
+        return body
+
+    def _load_range(self, start: int, minimum_size: int) -> None:
+        budget = H5P_RANGE_MAX_BYTES - self._transferred
+        if minimum_size > budget:
+            raise _H5PRangeUnavailable
+        request_size = min(
+            self._size - start,
+            max(minimum_size, min(H5P_RANGE_CHUNK_BYTES, budget)),
+        )
+        self._cache_start = start
+        self._cache = self._request_range(start, start + request_size - 1)
+
+    def read(self, size: int | None = -1) -> bytes:
+        if self.closed:
+            raise ValueError("I/O operation on closed H5P package")
+        if size == 0 or self._position >= self._size:
+            return b""
+        remaining = (
+            self._size - self._position
+            if size is None or size < 0
+            else min(size, self._size - self._position)
+        )
+        parts: list[bytes] = []
+        while remaining:
+            cache_offset = self._position - self._cache_start
+            if not 0 <= cache_offset < len(self._cache):
+                self._load_range(self._position, remaining)
+                cache_offset = 0
+            available = min(remaining, len(self._cache) - cache_offset)
+            parts.append(self._cache[cache_offset : cache_offset + available])
+            self._position += available
+            remaining -= available
+        return b"".join(parts)
+
+
+def _read_h5p_archive_content(
+    archive: zipfile.ZipFile,
+    module_id: Any,
+    log: logging.Logger,
+) -> str | None:
+    info = archive.getinfo("content/content.json")
+    if info.file_size > H5P_CONTENT_MAX_BYTES:
+        log.warning("H5P content for module %s is too large", module_id)
+        return None
+    with archive.open(info) as content_file:
+        content = content_file.read(H5P_CONTENT_MAX_BYTES + 1)
+    if len(content) > H5P_CONTENT_MAX_BYTES:
+        log.warning("H5P content for module %s is too large", module_id)
+        return None
+    return content.decode("utf-8")
+
+
+def _read_h5p_content_by_range(
+    session: Any,
+    package_url: str,
+    package_size: int,
+    module_id: Any,
+    log: logging.Logger,
+) -> str | None:
+    with _H5PRangeReader(session, package_url, package_size) as package_file:
+        with zipfile.ZipFile(package_file) as archive:
+            return _read_h5p_archive_content(archive, module_id, log)
+
+
+def _read_full_h5p_content(
     session: Any,
     package_url: str,
     module_id: Any,
     log: logging.Logger,
 ) -> str | None:
-    try:
-        with closing(
-            session.get(
-                package_url,
-                stream=True,
-                timeout=HTTP_TIMEOUT_SECONDS,
+    with closing(
+        session.get(
+            package_url,
+            stream=True,
+            timeout=HTTP_TIMEOUT_SECONDS,
+        )
+    ) as response:
+        if not 200 <= response.status_code < 300:
+            log.warning(
+                "H5P package for module %s returned status %s",
+                module_id,
+                response.status_code,
             )
-        ) as response:
-            if not 200 <= response.status_code < 300:
-                log.warning(
-                    "H5P package for module %s returned status %s",
-                    module_id,
-                    response.status_code,
-                )
-                return None
-            declared_size = content_length(response)
-            if declared_size is not None and declared_size > H5P_PACKAGE_MAX_BYTES:
+            return None
+        declared_size = content_length(response)
+        if declared_size is not None and declared_size > H5P_PACKAGE_MAX_BYTES:
+            log.warning("H5P package for module %s is too large", module_id)
+            return None
+        with tempfile.SpooledTemporaryFile(
+            max_size=H5P_PACKAGE_MEMORY_BYTES,
+            mode="w+b",
+        ) as package_file:
+            if not copy_capped_body(response, package_file, H5P_PACKAGE_MAX_BYTES):
                 log.warning("H5P package for module %s is too large", module_id)
                 return None
-            with tempfile.SpooledTemporaryFile(
-                max_size=H5P_PACKAGE_MEMORY_BYTES,
-                mode="w+b",
-            ) as package_file:
-                if not copy_capped_body(response, package_file, H5P_PACKAGE_MAX_BYTES):
-                    log.warning("H5P package for module %s is too large", module_id)
-                    return None
-                package_file.seek(0)
-                with zipfile.ZipFile(package_file) as archive:
-                    info = archive.getinfo("content/content.json")
-                    if info.file_size > H5P_CONTENT_MAX_BYTES:
-                        log.warning("H5P content for module %s is too large", module_id)
-                        return None
-                    with archive.open(info) as content_file:
-                        content = content_file.read(H5P_CONTENT_MAX_BYTES + 1)
-        if len(content) > H5P_CONTENT_MAX_BYTES:
-            log.warning("H5P content for module %s is too large", module_id)
+            package_file.seek(0)
+            with zipfile.ZipFile(package_file) as archive:
+                return _read_h5p_archive_content(archive, module_id, log)
+
+
+def _read_h5p_content(
+    session: Any,
+    package_url: str,
+    module_id: Any,
+    log: logging.Logger,
+    package_size: Any = None,
+) -> str | None:
+    try:
+        known_size = (
+            package_size
+            if isinstance(package_size, int)
+            and not isinstance(package_size, bool)
+            and package_size > 0
+            else None
+        )
+        if known_size is not None and known_size > H5P_PACKAGE_MAX_BYTES:
+            log.warning("H5P package for module %s is too large", module_id)
             return None
-        return content.decode("utf-8")
+        if known_size is not None:
+            try:
+                return _read_h5p_content_by_range(
+                    session,
+                    package_url,
+                    known_size,
+                    module_id,
+                    log,
+                )
+            except _H5PRangeUnavailable:
+                pass
+        return _read_full_h5p_content(session, package_url, module_id, log)
     except (
         KeyError,
         NotImplementedError,
@@ -660,7 +829,11 @@ def handle_embedded_link_module(  # noqa: C901 - legacy handler awaiting decompo
             if content is None:
                 module_context.status("downloading H5P package")
                 content = _read_h5p_content(
-                    ctx.require_session(), package_url, module_id, log
+                    ctx.require_session(),
+                    package_url,
+                    module_id,
+                    log,
+                    package_file.get("filesize"),
                 )
                 if (
                     content is not None
