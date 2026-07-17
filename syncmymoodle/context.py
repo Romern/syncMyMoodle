@@ -10,8 +10,8 @@ import requests
 from syncmymoodle.config import Config
 from syncmymoodle.http_utils import ServiceOutageTracker
 from syncmymoodle.moodle_tokens import MoodleTokens
-from syncmymoodle.node import Node
-from syncmymoodle.outcomes import RunStatistics
+from syncmymoodle.node import Node, RemoteMarkerKind
+from syncmymoodle.outcomes import RemovedContent, RunStatistics
 from syncmymoodle.output import TerminalOutput, get_output
 from syncmymoodle.pathing import InternalPathRoot
 
@@ -29,6 +29,7 @@ if TYPE_CHECKING:
 # validation boundary cannot fall between incremental update queries.
 MOODLE_UPDATE_OVERLAP_SECONDS = 5
 ModuleInstanceCache = dict[int, dict[int, dict[str, Any]] | None]
+TransferReuseKey = tuple[str, str, RemoteMarkerKind, str]
 
 
 class BrowserSessionUnavailable(RuntimeError):
@@ -102,6 +103,15 @@ class LinkedResourceCacheEntry:
     remote_size: int | None = None
 
 
+@dataclass(frozen=True)
+class VerifiedDownloadArtifact:
+    """One remote artifact verified and installed during this sync run."""
+
+    path: Path
+    content_hash: str
+    size: int
+
+
 @dataclass
 class SyncContext:
     config: Config
@@ -132,6 +142,8 @@ class SyncContext:
     browser_bootstrap_error_logged: bool = False
     # None negatively caches a share that already failed during this run.
     sciebo_link_cache: dict[str, Node | None] = field(default_factory=dict)
+    # None means unprobed; False means the HTML/request-token bootstrap is required.
+    sciebo_direct_webdav_supported: bool | None = None
     service_outages: ServiceOutageTracker = field(default_factory=ServiceOutageTracker)
     opencast_course_auth_cache: set[tuple[str, str]] = field(default_factory=set)
     opencast_episode_cache: dict[tuple[str | None, str], OpencastEpisode] = field(
@@ -148,7 +160,12 @@ class SyncContext:
     emedia_revision_cache: dict[str, str | None] = field(default_factory=dict)
     emedia_output_suffix: str | None = None
     downloaded_paths: set[Path] = field(default_factory=set)
+    verified_download_artifacts: dict[TransferReuseKey, VerifiedDownloadArtifact] = (
+        field(default_factory=dict, repr=False)
+    )
     filtered_items: set[FilteredItem] = field(default_factory=set)
+    inventory_filtered_course_ids: set[int] = field(default_factory=set)
+    removed_content: set[RemovedContent] = field(default_factory=set)
     quiz_review_cache: dict[str, str] = field(default_factory=dict)
     lti_instance_cache: ModuleInstanceCache = field(default_factory=dict)
     h5p_activity_cache: ModuleInstanceCache = field(default_factory=dict)
@@ -200,6 +217,15 @@ class SyncContext:
             and course_id > 0
         ):
             self.incomplete_course_ids.add(course_id)
+
+    def mark_course_inventory_filtered(self, course_id: Any) -> None:
+        """Suppress removals for a policy- or availability-truncated tree."""
+        if (
+            isinstance(course_id, int)
+            and not isinstance(course_id, bool)
+            and course_id > 0
+        ):
+            self.inventory_filtered_course_ids.add(course_id)
 
     def record_course_failure(self, course_id: Any) -> None:
         """Record a failed course source and retain its last complete cache."""

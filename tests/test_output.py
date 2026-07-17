@@ -7,7 +7,7 @@ import time
 import pytest
 from rich.progress import Progress
 
-from syncmymoodle.outcomes import RunStatistics
+from syncmymoodle.outcomes import RemovedContent, RunStatistics
 from syncmymoodle.output import TerminalOutput, safe_terminal_text
 
 
@@ -344,3 +344,26 @@ def test_run_summary_reports_outcomes_and_transferred_size(monkeypatch):
     stats.planned = 7
     TerminalOutput().summary(stats, filtered=5, dry_run=True)
     assert "7 would download, 4 unchanged, 5 filtered, 1 failed" in stdout.getvalue()
+
+
+def test_removed_content_report_states_that_local_files_are_kept(
+    monkeypatch,
+):
+    stdout = io.StringIO()
+    monkeypatch.setattr(sys, "stdout", stdout)
+
+    TerminalOutput().removed_content(
+        [
+            RemovedContent(
+                "Operating Systems (123)",
+                "Week 1/notes.pdf",
+                "https://moodle.example/file.php?id=456",
+            )
+        ]
+    )
+
+    assert stdout.getvalue() == (
+        "No longer present in Moodle (1 item; local files kept):\n"
+        "  Operating Systems (123): Week 1/notes.pdf "
+        "[remote: https://moodle.example/file.php?id=456]\n"
+    )

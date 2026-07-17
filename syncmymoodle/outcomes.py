@@ -7,6 +7,15 @@ from dataclasses import dataclass, field
 from enum import Enum
 
 
+@dataclass(frozen=True, order=True)
+class RemovedContent:
+    """One remotely absent item whose local copy is intentionally retained."""
+
+    course: str
+    old_path: str
+    remote_identity: str
+
+
 class DownloadState(Enum):
     """Whether a download node may be persisted as handled."""
 

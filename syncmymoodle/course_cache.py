@@ -16,6 +16,7 @@ from syncmymoodle.node import (
     DownloadStatus,
     Node,
     NodeKind,
+    match_equivalent_child,
 )
 from syncmymoodle.pathing import (
     InternalPathRoot,
@@ -32,6 +33,7 @@ MODULE_CACHE_KEY = "module_data"
 CACHED_TEXT_CACHE_KEY = "cached_text"
 OPENCAST_EPISODES_CACHE_KEY = "opencast_episodes"
 LINKED_RESOURCES_CACHE_KEY = "linked_resources"
+INVENTORY_SCOPE_CACHE_KEY = "inventory_scope"
 H5P_CONTENT_KIND = "h5p"
 PAGE_CONTENT_KIND = "page"
 CACHED_TEXT_KINDS = (H5P_CONTENT_KIND, PAGE_CONTENT_KIND)
@@ -82,6 +84,8 @@ class QuizCacheEntry:
 @dataclass
 class CourseCacheState:
     course_root: Node | None = None
+    cached_inventory_scope: str | None = None
+    current_inventory_scope: str | None = None
     cached_text: dict[str, dict[int, CachedTextEntry]] = field(
         default_factory=lambda: {kind: {} for kind in CACHED_TEXT_KINDS}
     )
@@ -341,6 +345,16 @@ def _cache_since(value: Any) -> int | None:
     )
 
 
+def _inventory_scope(value: Any) -> str | None:
+    return (
+        value
+        if isinstance(value, str)
+        and len(value) == 64
+        and all(character in "0123456789abcdef" for character in value)
+        else None
+    )
+
+
 def _dict_list(value: Any) -> list[dict[str, Any]] | None:
     if not isinstance(value, list) or not all(isinstance(item, dict) for item in value):
         return None
@@ -484,6 +498,9 @@ def _course_cache_state(
     course_id = _module_id(course_node.id)
     state = CourseCacheState(
         course_root=course_root,
+        cached_inventory_scope=_inventory_scope(
+            payload.get(INVENTORY_SCOPE_CACHE_KEY) if payload else None
+        ),
         cached_text={
             kind: _cached_text_entries(raw_cached_text.get(kind), kind)
             for kind in CACHED_TEXT_KINDS
@@ -728,22 +745,7 @@ def match_old_cache_child(old_node: Node | None, child: Node) -> Node | None:
         for candidate in old_node.children:
             if links.youtube_video_id_from_node(candidate) == child_youtube_id:
                 return candidate
-
-    candidates = [
-        c for c in old_node.children if c.name == child.name and c.type == child.type
-    ]
-    if not candidates:
-        return None
-
-    for attr in ("url", "name_clash_id", "id"):
-        child_value = getattr(child, attr, None)
-        if child_value is None or child_value is NAME_CLASH_ID_UNSET:
-            continue
-        for candidate in candidates:
-            if getattr(candidate, attr, None) == child_value:
-                return candidate
-
-    return candidates[0]
+    return match_equivalent_child(old_node, child)
 
 
 def node_to_cache_data(
@@ -865,6 +867,20 @@ def get_course_cache_root(
     return _course_cache_state(ctx, course_node, log).course_root
 
 
+def comparable_course_cache_root(
+    ctx: SyncContext,
+    course_node: Node,
+    inventory_scope: str,
+    log: logging.Logger = logger,
+) -> Node | None:
+    """Return the prior tree only when its discovery policy matches this run."""
+    state = _course_cache_state(ctx, course_node, log)
+    state.current_inventory_scope = inventory_scope
+    return (
+        state.course_root if state.cached_inventory_scope == inventory_scope else None
+    )
+
+
 def get_old_node_for(
     ctx: SyncContext,
     node: Node,
@@ -924,8 +940,11 @@ def cache_root_node(
                 "identity": _cache_identity(ctx, course_node),
                 "course": node_to_cache_data(ctx, course_node, state.course_root),
             }
+            if state.current_inventory_scope is not None:
+                payload[INVENTORY_SCOPE_CACHE_KEY] = state.current_inventory_scope
             module_cache = _course_module_cache_data(ctx, state, course_node)
             if module_cache:
                 payload[MODULE_CACHE_KEY] = module_cache
             write_private_gzip_json(cache_path, payload)
             state.course_root = node_from_cache_data(payload["course"])
+            state.cached_inventory_scope = state.current_inventory_scope

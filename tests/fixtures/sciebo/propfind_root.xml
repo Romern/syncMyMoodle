@@ -6,6 +6,7 @@
       <d:prop>
         <d:getetag>"folder-root"</d:getetag>
       </d:prop>
+      <d:status>HTTP/1.1 200 OK</d:status>
     </d:propstat>
   </d:response>
   <d:response>
@@ -18,6 +19,7 @@
           <oc:checksum>SHA1:1111111111111111111111111111111111111111</oc:checksum>
         </oc:checksums>
       </d:prop>
+      <d:status>HTTP/1.1 200 OK</d:status>
     </d:propstat>
   </d:response>
   <d:response>
@@ -26,6 +28,7 @@
       <d:prop>
         <d:getetag>"folder-slides"</d:getetag>
       </d:prop>
+      <d:status>HTTP/1.1 200 OK</d:status>
     </d:propstat>
   </d:response>
 </d:multistatus>

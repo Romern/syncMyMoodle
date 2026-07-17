@@ -176,7 +176,21 @@ def h5p_package(content: str) -> bytes:
     return package.getvalue()
 
 
-def sciebo_share_context(page_fixture: str):
+def _legacy_webdav_after_probe(response):
+    probe_pending = True
+
+    def dispatch(url, kwargs):
+        nonlocal probe_pending
+        if probe_pending:
+            probe_pending = False
+            return FakeResponse(status_code=404)
+        probe_pending = True
+        return response(url, kwargs) if callable(response) else response
+
+    return dispatch
+
+
+def sciebo_share_context(page_fixture: str, *, direct: bool = True):
     syncer = make_context(
         {
             "modules.assignment": False,
@@ -188,23 +202,102 @@ def sciebo_share_context(page_fixture: str):
         }
     )
     session = FakeSession()
-    session.add(
-        "GET",
-        SCIEBO_SHARE_LINK,
-        FakeResponse(text=load_fixture("sciebo", page_fixture)),
-    )
-    session.add(
-        "PROPFIND",
-        SCIEBO_PUBLIC_ROOT,
-        FakeResponse(text=load_fixture("sciebo", "propfind_root.xml")),
-    )
-    session.add(
-        "PROPFIND",
-        SCIEBO_PUBLIC_SLIDES,
-        FakeResponse(text=load_fixture("sciebo", "propfind_slides.xml")),
-    )
+    if direct:
+
+        def direct_listing(name):
+            def respond(url, kwargs):
+                del url
+                assert kwargs["headers"]["X-Requested-With"] == "XMLHttpRequest"
+                assert kwargs["headers"]["Authorization"].startswith("Basic ")
+                assert "requesttoken" not in kwargs["headers"]
+                return FakeResponse(text=load_fixture("sciebo", name))
+
+            return respond
+
+        session.add("PROPFIND", SCIEBO_PUBLIC_ROOT, direct_listing("propfind_root.xml"))
+        session.add(
+            "PROPFIND",
+            SCIEBO_PUBLIC_SLIDES,
+            direct_listing("propfind_slides.xml"),
+        )
+    else:
+        session.add(
+            "GET",
+            SCIEBO_SHARE_LINK,
+            FakeResponse(text=load_fixture("sciebo", page_fixture)),
+        )
+        session.add(
+            "PROPFIND",
+            SCIEBO_PUBLIC_ROOT,
+            _legacy_webdav_after_probe(
+                FakeResponse(text=load_fixture("sciebo", "propfind_root.xml"))
+            ),
+        )
+        session.add(
+            "PROPFIND",
+            SCIEBO_PUBLIC_SLIDES,
+            FakeResponse(text=load_fixture("sciebo", "propfind_slides.xml")),
+        )
     syncer.session = session
     return syncer, session
+
+
+def cached_sciebo_context(sync_directory):
+    context = make_context(
+        {
+            "paths.sync_directory": str(sync_directory),
+            "links.sciebo": True,
+        }
+    )
+    context.root_node, courses, sections = two_course_tree()
+    return context, courses[0], sections[0]
+
+
+def sciebo_listing_session(root_listing: str, *, include_slides: bool) -> FakeSession:
+    session = FakeSession()
+    session.add("PROPFIND", SCIEBO_PUBLIC_ROOT, FakeResponse(text=root_listing))
+    if include_slides:
+        session.add(
+            "PROPFIND",
+            SCIEBO_PUBLIC_SLIDES,
+            FakeResponse(text=load_fixture("sciebo", "propfind_slides.xml")),
+        )
+    return session
+
+
+def dav_listing(entries) -> str:
+    responses = "".join(
+        f"""
+        <d:response>
+          <d:href>{href}</d:href>
+          <d:propstat>
+            <d:prop>
+              <d:getetag>{etag}</d:getetag>
+              <d:getcontentlength>123</d:getcontentlength>
+            </d:prop>
+            <d:status>{status}</d:status>
+          </d:propstat>
+        </d:response>"""
+        for href, etag, status in entries
+    )
+    return (
+        '<?xml version="1.0" encoding="UTF-8"?>'
+        '<d:multistatus xmlns:d="DAV:">'
+        f"{responses}</d:multistatus>"
+    )
+
+
+def seed_sciebo_course_cache(sync_directory) -> None:
+    context, _, section = cached_sciebo_context(sync_directory)
+    context.session = sciebo_listing_session(
+        load_fixture("sciebo", "propfind_root.xml"),
+        include_slides=True,
+    )
+    sciebo.scan_public_shares(context, SCIEBO_SHARE_LINK, section, course_id=101)
+    deck = section.children[0].children[1].children[0]
+    deck.content_hash = "a" * 64
+    deck.mark_handled()
+    course_cache.cache_root_node(context)
 
 
 def run_h5p_handler(monkeypatch, response, package_metadata=None, config=None):
@@ -1023,6 +1116,7 @@ def test_nested_moodle_folder_paths_are_preserved(monkeypatch, update_snapshots)
         monkeypatch,
         courses,
         {101: load_json_fixture("moodle", "nested_folder_course.json")},
+        folders={101: [{"coursemodule": 301}]},
     )
     syncer.session = FakeSession()
 
@@ -1156,11 +1250,20 @@ def test_sciebo_public_share_is_cached_per_sync_run(caplog):
     links.scan_for_links(syncer, SCIEBO_SHARE_LINK, first_parent, 101)
     links.scan_for_links(syncer, SCIEBO_SHARE_LINK, second_parent, 101)
 
-    assert session.count("GET", SCIEBO_SHARE_LINK) == 1
+    assert session.count("GET", SCIEBO_SHARE_LINK) == 0
     assert session.count("PROPFIND", SCIEBO_PUBLIC_ROOT) == 1
     assert session.count("PROPFIND", SCIEBO_PUBLIC_SLIDES) == 1
+    assert syncer.sciebo_direct_webdav_supported is True
     sciebo_root = first_parent.children[0]
     assert sciebo_root.children[0].remote_size == 123
+    assert sciebo_root.children[0].download_headers is not None
+    assert sciebo_root.children[0].download_headers["X-Requested-With"] == (
+        "XMLHttpRequest"
+    )
+    assert (
+        sciebo_root.children[0].download_headers["Authorization"].startswith("Basic ")
+    )
+    assert "requesttoken" not in sciebo_root.children[0].download_headers
     assert sciebo_root.children[1].children[0].remote_size == 456
     assert [
         row.replace("First occurrence/", "") for row in node_rows(first_parent)
@@ -1180,8 +1283,236 @@ def test_sciebo_public_share_is_cached_per_sync_run(caplog):
     assert "Sciebo sharingToken:" not in caplog.text
 
 
+def test_sciebo_unchanged_folder_restores_pending_cache_without_propfind(tmp_path):
+    seed_sciebo_course_cache(tmp_path)
+    context, course, section = cached_sciebo_context(tmp_path)
+    assert course_cache.get_course_cache_root(context, course) is not None
+    context.session = sciebo_listing_session(
+        load_fixture("sciebo", "propfind_root.xml"),
+        include_slides=False,
+    )
+
+    sciebo.scan_public_shares(context, SCIEBO_SHARE_LINK, section, course_id=101)
+
+    assert context.session.calls == [("PROPFIND", SCIEBO_PUBLIC_ROOT)]
+    deck = section.children[0].children[1].children[0]
+    assert not deck.is_handled
+    assert deck.content_hash is None
+    assert deck.remote_size == 456
+    assert deck.download_headers is not None
+    assert deck.download_headers["X-Requested-With"] == "XMLHttpRequest"
+    assert deck.download_headers["Authorization"].startswith("Basic ")
+
+
+def test_sciebo_changed_folder_etag_is_scanned_again(tmp_path):
+    seed_sciebo_course_cache(tmp_path)
+    context, course, section = cached_sciebo_context(tmp_path)
+    assert course_cache.get_course_cache_root(context, course) is not None
+    changed_root = load_fixture("sciebo", "propfind_root.xml").replace(
+        '"folder-slides"',
+        '"folder-slides-v2"',
+    )
+    context.session = sciebo_listing_session(changed_root, include_slides=True)
+
+    sciebo.scan_public_shares(context, SCIEBO_SHARE_LINK, section, course_id=101)
+
+    assert context.session.calls == [
+        ("PROPFIND", SCIEBO_PUBLIC_ROOT),
+        ("PROPFIND", SCIEBO_PUBLIC_SLIDES),
+    ]
+
+
+@pytest.mark.parametrize("malformation", ["cross-origin", "duplicate"])
+def test_sciebo_malformed_cached_subtree_is_scanned_again(tmp_path, malformation):
+    seed_sciebo_course_cache(tmp_path)
+    context, course, section = cached_sciebo_context(tmp_path)
+    cached_course = course_cache.get_course_cache_root(context, course)
+    assert cached_course is not None
+    cached_slides = node_at_path(
+        cached_course,
+        ["General", "sciebo-share-token-123", "slides"],
+    )
+    cached_deck = cached_slides.children[0]
+    if malformation == "cross-origin":
+        cached_deck.url = "https://evil.test/deck.pdf"
+    else:
+        cached_slides.children.append(cached_deck.clone(cached_slides))
+    context.session = sciebo_listing_session(
+        load_fixture("sciebo", "propfind_root.xml"),
+        include_slides=True,
+    )
+
+    sciebo.scan_public_shares(context, SCIEBO_SHARE_LINK, section, course_id=101)
+
+    assert context.session.calls == [
+        ("PROPFIND", SCIEBO_PUBLIC_ROOT),
+        ("PROPFIND", SCIEBO_PUBLIC_SLIDES),
+    ]
+    deck = section.children[0].children[1].children[0]
+    assert deck.url == f"{SCIEBO_PUBLIC_SLIDES}deck.pdf"
+
+
+def test_sciebo_encoded_names_remain_safe_and_restore_from_folder_cache(tmp_path):
+    folder_name = "Földér #1%?"
+    file_names = [
+        "space name.pdf",
+        "ünicode.pdf",
+        "hash#.pdf",
+        "query?.pdf",
+        "percent%.pdf",
+    ]
+    folder_href = (
+        SCIEBO_PUBLIC_ROOT.removeprefix(sciebo.SCIEBO_URL)
+        + urllib.parse.quote(
+            folder_name,
+            safe="",
+        )
+        + "/"
+    )
+    root_href = SCIEBO_PUBLIC_ROOT.removeprefix(sciebo.SCIEBO_URL)
+    root_listing = dav_listing(
+        [
+            (root_href, '"folder-root"', "HTTP/1.1 200 OK"),
+            (folder_href, '"folder-special"', "HTTP/1.1 200 OK"),
+        ]
+    )
+    folder_listing = dav_listing(
+        [
+            (folder_href, '"folder-special"', "HTTP/1.1 200 OK"),
+            *[
+                (
+                    folder_href + urllib.parse.quote(name, safe=""),
+                    f'"file-{index}"',
+                    "HTTP/1.1 200 OK",
+                )
+                for index, name in enumerate(file_names)
+            ],
+        ]
+    )
+
+    seeded, _, seeded_section = cached_sciebo_context(tmp_path)
+    seeded.session = FakeSession()
+    seeded.session.add("PROPFIND", SCIEBO_PUBLIC_ROOT, FakeResponse(text=root_listing))
+    seeded.session.add(
+        "PROPFIND",
+        sciebo.SCIEBO_URL + folder_href,
+        FakeResponse(text=folder_listing),
+    )
+    sciebo.scan_public_shares(
+        seeded,
+        SCIEBO_SHARE_LINK,
+        seeded_section,
+        course_id=101,
+    )
+    course_cache.cache_root_node(seeded)
+
+    context, course, section = cached_sciebo_context(tmp_path)
+    assert course_cache.get_course_cache_root(context, course) is not None
+    context.session = FakeSession()
+    context.session.add("PROPFIND", SCIEBO_PUBLIC_ROOT, FakeResponse(text=root_listing))
+    sciebo.scan_public_shares(context, SCIEBO_SHARE_LINK, section, course_id=101)
+
+    assert context.session.calls == [("PROPFIND", SCIEBO_PUBLIC_ROOT)]
+    folder = section.children[0].children[0]
+    assert folder.name == folder_name
+    assert [child.name for child in folder.children] == file_names
+    assert [child.url for child in folder.children] == [
+        sciebo.SCIEBO_URL + folder_href + urllib.parse.quote(name, safe="")
+        for name in file_names
+    ]
+
+
+def test_sciebo_keeps_a_child_named_webdav():
+    root_href = SCIEBO_PUBLIC_ROOT.removeprefix(sciebo.SCIEBO_URL)
+    listing = dav_listing(
+        [
+            (root_href, '"folder-root"', "HTTP/1.1 200 OK"),
+            (root_href + "webdav", '"file-webdav"', "HTTP/1.1 200 OK"),
+        ]
+    )
+    syncer = make_context({"links.sciebo": True})
+    syncer.session = FakeSession()
+    syncer.session.add("PROPFIND", SCIEBO_PUBLIC_ROOT, FakeResponse(text=listing))
+    parent = Node("Section", 1, "Section", None)
+
+    sciebo.scan_public_shares(syncer, SCIEBO_SHARE_LINK, parent)
+
+    file_node = parent.children[0].children[0]
+    assert file_node.name == "webdav"
+    assert file_node.url == SCIEBO_PUBLIC_ROOT + "webdav"
+    assert file_node.etag == '"file-webdav"'
+    assert file_node.remote_size == 123
+
+
+def test_sciebo_truncated_nested_listing_is_rejected(caplog):
+    syncer = make_context({"links.sciebo": True})
+    session = FakeSession()
+    session.add(
+        "PROPFIND",
+        SCIEBO_PUBLIC_ROOT,
+        FakeResponse(text=load_fixture("sciebo", "propfind_root.xml")),
+    )
+    truncated = load_fixture("sciebo", "propfind_slides.xml").rsplit(
+        "</d:multistatus>",
+        1,
+    )[0]
+    session.add("PROPFIND", SCIEBO_PUBLIC_SLIDES, FakeResponse(text=truncated))
+    syncer.session = session
+    parent = Node("Section", 1, "Section", None)
+    caplog.set_level(logging.WARNING, logger="syncmymoodle.sciebo")
+
+    sciebo.scan_public_shares(syncer, SCIEBO_SHARE_LINK, parent)
+
+    assert parent.children == []
+    assert syncer.sciebo_link_cache[SCIEBO_SHARE_LINK] is None
+    assert syncer.sciebo_direct_webdav_supported is None
+    assert "unexpected response instead of a DAV listing" in caplog.text
+
+
+def test_sciebo_ignores_properties_from_failed_propstat():
+    root_href = SCIEBO_PUBLIC_ROOT.removeprefix(sciebo.SCIEBO_URL)
+    listing = dav_listing(
+        [
+            (root_href, '"folder-root"', "HTTP/1.1 200 OK"),
+            (
+                root_href + "unavailable.pdf",
+                '"must-not-be-trusted"',
+                "HTTP/1.1 404 Not Found",
+            ),
+        ]
+    )
+    syncer = make_context({"links.sciebo": True})
+    syncer.session = FakeSession()
+    syncer.session.add("PROPFIND", SCIEBO_PUBLIC_ROOT, FakeResponse(text=listing))
+    parent = Node("Section", 1, "Section", None)
+
+    sciebo.scan_public_shares(syncer, SCIEBO_SHARE_LINK, parent)
+
+    file_node = parent.children[0].children[0]
+    assert file_node.etag is None
+    assert file_node.etag_kind is None
+    assert file_node.remote_size is None
+
+
+def test_sciebo_direct_webdav_transient_failure_does_not_fall_back(caplog):
+    syncer = make_context({"links.sciebo": True})
+    session = FakeSession()
+    session.add("PROPFIND", SCIEBO_PUBLIC_ROOT, FakeResponse(status_code=503))
+    syncer.session = session
+    parent = Node("Section", 1, "Section", None)
+    caplog.set_level(logging.WARNING, logger="syncmymoodle.sciebo")
+
+    sciebo.scan_public_shares(syncer, SCIEBO_SHARE_LINK, parent)
+
+    assert session.calls == [("PROPFIND", SCIEBO_PUBLIC_ROOT)]
+    assert parent.children == []
+    assert syncer.stats.failed == 1
+    assert "Sciebo transient failure: WebDAV returned HTTP 503" in caplog.text
+
+
 def test_sciebo_webdav_refuses_cross_origin_redirect_with_credentials(caplog):
     syncer = make_context({"links.sciebo": True})
+    syncer.sciebo_direct_webdav_supported = False
     session = FakeSession()
     session.add(
         "GET",
@@ -1227,8 +1558,9 @@ def test_sciebo_webdav_rejects_partial_listing_before_adding_files(caplog):
     session.add(
         "PROPFIND",
         SCIEBO_PUBLIC_ROOT,
-        FakeResponse(
-            text="""<?xml version="1.0" encoding="UTF-8"?>
+        _legacy_webdav_after_probe(
+            FakeResponse(
+                text="""<?xml version="1.0" encoding="UTF-8"?>
             <d:multistatus xmlns:d="DAV:">
               <d:response><d:href>/public.php/webdav/</d:href></d:response>
               <d:response>
@@ -1236,6 +1568,7 @@ def test_sciebo_webdav_rejects_partial_listing_before_adding_files(caplog):
               </d:response>
               <d:response><d:propstat /></d:response>
             </d:multistatus>"""
+            )
         ),
     )
     syncer.session = session
@@ -1246,6 +1579,7 @@ def test_sciebo_webdav_rejects_partial_listing_before_adding_files(caplog):
 
     assert parent.children == []
     assert syncer.sciebo_link_cache[SCIEBO_SHARE_LINK] is None
+    assert syncer.sciebo_direct_webdav_supported is None
     assert "malformed href" in caplog.text
 
 
@@ -1660,13 +1994,18 @@ def test_sharing_token_from_link_extracts_url_segment():
 def test_sciebo_share_without_token_input_uses_url_token():
     # Newer share pages drop the <input name="sharingToken">; the token is then
     # derived from the /s/<token> URL segment so the share still resolves.
-    syncer, session = sciebo_share_context("public_share_no_token.html")
+    syncer, session = sciebo_share_context(
+        "public_share_no_token.html",
+        direct=False,
+    )
 
     root = Node("", -1, "Root", None)
     parent = root.add_child("Section", 1, "Section")
     links.scan_for_links(syncer, SCIEBO_SHARE_LINK, parent, 101)
 
-    assert session.count("PROPFIND", SCIEBO_PUBLIC_ROOT) == 1
+    assert session.count("GET", SCIEBO_SHARE_LINK) == 1
+    assert session.count("PROPFIND", SCIEBO_PUBLIC_ROOT) == 2
+    assert syncer.sciebo_direct_webdav_supported is False
     assert node_rows(parent) == [
         "Sciebo Folder | Section/sciebo-share-token-123 |  |  |",
         "Sciebo File | Section/sciebo-share-token-123/readme.pdf | "
@@ -1679,10 +2018,69 @@ def test_sciebo_share_without_token_input_uses_url_token():
     ]
 
 
+def test_sciebo_legacy_capability_is_reused_for_later_shares():
+    second_link = "https://rwth-aachen.sciebo.de/s/share-token-456"
+    syncer = make_context({"links.sciebo": True})
+    session = FakeSession()
+    root_requests = 0
+
+    def root_listing(url, kwargs):
+        nonlocal root_requests
+        del url
+        root_requests += 1
+        if root_requests == 1:
+            assert "requesttoken" not in kwargs["headers"]
+            return FakeResponse(status_code=404)
+        assert kwargs["headers"]["requesttoken"] == "fake-request-token"
+        return FakeResponse(text=load_fixture("sciebo", "propfind_root.xml"))
+
+    session.add("PROPFIND", SCIEBO_PUBLIC_ROOT, root_listing)
+    session.add(
+        "PROPFIND",
+        SCIEBO_PUBLIC_SLIDES,
+        FakeResponse(text=load_fixture("sciebo", "propfind_slides.xml")),
+    )
+    share_page = FakeResponse(text=load_fixture("sciebo", "public_share_no_token.html"))
+    session.add("GET", SCIEBO_SHARE_LINK, share_page)
+    session.add("GET", second_link, share_page)
+    syncer.session = session
+    first_parent = Node("First", 1, "Section", None)
+    second_parent = Node("Second", 2, "Section", None)
+
+    sciebo.scan_public_shares(syncer, SCIEBO_SHARE_LINK, first_parent)
+    sciebo.scan_public_shares(syncer, second_link, second_parent)
+
+    assert syncer.sciebo_direct_webdav_supported is False
+    assert session.count("GET") == 2
+    assert session.count("PROPFIND", SCIEBO_PUBLIC_ROOT) == 3
+    assert len(first_parent.children) == len(second_parent.children) == 1
+
+
+def test_sciebo_known_direct_mode_falls_back_for_exceptional_share_failure():
+    syncer, session = sciebo_share_context(
+        "public_share_no_token.html",
+        direct=False,
+    )
+    syncer.sciebo_direct_webdav_supported = True
+    parent = Node("Section", 1, "Section", None)
+
+    sciebo.scan_public_shares(syncer, SCIEBO_SHARE_LINK, parent)
+
+    assert session.calls == [
+        ("PROPFIND", SCIEBO_PUBLIC_ROOT),
+        ("GET", SCIEBO_SHARE_LINK),
+        ("PROPFIND", SCIEBO_PUBLIC_ROOT),
+        ("PROPFIND", SCIEBO_PUBLIC_SLIDES),
+    ]
+    assert syncer.sciebo_direct_webdav_supported is True
+    assert len(parent.children) == 1
+
+
 def _assert_sciebo_share_outage(
     caplog, response_factory, scan_share, logger_name, reason
 ):
     syncer = make_context({"links.sciebo": True})
+    syncer.sciebo_direct_webdav_supported = False
     session = FakeSession()
     for link in SCIEBO_OUTAGE_LINKS[:3]:
         session.add("GET", link, response_factory())
@@ -1708,6 +2106,7 @@ def _assert_sciebo_share_outage(
 
 def _assert_sciebo_webdav_outage(caplog, response, reason):
     syncer = make_context({"links.sciebo": True})
+    syncer.sciebo_direct_webdav_supported = False
     session = FakeSession()
     for link in SCIEBO_OUTAGE_LINKS[:3]:
         session.add(
@@ -1761,6 +2160,7 @@ def test_sciebo_failure_marks_each_course_and_preserves_both_caches(
     }
 
     syncer = make_context(config)
+    syncer.sciebo_direct_webdav_supported = False
     syncer.root_node, _, sections = two_course_tree()
     session = FakeSession()
     first_links = (
@@ -1921,8 +2321,8 @@ def test_direct_link_redirect_cannot_bypass_allowed_domains(caplog):
     }
 
 
-def test_generic_link_resource_errors_are_reported_and_not_scanned(caplog):
-    caplog.set_level(logging.WARNING, logger="syncmymoodle.links")
+def test_generic_link_resource_errors_are_informational_and_not_scanned(caplog):
+    caplog.set_level(logging.INFO, logger="syncmymoodle.links")
 
     for status_code in (403, 404):
         url = f"https://files.example.test/error-{status_code}"
@@ -1947,19 +2347,83 @@ def test_generic_link_resource_errors_are_reported_and_not_scanned(caplog):
         )
         syncer.session = session
         parent = Node("Section", 1, "Section", None)
+        second_parent = Node("Section", 2, "Section", None)
 
         links.scan_for_links(syncer, url, parent, 101, single=True)
+        links.scan_for_links(syncer, url, second_parent, 202, single=True)
 
         assert session.calls == [("HEAD", url), ("GET", url)]
         assert parent.children == []
-        assert syncer.stats.failed == 1
-        assert syncer.incomplete_course_ids == {101}
+        assert second_parent.children == []
+        assert syncer.stats.failed == 0
+        assert syncer.incomplete_course_ids == set()
+        assert syncer.inventory_filtered_course_ids == {101, 202}
 
+    assert [(record.levelno, record.message) for record in caplog.records] == [
+        (
+            logging.INFO,
+            "Skipping linked resource: GET https://files.example.test/error-403 "
+            "returned HTTP 403",
+        ),
+        (
+            logging.INFO,
+            "Skipping linked resource: GET https://files.example.test/error-404 "
+            "returned HTTP 404",
+        ),
+    ]
+
+
+def test_generic_link_head_resource_error_is_informational_when_following_is_off(
+    caplog,
+):
+    url = "https://files.example.test/forbidden"
+    syncer = make_context(
+        {
+            "links.follow_links": False,
+            "filters.allowed_domains": ["files.example.test"],
+        }
+    )
+    session = FakeSession()
+    session.add("HEAD", url, FakeResponse(status_code=403))
+    syncer.session = session
+    parent = Node("Section", 1, "Section", None)
+    caplog.set_level(logging.INFO, logger="syncmymoodle.links")
+
+    links.scan_for_links(syncer, url, parent, 101, single=True)
+
+    assert session.calls == [("HEAD", url)]
+    assert parent.children == []
+    assert syncer.stats.failed == 0
+    assert syncer.incomplete_course_ids == set()
+    assert syncer.inventory_filtered_course_ids == {101}
+    assert [(record.levelno, record.message) for record in caplog.records] == [
+        (
+            logging.INFO,
+            "Skipping linked resource: HEAD https://files.example.test/forbidden "
+            "returned HTTP 403",
+        )
+    ]
+
+
+def test_generic_link_non_4xx_terminal_response_remains_a_failure(caplog):
+    url = "https://files.example.test/multiple-choices"
+    syncer = make_context({"filters.allowed_domains": ["files.example.test"]})
+    session = FakeSession()
+    session.add("HEAD", url, FakeResponse(status_code=300))
+    session.add("GET", url, FakeResponse(status_code=300))
+    syncer.session = session
+    parent = Node("Section", 1, "Section", None)
+    caplog.set_level(logging.WARNING, logger="syncmymoodle.links")
+
+    links.scan_for_links(syncer, url, parent, 101, single=True)
+
+    assert session.calls == [("HEAD", url), ("GET", url)]
+    assert parent.children == []
+    assert syncer.stats.failed == 1
+    assert syncer.incomplete_course_ids == {101}
     assert caplog.messages == [
-        "Skipping linked resource: GET https://files.example.test/error-403 "
-        "returned HTTP 403",
-        "Skipping linked resource: GET https://files.example.test/error-404 "
-        "returned HTTP 404",
+        "Skipping linked resource: GET "
+        "https://files.example.test/multiple-choices returned HTTP 300"
     ]
 
 
@@ -1993,6 +2457,8 @@ def test_generic_link_error_pages_open_origin_circuit_without_being_scanned(capl
         call for url in urls[:3] for call in (("HEAD", url), ("GET", url))
     ]
     assert parent.children == []
+    assert syncer.stats.failed == 4
+    assert syncer.incomplete_course_ids == {101}
     assert caplog.messages == [
         "Link origin https://files.example.test transient failure: GET "
         "https://files.example.test/outage-0 returned HTTP 503",

@@ -3,6 +3,7 @@ import logging
 import math
 import os
 import re
+import shutil
 import urllib.parse
 from contextlib import closing
 from dataclasses import dataclass
@@ -20,10 +21,15 @@ from syncmymoodle.constants import (
     HASH_ALGOS_BY_LENGTH,
     HTTP_TIMEOUT_SECONDS,
 )
-from syncmymoodle.context import SyncContext
+from syncmymoodle.context import (
+    SyncContext,
+    TransferReuseKey,
+    VerifiedDownloadArtifact,
+)
 from syncmymoodle.http_utils import (
     HTML_CONTENT_TYPES,
     HttpFailureKind,
+    canonical_remote_url,
     classify_http_failure,
     classify_request_failure,
     content_length,
@@ -31,6 +37,7 @@ from syncmymoodle.http_utils import (
     normalized_http_origin,
     record_service_failure,
     redact_url_secrets,
+    remote_request_scope_fingerprint,
     request_following_safe_redirects,
     safe_request_error,
 )
@@ -95,6 +102,7 @@ class DownloadDecision(Enum):
     """Outcome of change detection before conflict policy is applied."""
 
     DOWNLOAD = "download"
+    ADOPT = "adopt"
     SKIP = "skip"
     POLICY_SKIP = "policy_skip"
     CONFLICT = "conflict"
@@ -111,8 +119,13 @@ class TransferPlan:
     def discard_partial(self) -> None:
         self.resume_size = 0
         self.partial_etag = None
-        self.tmp_path.unlink(missing_ok=True)
-        self.etag_sidecar.unlink(missing_ok=True)
+        for path in (self.tmp_path, self.etag_sidecar):
+            try:
+                path.unlink(missing_ok=True)
+            except OSError:
+                # Windows may temporarily lock a stale partial. The caller can
+                # still fail safely or use a different staging path.
+                pass
 
 
 @dataclass(frozen=True)
@@ -241,6 +254,7 @@ def request_node_url(
             url,
             f"redirected {node.type} file",
             course_id=course_id,
+            inventory=False,
         ),
         **kwargs,
     )
@@ -442,21 +456,47 @@ def local_verification_marker(old_node: Node | None) -> str | None:
     return None
 
 
+def uncached_timestamp_matches_local_copy(
+    node: Node,
+    downloadpath: Path,
+    baseline: storage.FileSnapshot,
+) -> bool:
+    """Recognize a file whose mtime was aligned by an earlier sync."""
+    remote_timemodified = node.timemodified
+    if (
+        node.has_remote_marker_conflict
+        or not isinstance(remote_timemodified, int)
+        or isinstance(remote_timemodified, bool)
+        or remote_timemodified < 0
+        or baseline.digest is None
+    ):
+        return False
+    try:
+        return int(downloadpath.stat().st_mtime) == remote_timemodified
+    except OSError:
+        return False
+
+
 def assess_local_copy(
     node: Node,
     downloadpath: Path,
     old_node: Node | None,
     cached_timemodified: Any,
     baseline: storage.FileSnapshot,
+    *,
+    allow_timestamp_adoption: bool,
 ) -> LocalCopyState:
     """Classify the on-disk file when the remote may have changed."""
     remote_etag = getattr(node, "etag", None)
     remote_etag_kind = node.etag_kind
-    if (
-        remote_etag_kind == RemoteMarkerKind.CONTENT_HASH
-        and classify_local_file(downloadpath, remote_etag, baseline) is FileMatch.MATCH
-    ):
-        return LocalCopyState.UP_TO_DATE
+    if remote_etag_kind is RemoteMarkerKind.CONTENT_HASH:
+        remote_match = classify_local_file(downloadpath, remote_etag, baseline)
+        if remote_match is FileMatch.MATCH:
+            return LocalCopyState.UP_TO_DATE
+        if old_node is None:
+            # A differing or malformed current checksum is stronger evidence
+            # than a coincidentally matching timestamp.
+            return LocalCopyState.MODIFIED
 
     verdict = classify_local_file(
         downloadpath,
@@ -475,6 +515,11 @@ def assess_local_copy(
             return LocalCopyState.CLEAN
         except (OSError, ValueError):
             return LocalCopyState.MODIFIED
+
+    if allow_timestamp_adoption and uncached_timestamp_matches_local_copy(
+        node, downloadpath, baseline
+    ):
+        return LocalCopyState.UP_TO_DATE
 
     return LocalCopyState.MODIFIED
 
@@ -496,7 +541,9 @@ def decide_download(
         return DownloadDecision.POLICY_SKIP
 
     old_node = course_cache.get_old_node_for(ctx, node, log)
+    allow_timestamp_adoption = old_node is None
     if old_node is not None and not old_node.is_verified:
+        allow_timestamp_adoption = False
         old_node = None
     cached_timemodified = (
         getattr(old_node, "timemodified", None) if old_node is not None else None
@@ -509,9 +556,10 @@ def decide_download(
         old_node,
         cached_timemodified,
         baseline,
+        allow_timestamp_adoption=allow_timestamp_adoption,
     )
     if verdict is LocalCopyState.UP_TO_DATE:
-        return DownloadDecision.SKIP
+        return DownloadDecision.ADOPT if old_node is None else DownloadDecision.SKIP
     if old_node is not None and remote_unchanged(
         ctx, node, old_node, cached_timemodified, log
     ):
@@ -531,6 +579,7 @@ def should_skip_before_decision(
         node.url,
         f"{node.type} file",
         course_id=course_id,
+        inventory=False,
     ):
         return SKIPPED_DOWNLOAD
     extension = Path(node.name).suffix.removeprefix(".").casefold()
@@ -691,6 +740,23 @@ def stable_download_decision(
     return decision, baseline
 
 
+def record_unchanged_copy(
+    node: Node,
+    downloadpath: Path,
+    decision: DownloadDecision,
+    baseline: storage.FileSnapshot,
+) -> DownloadOutcome:
+    if decision is DownloadDecision.ADOPT:
+        assert baseline.digest is not None
+        node.content_hash = baseline.digest
+    if (
+        node.etag_kind is RemoteMarkerKind.CONTENT_HASH
+        and classify_local_file(downloadpath, node.etag, baseline) is FileMatch.MATCH
+    ):
+        align_mtime_with_timemodified(node, downloadpath)
+    return UNCHANGED_DOWNLOAD
+
+
 def planned_download_action(
     ctx: SyncContext,
     node: Node,
@@ -723,14 +789,8 @@ def planned_download_action(
     decision, baseline = stable_download_decision(ctx, node, downloadpath, log)
     if decision is DownloadDecision.POLICY_SKIP:
         return POLICY_SKIPPED_DOWNLOAD
-    if decision is DownloadDecision.SKIP:
-        if (
-            node.etag_kind is RemoteMarkerKind.CONTENT_HASH
-            and classify_local_file(downloadpath, node.etag, baseline)
-            is FileMatch.MATCH
-        ):
-            align_mtime_with_timemodified(node, downloadpath)
-        return UNCHANGED_DOWNLOAD
+    if decision in {DownloadDecision.ADOPT, DownloadDecision.SKIP}:
+        return record_unchanged_copy(node, downloadpath, decision, baseline)
     action = (
         conflict_action(ctx, downloadpath, log)
         if decision is DownloadDecision.CONFLICT
@@ -1018,10 +1078,7 @@ def install_downloaded_file(
         description="the updated file from Moodle",
         log=log,
     )
-    if result is not storage.InstallResult.INSTALLED:
-        transfer.discard_partial()
-        return result
-    transfer.etag_sidecar.unlink(missing_ok=True)
+    transfer.discard_partial()
     return result
 
 
@@ -1053,6 +1110,175 @@ def record_download_metadata(
     if etag_header is not None and node.etag is None:
         node.etag = etag_header
         node.etag_kind = RemoteMarkerKind.OPAQUE
+
+
+def record_verified_download(
+    ctx: SyncContext,
+    node: Node,
+    downloadpath: Path,
+    etag_header: str | None,
+    content_hash: str,
+) -> None:
+    record_download_metadata(node, downloadpath, etag_header, content_hash)
+    ctx.downloaded_paths.add(downloadpath)
+    key = transfer_reuse_key(node)
+    if key is None:
+        return
+    try:
+        size = downloadpath.stat().st_size
+    except OSError:
+        return
+    ctx.verified_download_artifacts[key] = VerifiedDownloadArtifact(
+        downloadpath,
+        content_hash,
+        size,
+    )
+
+
+def transfer_reuse_key(node: Node) -> TransferReuseKey | None:
+    """Identify direct downloads whose discovered revision is trustworthy."""
+    if (
+        node.download_kind is not DownloadKind.DIRECT
+        or not node.url
+        or node.etag_kind is None
+        or not node.etag
+        or node.has_remote_marker_conflict
+    ):
+        return None
+    marker = node.etag
+    if node.etag_kind is RemoteMarkerKind.CONTENT_HASH:
+        parsed = parse_content_hash(marker)
+        if parsed is None:
+            return None
+        algorithm, digest = parsed
+        marker = f"{algorithm}:{digest}"
+    identity_url, _ = canonical_remote_url(node.url)
+    if not identity_url:
+        return None
+    scope = remote_request_scope_fingerprint(node.url, node.download_headers)
+    return identity_url, scope, node.etag_kind, marker
+
+
+def stage_reusable_artifact(
+    artifact: VerifiedDownloadArtifact,
+    downloadpath: Path,
+) -> TransferPlan | None:
+    """Copy a prior verified artifact to a target-local, verified stage."""
+    downloadpath.parent.mkdir(parents=True, exist_ok=True)
+    stage_path = pathing.with_windows_extended_length_prefix(
+        downloadpath.parent / f".{downloadpath.name}.smmreuse"
+    )
+    transfer = TransferPlan(
+        tmp_path=stage_path,
+        etag_sidecar=stage_path.with_name(stage_path.name + ".etag"),
+        headers={},
+    )
+    transfer.discard_partial()
+    try:
+        shutil.copyfile(artifact.path, transfer.tmp_path)
+    except OSError:
+        transfer.discard_partial()
+        return None
+
+    snapshot = storage.snapshot_file(transfer.tmp_path)
+    try:
+        size = transfer.tmp_path.stat().st_size
+    except OSError:
+        size = None
+    if (
+        snapshot.digest != artifact.content_hash
+        or size != artifact.size
+        or not snapshot.metadata_still_matches(transfer.tmp_path)
+    ):
+        transfer.discard_partial()
+        return None
+    return transfer
+
+
+def record_reused_download(
+    ctx: SyncContext,
+    node: Node,
+    downloadpath: Path,
+    content_hash: str,
+) -> None:
+    record_verified_download(ctx, node, downloadpath, None, content_hash)
+    # A complete verified copy makes any older resumable transfer obsolete.
+    prepare_transfer_plan(node, downloadpath).discard_partial()
+
+
+def install_reusable_artifact(
+    ctx: SyncContext,
+    node: Node,
+    artifact: VerifiedDownloadArtifact,
+    downloadpath: Path,
+    planned: PlannedTransfer,
+    log: logging.Logger,
+) -> DownloadOutcome | None:
+    """Install a verified in-run artifact, or return None to fall back to GET."""
+    transfer = stage_reusable_artifact(artifact, downloadpath)
+    if transfer is None:
+        return None
+    ctx.output.action("Reusing", downloadpath, node.type)
+    baseline = planned.baseline
+    if baseline.digest == artifact.content_hash and baseline.still_matches(
+        downloadpath
+    ):
+        transfer.discard_partial()
+        record_reused_download(ctx, node, downloadpath, artifact.content_hash)
+        return UNCHANGED_DOWNLOAD
+
+    install_result = install_downloaded_file(
+        downloadpath,
+        transfer,
+        planned,
+        ctx.config.conflict_handling,
+        log,
+    )
+    install_outcome = noninstalled_download_outcome(install_result, 0)
+    if install_outcome is not None:
+        return install_outcome
+    record_reused_download(ctx, node, downloadpath, artifact.content_hash)
+    return completed_download(existed=baseline.exists)
+
+
+def prepare_download_or_reuse(
+    ctx: SyncContext,
+    node: Node,
+    downloadpath: Path,
+    download_origin: str | None,
+    log: logging.Logger,
+) -> PlannedTransfer | DownloadOutcome:
+    """Apply local policy and reuse a verified transfer before requesting it."""
+    key = None if ctx.config.dry_run else transfer_reuse_key(node)
+    artifact = ctx.verified_download_artifacts.get(key) if key is not None else None
+    if artifact is not None and node.remote_size not in (None, artifact.size):
+        artifact = None
+    if artifact is not None and node.remote_size is None:
+        node.remote_size = artifact.size
+
+    action_or_outcome = planned_download_action(ctx, node, downloadpath, log)
+    if isinstance(action_or_outcome, DownloadOutcome):
+        return action_or_outcome
+    planned = action_or_outcome
+
+    if artifact is not None:
+        outcome = install_reusable_artifact(
+            ctx,
+            node,
+            artifact,
+            downloadpath,
+            planned,
+            log,
+        )
+        if outcome is not None:
+            return outcome
+    if download_origin and ctx.service_outages.should_skip(download_origin):
+        return FAILED_DOWNLOAD
+    if ctx.config.dry_run and (
+        node.download_kind is DownloadKind.OPENCAST or not size_limits_configured(ctx)
+    ):
+        return report_planned_download(ctx, downloadpath, node.type)
+    return planned
 
 
 def process_download_response(
@@ -1106,8 +1332,13 @@ def process_download_response(
     local_hash = storage.file_sha256(downloadpath) if downloadpath.exists() else None
     if staged_hash == local_hash:
         transfer.discard_partial()
-        record_download_metadata(node, downloadpath, etag_header, staged_hash)
-        ctx.downloaded_paths.add(downloadpath)
+        record_verified_download(
+            ctx,
+            node,
+            downloadpath,
+            etag_header,
+            staged_hash,
+        )
         return DownloadOutcome(
             unchanged=1,
             transferred_bytes=transferred_bytes,
@@ -1125,8 +1356,7 @@ def process_download_response(
     )
     if install_outcome is not None:
         return install_outcome
-    record_download_metadata(node, downloadpath, etag_header, staged_hash)
-    ctx.downloaded_paths.add(downloadpath)
+    record_verified_download(ctx, node, downloadpath, etag_header, staged_hash)
     return completed_download(existed=existed, transferred_bytes=transferred_bytes)
 
 
@@ -1196,18 +1426,16 @@ def download_file(
     if not node.url:
         return FAILED_DOWNLOAD
     download_origin = normalized_http_origin(node.url)
-    if download_origin and ctx.service_outages.should_skip(download_origin):
-        return FAILED_DOWNLOAD
-
-    action_or_outcome = planned_download_action(ctx, node, downloadpath, log)
+    action_or_outcome = prepare_download_or_reuse(
+        ctx,
+        node,
+        downloadpath,
+        download_origin,
+        log,
+    )
     if isinstance(action_or_outcome, DownloadOutcome):
         return action_or_outcome
     planned = action_or_outcome
-
-    if ctx.config.dry_run and (
-        node.download_kind is DownloadKind.OPENCAST or not size_limits_configured(ctx)
-    ):
-        return report_planned_download(ctx, downloadpath, node.type)
 
     opencast_course_id: Any = None
     if node.download_kind is DownloadKind.OPENCAST:
@@ -1449,6 +1677,7 @@ def scan_and_download_youtube(
         link,
         "YouTube link",
         course_id=course_id,
+        inventory=False,
     ):
         return SKIPPED_DOWNLOAD
     video_id = links.youtube_video_id_from_node(node)

@@ -2022,6 +2022,12 @@ def report_filtered_items(ctx: SyncContext, show_details: bool) -> None:
     ctx.output.filtered_items(items, show_details=show_details)
 
 
+def report_removed_content(ctx: SyncContext) -> None:
+    items = sorted(ctx.removed_content)
+    if items:
+        ctx.output.removed_content(items)
+
+
 def run(ctx: SyncContext, *, show_filtered: bool = False) -> None:
     """Execute a full sync run against an already-configured context."""
     tokens, validation = resolve_moodle_tokens_for_run(ctx)
@@ -2063,6 +2069,7 @@ def run(ctx: SyncContext, *, show_filtered: bool = False) -> None:
         logger.critical("%s", error)
         raise SystemExit(1) from error
     report_filtered_items(ctx, show_filtered)
+    report_removed_content(ctx)
     ctx.output.summary(
         ctx.stats,
         len(ctx.filtered_items),

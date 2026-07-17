@@ -1,13 +1,18 @@
+import hashlib
+import json
 import logging
 import time
 from dataclasses import dataclass
+from pathlib import PurePosixPath
 from typing import Any
 
-from syncmymoodle import course_cache, filters, pathing, sync_handlers
+from syncmymoodle import course_cache, filters, links, pathing, sync_handlers
 from syncmymoodle import moodle as moodle_api
 from syncmymoodle.context import SyncContext
-from syncmymoodle.http_utils import redact_url_secrets
-from syncmymoodle.node import Node, NodeKind
+from syncmymoodle.http_utils import canonical_remote_url, redact_url_secrets
+from syncmymoodle.node import DownloadKind, Node, NodeKind
+from syncmymoodle.outcomes import RemovedContent
+from syncmymoodle.pathing import sanitized_node_path_parts
 
 logger = logging.getLogger(__name__)
 SLOW_MODULE_SECONDS = 1.0
@@ -25,6 +30,110 @@ class _PreparedCourse:
     name: str
     course_id: int
     node: Node
+
+
+def _course_inventory_scope(ctx: SyncContext, course_id: int) -> str:
+    """Describe configured policy that controls which remote nodes enter a tree."""
+
+    def patterns(value: dict[str, list[str]]) -> list[str]:
+        return sorted(set(filters.pattern_list(value, course_id)))
+
+    config = ctx.config
+    scope = {
+        "version": 1,
+        "filters": {
+            "allowed_domains": patterns(config.allowed_domains),
+            "exclude_links": patterns(config.exclude_links),
+            "exclude_modules": patterns(config.exclude_modules),
+            "exclude_sections": patterns(config.exclude_sections),
+        },
+        "links": {
+            "follow": config.follow_links,
+            "youtube": config.link_youtube,
+            "opencast": config.link_opencast,
+            "sciebo": config.link_sciebo,
+            "emedia": config.link_emedia,
+        },
+        "modules": {
+            "assignment": config.module_assignment,
+            "resource": config.module_resource,
+            "folder": config.module_folder,
+            "quiz": config.quiz_mode,
+        },
+    }
+    encoded = json.dumps(scope, sort_keys=True, separators=(",", ":")).encode()
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _remote_content_identity(node: Node) -> tuple[str, str] | None:
+    """Return a stable comparison key and a safe user-visible identity."""
+    if not node.url:
+        return None
+    youtube_id = links.youtube_video_id_from_node(node)
+    if youtube_id is not None:
+        identity = f"youtube:{youtube_id}"
+        return identity, identity
+    identity_url, display_url = canonical_remote_url(node.url)
+    if node.download_kind is DownloadKind.OPENCAST:
+        identity = f"opencast:{node.id}:{identity_url.partition('?')[0]}"
+        return identity, identity
+    if node.download_kind in {DownloadKind.EMEDIA, DownloadKind.QUIZ} and node.id:
+        identity = f"{node.download_kind}:{node.id}"
+        return identity, identity
+    return f"{node.download_kind}:{identity_url}", display_url
+
+
+def _remote_content_nodes(root: Node) -> dict[str, list[tuple[Node, str]]]:
+    nodes: dict[str, list[tuple[Node, str]]] = {}
+    pending = [root]
+    while pending:
+        node = pending.pop()
+        pending.extend(node.children)
+        identity = _remote_content_identity(node)
+        if identity is not None:
+            key, display = identity
+            nodes.setdefault(key, []).append((node, display))
+    return nodes
+
+
+def _old_course_relative_path(node: Node) -> str:
+    parts = sanitized_node_path_parts(node)[1:]
+    return PurePosixPath(*parts).as_posix()
+
+
+def _removed_course_content(
+    course: _PreparedCourse,
+    old_course_root: Node,
+) -> set[RemovedContent]:
+    """Find unambiguous remote identities absent from the current course tree."""
+    old_nodes = _remote_content_nodes(old_course_root)
+    current_identities = _remote_content_nodes(course.node)
+    course_label = f"{course.name} ({course.course_id})"
+    return {
+        RemovedContent(course_label, _old_course_relative_path(node), display)
+        for identity, candidates in old_nodes.items()
+        if identity not in current_identities and len(candidates) == 1
+        for node, display in candidates
+    }
+
+
+def _record_removed_content(
+    ctx: SyncContext,
+    courses: list[_PreparedCourse],
+) -> None:
+    for course in courses:
+        if course.course_id in ctx.incomplete_course_ids:
+            continue
+        old_course_root = course_cache.comparable_course_cache_root(
+            ctx,
+            course.node,
+            _course_inventory_scope(ctx, course.course_id),
+            logger,
+        )
+        if course.course_id in ctx.inventory_filtered_course_ids:
+            continue
+        if old_course_root is not None:
+            ctx.removed_content.update(_removed_course_content(course, old_course_root))
 
 
 @dataclass
@@ -382,7 +491,11 @@ def _folders_by_coursemodule(
     module_names: set[Any],
 ) -> dict[int, dict[str, Any]]:
     folders: list[dict[str, Any]] | None = []
-    if ctx.config.module_folder and "folder" in module_names:
+    if (
+        ctx.config.module_folder
+        and ctx.config.follow_links
+        and "folder" in module_names
+    ):
         account = ctx.require_moodle_account()
         folders = moodle_api.get_folders_by_courses(
             ctx.require_session(), account.wstoken, course.course_id
@@ -530,3 +643,4 @@ def sync(ctx: SyncContext) -> None:
         progress.start_course(course_index, course.name)
         _sync_course_safely(ctx, root_node, course, course_index)
     pathing.resolve_node_path_clashes(root_node)
+    _record_removed_content(ctx, prepared_courses)

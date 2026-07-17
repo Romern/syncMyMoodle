@@ -5,6 +5,7 @@ converts LaTeX to MathML, removes network-bearing attributes, and pins a restric
 so the saved page renders offline without executing or fetching anything."""
 
 import base64
+import hashlib
 import logging
 import mimetypes
 import os
@@ -489,6 +490,16 @@ def _strip_quiz_snapshot_active_content(soup: Any) -> None:
         form.attrs.pop("method", None)
 
 
+def normalize_quiz_review_html(review_html: str) -> str:
+    """Remove volatile form state that has no purpose in an offline review."""
+    soup = parse_html(review_html)
+    for input_tag in soup.find_all("input"):
+        input_type = str(input_tag.get("type") or "").strip().lower()
+        if input_type == "hidden":
+            input_tag.decompose()
+    return str(soup)
+
+
 def _inline_quiz_snapshot_stylesheets(
     soup: Any,
     assets: _QuizAssetContext,
@@ -619,7 +630,7 @@ def build_quiz_snapshot(
     unused assets are stripped; direct quiz images and referenced inline-style
     assets are embedded as data URIs with size budgets.
     """
-    soup = parse_html(html)
+    soup = parse_html(normalize_quiz_review_html(html))
     head = _ensure_quiz_snapshot_head(soup)
     assets = _QuizAssetContext(session, base_url, log)
 
@@ -902,6 +913,8 @@ def _stage_quiz_snapshot(
     node: Node,
     html_path: Path,
     log: logging.Logger,
+    *,
+    announce: bool = True,
 ) -> Path | None:
     if node.url is None:
         log.warning("No token-derived quiz review is available for %s", node.name)
@@ -913,7 +926,8 @@ def _stage_quiz_snapshot(
             redact_url_secrets(node.url),
         )
         return None
-    ctx.output.action("Downloading", html_path, "Quiz")
+    if announce:
+        ctx.output.action("Downloading", html_path, "Quiz")
     html_path.parent.mkdir(parents=True, exist_ok=True)
     staged_path = _temporary_quiz_path(html_path)
     staged_path.unlink(missing_ok=True)
@@ -930,6 +944,64 @@ def _stage_quiz_snapshot(
         staged_path.unlink(missing_ok=True)
         return None
     return staged_path
+
+
+def _normalized_quiz_snapshot_hash(path: Path) -> str | None:
+    try:
+        normalized = normalize_quiz_review_html(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError):
+        return None
+    return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
+
+
+def _adopt_matching_uncached_quiz_artifacts(
+    ctx: SyncContext,
+    node: Node,
+    old_node: Node | None,
+    html_path: Path,
+    artifacts: dict[str, Path],
+    baselines: dict[str, storage.FileSnapshot],
+    log: logging.Logger,
+) -> DownloadOutcome | None:
+    """Adopt a cacheless snapshot only when its generated HTML still matches."""
+    html_baseline = baselines["html"]
+    if (
+        ctx.config.dry_run
+        or old_node is not None
+        or node.etag is None
+        or "html" not in artifacts
+        or html_baseline.digest is None
+        or not all(
+            baselines[kind].exists and baselines[kind].digest is not None
+            for kind in artifacts
+        )
+    ):
+        return None
+
+    staged_path = _stage_quiz_snapshot(
+        ctx,
+        node,
+        html_path,
+        log,
+        announce=False,
+    )
+    if staged_path is None:
+        return None
+    try:
+        matches = _normalized_quiz_snapshot_hash(
+            staged_path
+        ) == _normalized_quiz_snapshot_hash(html_path)
+    finally:
+        staged_path.unlink(missing_ok=True)
+    if not matches:
+        return None
+
+    # The HTML proves provenance for the review. Preserve a companion PDF but
+    # leave it unhashed: a later real review change will conflict-protect any
+    # locally annotated or replaced PDF instead of treating it as generated.
+    node.artifact_hashes = {"html": html_baseline.digest}
+    ctx.downloaded_paths.add(html_path)
+    return DownloadOutcome(unchanged=len(artifacts))
 
 
 def _prepare_quiz_artifacts(
@@ -1073,6 +1145,17 @@ def download_quiz(
     existing = {
         kind for kind, baseline in artifact_baselines.items() if baseline.exists
     }
+    adopted = _adopt_matching_uncached_quiz_artifacts(
+        ctx,
+        node,
+        old_node,
+        html_path,
+        artifacts,
+        baselines,
+        log,
+    )
+    if adopted is not None:
+        return adopted
     _initialize_quiz_artifact_hashes(node, old_node, same_revision)
     known = (
         _known_quiz_artifacts(node, old_node, artifact_baselines)

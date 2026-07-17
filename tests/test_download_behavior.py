@@ -1,6 +1,7 @@
 import hashlib
 import logging
 import os
+from pathlib import Path
 
 import pytest
 import requests
@@ -180,8 +181,137 @@ def test_moodle_content_hash_skips_identical_untracked_file(tmp_path):
     assert outcome.unchanged == 1
     assert file_node.etag == sha1(content)
     assert file_node.etag_kind is RemoteMarkerKind.CONTENT_HASH
+    assert file_node.content_hash == sha256(content)
     assert ctx.session.calls == []
     assert list(download_path.parent.glob("*.syncconflict.*")) == []
+
+
+def _uncached_local_file(
+    tmp_path,
+    *,
+    timemodified=1710000300,
+    local_mtime=1710000300,
+    etag=None,
+    content=b"local content",
+    dry_run=False,
+):
+    ctx = make_context(
+        {
+            "paths.sync_directory": str(tmp_path),
+            "downloads.update_files": True,
+            "downloads.dry_run": dry_run,
+        }
+    )
+    ctx.session = FakeSession()
+    ctx.root_node, file_node = build_single_file_tree(
+        "slides.pdf",
+        URL,
+        timemodified=timemodified,
+        etag=etag,
+    )
+    assert file_node is not None
+    download_path = node_path(ctx, file_node)
+    download_path.parent.mkdir(parents=True)
+    download_path.write_bytes(content)
+    os.utime(download_path, (local_mtime, local_mtime))
+    return ctx, file_node, download_path
+
+
+def test_matching_remote_timestamp_adopts_uncached_file_and_persists_hash(tmp_path):
+    content = b"already downloaded content without a remote checksum"
+    ctx, file_node, _ = _uncached_local_file(tmp_path, content=content)
+
+    assert ctx.root_node is not None
+    downloader.download_node_tree(ctx, ctx.root_node)
+    course_cache.cache_root_node(ctx)
+
+    assert ctx.stats.unchanged == 1
+    assert ctx.stats.planned == 0
+    assert file_node.content_hash == sha256(content)
+    assert ctx.session.calls == []
+
+    loaded = make_context({"paths.sync_directory": str(tmp_path)})
+    cached_file = course_cache.get_old_node_for(loaded, file_node)
+    assert cached_file is not None
+    assert cached_file.is_verified
+    assert cached_file.content_hash == sha256(content)
+
+
+def test_dry_run_reports_matching_uncached_timestamp_as_unchanged(tmp_path):
+    ctx, file_node, _ = _uncached_local_file(tmp_path, dry_run=True)
+    course = course_cache.get_course_node(file_node)
+
+    outcome = download_file(ctx, file_node)
+
+    assert outcome.unchanged == 1
+    assert outcome.planned == 0
+    assert ctx.session.calls == []
+    assert not course_cache.course_cache_path(ctx, course).exists()
+
+
+@pytest.mark.parametrize("marker", [sha1(b"different remote content"), "not-a-hash"])
+def test_current_content_hash_blocks_timestamp_adoption(tmp_path, marker):
+    ctx, file_node, download_path = _uncached_local_file(tmp_path, etag=marker)
+    file_node.etag_kind = RemoteMarkerKind.CONTENT_HASH
+
+    assert (
+        downloader.decide_download(ctx, file_node, download_path)
+        is downloader.DownloadDecision.CONFLICT
+    )
+
+
+def test_conflicting_remote_markers_block_timestamp_adoption(tmp_path):
+    ctx, file_node, download_path = _uncached_local_file(
+        tmp_path,
+        etag=sha1(b"first remote content"),
+    )
+    file_node.etag_kind = RemoteMarkerKind.CONTENT_HASH
+    assert file_node.parent is not None
+    file_node.parent.add_download_child(
+        file_node.name,
+        file_node.id,
+        file_node.type,
+        url=URL,
+        timemodified=1710000300,
+        etag=sha1(b"second remote content"),
+        etag_kind=RemoteMarkerKind.CONTENT_HASH,
+    )
+
+    assert file_node.has_remote_marker_conflict
+    assert (
+        downloader.decide_download(ctx, file_node, download_path)
+        is downloader.DownloadDecision.CONFLICT
+    )
+
+
+@pytest.mark.parametrize(
+    "timemodified",
+    [1710000301, True, -1, "1710000300", 1710000300.0],
+)
+def test_nonmatching_or_invalid_remote_timestamp_is_not_adopted(tmp_path, timemodified):
+    ctx, file_node, download_path = _uncached_local_file(
+        tmp_path,
+        timemodified=timemodified,
+    )
+
+    assert (
+        downloader.decide_download(ctx, file_node, download_path)
+        is downloader.DownloadDecision.CONFLICT
+    )
+
+
+def test_unreadable_snapshot_is_not_adopted_by_timestamp(tmp_path):
+    ctx, file_node, download_path = _uncached_local_file(tmp_path)
+
+    assert (
+        downloader.decide_download(
+            ctx,
+            file_node,
+            download_path,
+            baseline=downloader.storage.FileSnapshot(True),
+        )
+        is downloader.DownloadDecision.CONFLICT
+    )
 
 
 def test_transfer_plan_applies_windows_prefix_to_appended_temp_paths(
@@ -197,6 +327,30 @@ def test_transfer_plan_applies_windows_prefix_to_appended_temp_paths(
 
     assert os.fspath(plan.tmp_path).startswith("\\\\?\\")
     assert os.fspath(plan.etag_sidecar).startswith("\\\\?\\")
+
+
+def test_discard_partial_tolerates_a_windows_style_file_lock(tmp_path, monkeypatch):
+    plan = downloader.prepare_transfer_plan(
+        Node("file.pdf", "id", "Linked file [application/pdf]", None),
+        tmp_path / "file.pdf",
+    )
+    plan.tmp_path.write_bytes(b"partial")
+    plan.etag_sidecar.write_text('"revision-1"', encoding="utf-8")
+    original_unlink = Path.unlink
+
+    def locked_unlink(path, *args, **kwargs):
+        if path == plan.tmp_path:
+            raise PermissionError("simulated Windows file lock")
+        return original_unlink(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "unlink", locked_unlink)
+
+    plan.discard_partial()
+
+    assert plan.tmp_path.exists()
+    assert not plan.etag_sidecar.exists()
+    assert plan.resume_size == 0
+    assert plan.partial_etag is None
 
 
 def test_youtube_outtmpl_applies_windows_prefix_after_template_suffix(
@@ -1470,6 +1624,7 @@ def test_failed_previous_download_is_retried_not_skipped(tmp_path):
     download_path = node_path(syncer, file_node)
     download_path.parent.mkdir(parents=True, exist_ok=True)
     download_path.write_bytes(b"OLD STALE VERSION")
+    os.utime(download_path, (1710000300, 1710000300))
     syncer.session.add(
         "GET",
         URL,
@@ -2201,6 +2356,297 @@ def _sciebo_tree(etag, handled=False, content_hash=None, etag_kind=None):
         file_node.mark_handled()
     file_node.content_hash = content_hash
     return root, file_node
+
+
+def _duplicate_sciebo_destinations(
+    first_url,
+    second_url,
+    first_etag,
+    second_etag=None,
+):
+    root, first = _sciebo_tree(
+        first_etag,
+        etag_kind=RemoteMarkerKind.OPAQUE,
+    )
+    first.url = first_url
+    semester = root.children[0]
+    second_course = semester.add_child("Other Course", 302, "Course")
+    second_section = second_course.add_child("General", 402, "Section")
+    second = second_section.add_download_child(
+        "notes.pdf",
+        None,
+        "Sciebo File",
+        url=second_url,
+        download_headers={"Authorization": "Basic x"},
+        etag=second_etag or first_etag,
+        etag_kind=RemoteMarkerKind.OPAQUE,
+    )
+    return root, first, second
+
+
+def test_duplicate_sciebo_destinations_reuse_one_verified_transfer(tmp_path):
+    content = b"shared sciebo notes"
+    first_url = SCIEBO_URL + "?X-Amz-Date=20260716T100000Z&sig=first-secret"
+    second_url = SCIEBO_URL + "?sig=second-secret&X-Amz-Date=20260716T110000Z"
+    _, first, second = _duplicate_sciebo_destinations(
+        first_url,
+        second_url,
+        '"revision-1"',
+    )
+    syncer = make_context({"paths.sync_directory": str(tmp_path)})
+    syncer.session = FakeSession()
+    second_path = node_path(syncer, second)
+    second_path.parent.mkdir(parents=True)
+    for suffix in ("smmpart", "smmpart.etag"):
+        (second_path.parent / f".{second_path.name}.{suffix}").write_bytes(b"stale")
+    syncer.session.add(
+        "GET",
+        first_url,
+        FakeResponse(
+            headers={
+                "Content-Type": "application/pdf",
+                "Content-Length": str(len(content)),
+            },
+            chunks=[content],
+        ),
+    )
+
+    first_outcome = download_file(syncer, first)
+    second_outcome = download_file(syncer, second)
+
+    assert first_outcome.downloaded == 1
+    assert first_outcome.transferred_bytes == len(content)
+    assert second_outcome.downloaded == 1
+    assert second_outcome.transferred_bytes == 0
+    assert syncer.session.count("GET") == 1
+    assert node_path(syncer, first).read_bytes() == content
+    assert second_path.read_bytes() == content
+    assert first.content_hash == second.content_hash == sha256(content)
+    assert not list(second_path.parent.glob(".*.smm*"))
+
+
+def test_reuse_succeeds_when_a_stale_partial_is_windows_locked(
+    tmp_path,
+    monkeypatch,
+):
+    content = b"shared sciebo notes"
+    _, first, second = _duplicate_sciebo_destinations(
+        SCIEBO_URL,
+        SCIEBO_URL,
+        '"revision-1"',
+    )
+    syncer = make_context({"paths.sync_directory": str(tmp_path)})
+    syncer.session = FakeSession()
+    syncer.session.add(
+        "GET",
+        SCIEBO_URL,
+        FakeResponse(headers={"Content-Type": "application/pdf"}, chunks=[content]),
+    )
+    assert download_file(syncer, first).is_handled
+
+    second_path = node_path(syncer, second)
+    second_path.parent.mkdir(parents=True)
+    partial = second_path.parent / f".{second_path.name}.smmpart"
+    sidecar = partial.with_name(partial.name + ".etag")
+    partial.write_bytes(b"stale partial")
+    sidecar.write_text('"stale-revision"', encoding="utf-8")
+    original_unlink = Path.unlink
+
+    def locked_unlink(path, *args, **kwargs):
+        if path == partial:
+            raise PermissionError("simulated Windows file lock")
+        return original_unlink(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "unlink", locked_unlink)
+
+    assert download_file(syncer, second).downloaded == 1
+
+    assert syncer.session.count("GET", SCIEBO_URL) == 1
+    assert second_path.read_bytes() == content
+    assert partial.read_bytes() == b"stale partial"
+    assert not sidecar.exists()
+    assert not list(second_path.parent.glob(".*.smmreuse*"))
+
+
+def test_reused_transfer_preserves_a_target_created_while_staging(
+    tmp_path,
+    monkeypatch,
+):
+    content = b"shared sciebo notes"
+    local_edit = b"created while staging"
+    _, first, second = _duplicate_sciebo_destinations(
+        SCIEBO_URL,
+        SCIEBO_URL,
+        '"revision-1"',
+    )
+    syncer = make_context(
+        {
+            "paths.sync_directory": str(tmp_path),
+            "downloads.conflict_handling": "keep",
+        }
+    )
+    syncer.session = FakeSession()
+    syncer.session.add(
+        "GET",
+        SCIEBO_URL,
+        FakeResponse(headers={"Content-Type": "application/pdf"}, chunks=[content]),
+    )
+    assert download_file(syncer, first).is_handled
+
+    second_path = node_path(syncer, second)
+    original_copyfile = downloader.shutil.copyfile
+
+    def create_target_while_staging(source, destination):
+        result = original_copyfile(source, destination)
+        second_path.parent.mkdir(parents=True, exist_ok=True)
+        second_path.write_bytes(local_edit)
+        return result
+
+    monkeypatch.setattr(downloader.shutil, "copyfile", create_target_while_staging)
+
+    outcome = download_file(syncer, second)
+
+    assert outcome.unchanged == 1
+    assert not outcome.cache_verified
+    assert syncer.session.count("GET", SCIEBO_URL) == 1
+    assert second_path.read_bytes() == local_edit
+    assert not list(second_path.parent.glob(".*.smmreuse*"))
+
+
+def test_duplicate_sciebo_url_does_not_cross_authorization_scopes(tmp_path):
+    content = b"shared sciebo notes"
+    _, first, second = _duplicate_sciebo_destinations(
+        SCIEBO_URL,
+        SCIEBO_URL,
+        '"revision-1"',
+    )
+    first.download_headers = {
+        "Authorization": "Basic first-secret",
+        "requesttoken": "first-request-token",
+    }
+    second.download_headers = {
+        "Authorization": "Basic second-secret",
+        "requesttoken": "second-request-token",
+    }
+    syncer = make_context({"paths.sync_directory": str(tmp_path)})
+    syncer.session = FakeSession()
+    syncer.session.add(
+        "GET",
+        SCIEBO_URL,
+        FakeResponse(headers={"Content-Type": "application/pdf"}, chunks=[content]),
+    )
+
+    assert download_file(syncer, first).is_handled
+    assert download_file(syncer, second).is_handled
+
+    assert syncer.session.count("GET", SCIEBO_URL) == 2
+    assert len(syncer.verified_download_artifacts) == 2
+    cached_keys = repr(tuple(syncer.verified_download_artifacts))
+    assert "first-secret" not in cached_keys
+    assert "second-secret" not in cached_keys
+    assert "request-token" not in cached_keys
+
+
+def test_duplicate_transfer_falls_back_to_get_if_source_was_edited(tmp_path):
+    content = b"shared sciebo notes"
+    first_url = SCIEBO_URL + "?sig=first-secret"
+    second_url = SCIEBO_URL + "?sig=second-secret"
+    _, first, second = _duplicate_sciebo_destinations(
+        first_url,
+        second_url,
+        '"revision-1"',
+    )
+    syncer = make_context({"paths.sync_directory": str(tmp_path)})
+    syncer.session = FakeSession()
+    for url in (first_url, second_url):
+        syncer.session.add(
+            "GET",
+            url,
+            FakeResponse(
+                headers={"Content-Type": "application/pdf"},
+                chunks=[content],
+            ),
+        )
+
+    assert download_file(syncer, first).is_handled
+    first_path = node_path(syncer, first)
+    local_edit = b"x" * len(content)
+    first_path.write_bytes(local_edit)
+    assert download_file(syncer, second).is_handled
+
+    assert syncer.session.count("GET") == 2
+    assert first_path.read_bytes() == local_edit
+    assert node_path(syncer, second).read_bytes() == content
+    assert not list(tmp_path.rglob("*.smmreuse*"))
+
+
+def test_duplicate_url_with_different_remote_marker_is_downloaded_again(tmp_path):
+    first_url = SCIEBO_URL + "?sig=first-secret"
+    second_url = SCIEBO_URL + "?sig=second-secret"
+    _, first, second = _duplicate_sciebo_destinations(
+        first_url,
+        second_url,
+        '"revision-1"',
+        '"revision-2"',
+    )
+    syncer = make_context({"paths.sync_directory": str(tmp_path)})
+    syncer.session = FakeSession()
+    syncer.session.add(
+        "GET",
+        first_url,
+        FakeResponse(headers={"Content-Type": "application/pdf"}, chunks=[b"v1"]),
+    )
+    syncer.session.add(
+        "GET",
+        second_url,
+        FakeResponse(headers={"Content-Type": "application/pdf"}, chunks=[b"v2"]),
+    )
+
+    assert download_file(syncer, first).is_handled
+    assert download_file(syncer, second).is_handled
+
+    assert syncer.session.count("GET") == 2
+    assert node_path(syncer, first).read_bytes() == b"v1"
+    assert node_path(syncer, second).read_bytes() == b"v2"
+
+
+def test_reused_transfer_preserves_rename_conflict_policy(tmp_path):
+    content = b"shared sciebo notes"
+    first_url = SCIEBO_URL + "?sig=first-secret"
+    second_url = SCIEBO_URL + "?sig=second-secret"
+    _, first, second = _duplicate_sciebo_destinations(
+        first_url,
+        second_url,
+        '"revision-1"',
+    )
+    syncer = make_context(
+        {
+            "paths.sync_directory": str(tmp_path),
+            "downloads.update_files": True,
+            "downloads.conflict_handling": "rename",
+        }
+    )
+    syncer.session = FakeSession()
+    syncer.session.add(
+        "GET",
+        first_url,
+        FakeResponse(
+            headers={"Content-Type": "application/pdf"},
+            chunks=[content],
+        ),
+    )
+    second_path = node_path(syncer, second)
+    second_path.parent.mkdir(parents=True)
+    second_path.write_bytes(b"local edit")
+
+    assert download_file(syncer, first).is_handled
+    assert download_file(syncer, second).updated == 1
+
+    assert syncer.session.count("GET") == 1
+    assert second_path.read_bytes() == content
+    conflicts = list(second_path.parent.glob("*.syncconflict.*"))
+    assert len(conflicts) == 1
+    assert conflicts[0].read_bytes() == b"local edit"
 
 
 def _seed_sciebo_cache(config, etag, content, content_hash=None, etag_kind=None):

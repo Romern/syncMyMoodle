@@ -12,7 +12,7 @@ from typing import Any, Callable, cast
 
 import requests
 
-from syncmymoodle import course_cache, filters, moodle_files
+from syncmymoodle import course_cache, filters, moodle_files, quiz
 from syncmymoodle import links as links_api
 from syncmymoodle import moodle as moodle_api
 from syncmymoodle import opencast as opencast_api
@@ -485,17 +485,31 @@ def _assignment_submission_files(
 def _add_moodle_file_nodes(
     ctx: SyncContext,
     parent_node: Node,
-    files: list[Any],
+    files: object,
     file_type: str,
     filter_context: str,
     course_id: Any,
-) -> None:
+) -> bool:
+    if not isinstance(files, list):
+        return False
+    complete = True
     for item in files:
         if not isinstance(item, dict):
+            complete = False
+            continue
+        filename = item.get("filename")
+        file_url = item.get("fileurl")
+        if (
+            not isinstance(filename, str)
+            or not filename
+            or not isinstance(file_url, str)
+            or not file_url
+        ):
+            complete = False
             continue
         if filters.should_skip_url(
             ctx,
-            item.get("fileurl"),
+            file_url,
             filter_context,
             course_id=course_id,
         ):
@@ -503,14 +517,15 @@ def _add_moodle_file_nodes(
         moodle_files.add_moodle_file_node(
             parent_node,
             item.get("filepath", "/"),
-            item["filename"],
-            item["fileurl"],
+            filename,
+            file_url,
             file_type,
-            item["fileurl"],
+            file_url,
             timemodified=item.get("timemodified"),
             remote_size=item.get("filesize"),
             remote_content_hash=item.get("contenthash"),
         )
+    return complete
 
 
 def handle_assignment_module(
@@ -526,7 +541,13 @@ def handle_assignment_module(
     if not ctx.config.module_assignment:
         return
     ass = assignments_by_cmid.get(module["id"])
-    if not ass:
+    if ass is None:
+        if course_id not in ctx.incomplete_course_ids:
+            module_context.log.error(
+                "Moodle assignment inventory omitted module %s",
+                module["id"],
+            )
+            module_context.fail_once(f"assignment-instance:{module['id']}")
         return
     assignment_id = ass["id"]
     module_id = module["id"]
@@ -561,14 +582,20 @@ def handle_assignment_module(
         return
 
     intro_attachments = ass.get("introattachments") or []
-    _add_moodle_file_nodes(
+    if not _add_moodle_file_nodes(
         ctx,
         assignment_node,
         [*intro_attachments, *submission_files],
         "Assignment File",
         "assignment file",
         course_id,
-    )
+    ):
+        module_context.log.error(
+            "Moodle returned a malformed assignment file inventory for module %s",
+            module_id,
+        )
+        module_context.fail_once(f"assignment-files:{module_id}")
+        return
     if cache_allowed:
         course_cache.store_assignment_cache_entry(
             ctx,
@@ -586,6 +613,45 @@ def handle_assignment_module(
         )
 
 
+def _resource_like_contents(
+    module_context: ModuleContext,
+    module: dict[str, Any],
+) -> list[dict[str, Any]] | None:
+    module_kind = module["modname"]
+    raw_contents = module.get("contents", [])
+    if (
+        module_kind == "resource"
+        and module.get("uservisible") is False
+        and raw_contents == []
+    ):
+        module_context.log.info(
+            "Skipping unavailable resource module %s because Moodle did not "
+            "expose its contents",
+            module["id"],
+        )
+        module_context.ctx.mark_course_inventory_filtered(module_context.course_id)
+        return []
+    malformed = (
+        not isinstance(raw_contents, list)
+        or (module_kind == "resource" and not raw_contents)
+        or any(
+            not isinstance(item, dict)
+            or not isinstance(item.get("fileurl"), str)
+            or not item["fileurl"]
+            for item in raw_contents
+        )
+    )
+    if malformed:
+        module_context.log.error(
+            "Moodle returned a malformed %s content inventory for module %s",
+            module_kind,
+            module["id"],
+        )
+        module_context.fail_once(f"{module_kind}-contents:{module['id']}")
+        return None
+    return [item for item in raw_contents if isinstance(item, dict)]
+
+
 def handle_resource_like_module(
     module_context: ModuleContext,
     module: dict[str, Any],
@@ -597,10 +663,12 @@ def handle_resource_like_module(
     # Get Resources or URLs
     if module["modname"] == "resource" and not ctx.config.module_resource:
         return
-    for c in module.get("contents", []):
-        file_url = c.get("fileurl")
-        if not file_url:
-            continue
+    contents = _resource_like_contents(module_context, module)
+    if contents is None:
+        return
+    for c in contents:
+        file_url = c["fileurl"]
+        assert isinstance(file_url, str)
         if filters.should_skip_url(
             ctx,
             file_url,
@@ -637,18 +705,33 @@ def handle_folder_module(
     folder_node = section_node.add_child(module["name"], module["id"], "Folder")
 
     folder_info = folders_by_coursemodule.get(module["id"])
-    if folder_info and folder_info.get("intro"):
+    if (
+        ctx.config.follow_links
+        and folder_info is None
+        and course_id not in ctx.incomplete_course_ids
+    ):
+        module_context.log.error(
+            "Moodle folder inventory omitted module %s",
+            module["id"],
+        )
+        module_context.fail_once(f"folder-instance:{module['id']}")
+    elif folder_info and folder_info.get("intro"):
         module_context.status("scanning folder links")
         links_api.scan_for_links(ctx, folder_info["intro"], folder_node, course_id)
 
-    _add_moodle_file_nodes(
+    if not _add_moodle_file_nodes(
         ctx,
         folder_node,
         module.get("contents", []),
         "Folder File",
         "folder file",
         course_id,
-    )
+    ):
+        module_context.log.error(
+            "Moodle returned a malformed folder file inventory for module %s",
+            module["id"],
+        )
+        module_context.fail_once(f"folder-files:{module['id']}")
 
 
 def handle_embedded_link_module(
@@ -910,9 +993,20 @@ def _handle_h5p_links(
         moodle_api.get_h5pactivities_by_course,
     )
     if not isinstance(activity, dict):
+        if module_context.course_id not in ctx.incomplete_course_ids:
+            module_context.log.error(
+                "Moodle H5P inventory omitted module %s",
+                module["id"],
+            )
+            module_context.fail_once(f"h5p-instance:{module['id']}")
         return
     package_file = _h5p_package_file(activity)
     if package_file is None:
+        module_context.log.error(
+            "Moodle returned H5P activity %s without a valid package file",
+            module["id"],
+        )
+        module_context.fail_once(f"h5p-package:{module['id']}")
         return
     package_url = package_file["fileurl"]
     assert isinstance(package_url, str)
@@ -995,6 +1089,8 @@ def _opencast_lti_launch(
         module_context.log.warning(
             "Opencast: LTI module %s has no tool instance id", module["id"]
         )
+        if module_context.course_id not in ctx.incomplete_course_ids:
+            module_context.fail_once(f"opencast-lti:{module['id']}")
         return None
     module_context.status("loading Opencast launch data")
     launch_data = moodle_api.get_lti_launch_data(
@@ -1153,10 +1249,11 @@ def _quiz_review_html(name: str, review: dict[str, Any]) -> str:
         if title not in (None, ""):
             parts.append(f"<h2>{html.escape(str(title))}</h2>")
         parts.append(str(item.get("content") or ""))
-    return (
+    review_html = (
         "<!doctype html><html><head><title>"
         f"{html.escape(name)}</title></head><body>{''.join(parts)}</body></html>"
     )
+    return quiz.normalize_quiz_review_html(review_html)
 
 
 def _quiz_cache_timing(
@@ -1324,6 +1421,12 @@ def handle_quiz_module(
     )
     quiz_id = instance.get("id") if instance else module.get("instance")
     if not isinstance(quiz_id, int) or isinstance(quiz_id, bool):
+        module_context.log.error(
+            "Moodle quiz inventory omitted module %s and no fallback instance is valid",
+            module_id,
+        )
+        if module_context.course_id not in ctx.incomplete_course_ids:
+            module_context.fail_once(f"quiz-instance:{module_id}")
         return
     cached_data = _cached_quiz_data(module_context, module_id, instance)
     timing: QuizCacheTiming | None

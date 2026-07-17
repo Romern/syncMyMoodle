@@ -3,7 +3,7 @@ import subprocess
 from dataclasses import replace
 from types import SimpleNamespace
 
-from syncmymoodle import course_cache, quiz, sync_handlers
+from syncmymoodle import course_cache, downloader, quiz, sync_handlers
 from syncmymoodle.node import DownloadKind, Node, RemoteMarkerKind
 
 from .helpers import FakeResponse, FakeSession, make_context
@@ -182,6 +182,53 @@ def test_quiz_api_review_preserves_grade_and_feedback_titles(monkeypatch, tmp_pa
     assert quiz_attempt.etag_kind is RemoteMarkerKind.OPAQUE
 
 
+def test_quiz_revision_ignores_volatile_hidden_form_state(monkeypatch):
+    install_quiz_activity(monkeypatch)
+    monkeypatch.setattr(
+        sync_handlers.moodle_api,
+        "get_quiz_attempts",
+        lambda session, wstoken, quiz_id: [{"id": 5}],
+    )
+    hidden_values = iter(("first-secret", "second-secret"))
+
+    def quiz_review(session, wstoken, attempt_id):
+        secret = next(hidden_values)
+        return {
+            "questions": [
+                {
+                    "html": (
+                        "<p>Stable review</p>"
+                        f'<input type="hidden" name="sesskey" value="{secret}">'
+                    )
+                }
+            ]
+        }
+
+    monkeypatch.setattr(
+        sync_handlers.moodle_api,
+        "get_quiz_attempt_review",
+        quiz_review,
+    )
+
+    contexts = []
+    quiz_nodes = []
+    for _ in range(2):
+        ctx, module_context = quiz_module_context()
+        sync_handlers.handle_quiz_module(
+            module_context,
+            {"id": 42, "instance": 7, "modname": "quiz", "name": "My Quiz"},
+        )
+        contexts.append(ctx)
+        quiz_nodes.append(module_context.section_node.children[0])
+
+    first_html = contexts[0].quiz_review_cache[QUIZ_URL]
+    second_html = contexts[1].quiz_review_cache[QUIZ_URL]
+    assert first_html == second_html
+    assert "first-secret" not in first_html
+    assert "second-secret" not in second_html
+    assert quiz_nodes[0].etag == quiz_nodes[1].etag
+
+
 def test_quiz_node_keeps_remote_name_until_path_materialization(monkeypatch):
     install_quiz_activity(monkeypatch)
     ctx, module_context = quiz_module_context()
@@ -258,6 +305,22 @@ def test_build_quiz_snapshot_is_self_contained_and_network_silent(tmp_path):
     assert ctx.session.count("GET", CSS_ONLY_ASSET_URL) == 0
     assert ctx.session.count("GET", FONT_URL) == 1
     assert ctx.session.count("GET", TEXT_FONT_URL) == 0
+
+
+def test_build_quiz_snapshot_discards_hidden_form_state(tmp_path):
+    ctx = quiz_context(tmp_path, "html")
+    source = (
+        "<html><body><p>Visible review</p>"
+        '<input type="hidden" name="sesskey" value="private-session-key">'
+        '<input type="text" value="visible-answer">'
+        "</body></html>"
+    )
+
+    snapshot = quiz.build_quiz_snapshot(source, ctx.session, QUIZ_URL)
+
+    assert "private-session-key" not in snapshot
+    assert 'type="hidden"' not in snapshot
+    assert "visible-answer" in snapshot
 
 
 def test_quiz_asset_redirect_cannot_escape_moodle_origin():
@@ -347,6 +410,61 @@ def test_html_mode_is_idempotent(tmp_path, capsys):
     assert capsys.readouterr().out == ""
     # The token-derived review is consumed only on the first run; the second is a no-op.
     assert ctx.session.count("GET", QUIZ_URL) == 0
+
+
+def test_matching_cacheless_quiz_is_adopted_without_conflicts(
+    tmp_path,
+    monkeypatch,
+    capsys,
+):
+    first = quiz_context(tmp_path, "both")
+    first.config = replace(
+        first.config,
+        update_files=True,
+        conflict_handling="rename",
+    )
+    first.root_node, first_node = versioned_quiz_tree(QUIZ_HTML)
+    html_path = tmp_path / "26ss" / "Course" / "General" / "My Quiz, Versuch 1.html"
+    pdf_path = html_path.with_suffix(".pdf")
+    html_path.parent.mkdir(parents=True)
+    snapshot = quiz.build_quiz_snapshot(QUIZ_HTML, first.session, QUIZ_URL)
+    legacy_snapshot = snapshot.replace(
+        "</body>",
+        '<input type="hidden" name="sesskey" value="expired-secret"></body>',
+    )
+    assert legacy_snapshot != snapshot
+    html_path.write_text(legacy_snapshot, encoding="utf-8")
+    pdf_path.write_bytes(b"%PDF-1.4 existing quiz")
+    monkeypatch.setattr(
+        quiz,
+        "render_quiz_pdf",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError),
+    )
+
+    downloader.download_node_tree(first, first.root_node)
+    course_cache.cache_root_node(first)
+
+    assert first.stats.unchanged == 2
+    assert first.stats.updated == 0
+    assert first_node.artifact_hashes == {
+        "html": hashlib.sha256(legacy_snapshot.encode("utf-8")).hexdigest()
+    }
+    assert html_path.read_text(encoding="utf-8") == legacy_snapshot
+    assert pdf_path.read_bytes() == b"%PDF-1.4 existing quiz"
+    assert list(html_path.parent.glob("*.syncconflict.*")) == []
+    first_output = capsys.readouterr().out
+    assert "Downloading" not in first_output
+    assert "Rendering" not in first_output
+
+    second = quiz_context(tmp_path, "both")
+    second.root_node, _ = versioned_quiz_tree(QUIZ_HTML)
+    downloader.download_node_tree(second, second.root_node)
+
+    assert second.stats.unchanged == 2
+    assert second.session.calls == []
+    second_output = capsys.readouterr().out
+    assert "Downloading" not in second_output
+    assert "Rendering" not in second_output
 
 
 def test_changed_quiz_review_replaces_an_unmodified_snapshot(tmp_path):

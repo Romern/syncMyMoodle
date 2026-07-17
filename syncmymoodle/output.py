@@ -28,7 +28,7 @@ from rich.progress import (
 )
 from rich.text import Text
 
-from syncmymoodle.outcomes import RunStatistics
+from syncmymoodle.outcomes import RemovedContent, RunStatistics
 
 ColorMode = Literal["auto", "always", "never"]
 COLOR_MODES: tuple[ColorMode, ...] = ("auto", "always", "never")
@@ -740,6 +740,23 @@ class TerminalOutput:
                 line.append(f": {safe_terminal_text(item.item)} - ")
                 line.append(safe_terminal_text(item.reason), style="yellow")
                 self.console.print(line, soft_wrap=True)
+
+    def removed_content(self, items: Sequence[RemovedContent]) -> None:
+        """Report remote removals without implying that local files were deleted."""
+        count = len(items)
+        noun = "item" if count == 1 else "items"
+        self.print(
+            f"No longer present in Moodle ({count} {noun}; local files kept):",
+            style="yellow",
+        )
+        for item in items:
+            line = Text("  ")
+            line.append(safe_terminal_text(item.course), style="cyan")
+            line.append(f": {safe_terminal_text(item.old_path)}")
+            line.append(" [remote: ", style="magenta")
+            line.append(safe_terminal_text(item.remote_identity))
+            line.append("]", style="magenta")
+            self.console.print(line, soft_wrap=True)
 
     def transfer(
         self,

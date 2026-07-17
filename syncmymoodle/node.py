@@ -313,3 +313,25 @@ class Node:
             ret.insert(0, cur.name)
             cur = cur.parent
         return ret
+
+
+def match_equivalent_child(parent: Node | None, child: Node) -> Node | None:
+    """Find the structurally equivalent child below ``parent``, if any."""
+    if parent is None:
+        return None
+    candidates = [
+        candidate
+        for candidate in parent.children
+        if candidate.name == child.name and candidate.type == child.type
+    ]
+    if not candidates:
+        return None
+
+    for attr in ("url", "name_clash_id", "id"):
+        child_value = getattr(child, attr)
+        if child_value is None:
+            continue
+        for candidate in candidates:
+            if getattr(candidate, attr) == child_value:
+                return candidate
+    return candidates[0]

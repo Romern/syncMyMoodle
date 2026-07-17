@@ -1,12 +1,20 @@
+import logging
+
 import pytest
 
-from syncmymoodle import course_cache, links
+from syncmymoodle import course_cache, downloader, links
 from syncmymoodle.constants import LINKED_PAGE_MAX_BYTES
 from syncmymoodle.context import MoodleAccount
 from syncmymoodle.moodle_tokens import MoodleTokens
-from syncmymoodle.node import Node
+from syncmymoodle.node import Node, RemoteMarkerKind
 
-from .helpers import FakeResponse, FakeSession, make_context, two_course_tree
+from .helpers import (
+    FakeResponse,
+    FakeSession,
+    make_context,
+    node_path,
+    two_course_tree,
+)
 
 LINK_URL = "https://links.example.test/overview"
 YOUTUBE_ONE = "https://youtu.be/abcdefghijk"
@@ -168,6 +176,29 @@ def test_cached_html_without_validators_is_fetched_without_a_head(tmp_path):
     assert _youtube_ids(section) == ["abcdefghijk"]
 
 
+def test_cached_html_resource_error_reuses_previous_page(tmp_path):
+    _seed_html(tmp_path, {"ETag": '"page-v1"'})
+    ctx, _, section = _context(tmp_path)
+    session = FakeSession()
+    session.add("GET", LINK_URL, FakeResponse(status_code=403))
+    ctx.session = session
+
+    links.scan_for_links(ctx, LINK_URL, section, 101, single=True)
+    course_cache.cache_root_node(ctx)
+
+    assert session.calls == [("GET", LINK_URL)]
+    assert _youtube_ids(section) == ["abcdefghijk"]
+    assert ctx.stats.failed == 0
+    assert ctx.incomplete_course_ids == set()
+    assert ctx.inventory_filtered_course_ids == {101}
+    assert LINK_URL in ctx.linked_resources_by_course["101"]
+
+    reloaded, reloaded_course, _ = _context(tmp_path)
+    cached_root = course_cache.get_course_cache_root(reloaded, reloaded_course)
+    assert cached_root is not None
+    assert _youtube_ids(cached_root.children[0]) == ["abcdefghijk"]
+
+
 def test_identical_links_are_requested_once_per_run(tmp_path):
     ctx, course, first_section = _context(tmp_path)
     second_section = course.add_child("More", 202, "Section")
@@ -230,6 +261,97 @@ def test_failed_link_result_marks_each_course_and_preserves_both_caches(tmp_path
     assert {
         course_id: path.read_bytes() for course_id, path in cached_files.items()
     } == cached_bytes
+
+
+def test_resource_error_allows_unrelated_course_cache_progress(
+    tmp_path,
+    caplog,
+):
+    current_url = "https://files.example.test/current.pdf"
+    current_body = b"current linked file"
+    config = {
+        "downloads.update_files": True,
+        "downloads.conflict_handling": "rename",
+    }
+
+    def add_current_link(section):
+        return section.add_download_child(
+            "Current link",
+            "current-link",
+            "Linked file",
+            url=current_url,
+            etag='"current-v1"',
+            etag_kind=RemoteMarkerKind.OPAQUE,
+        )
+
+    seeded, seeded_course, seeded_section = _context(tmp_path)
+    cached_link = seeded_section.add_download_child(
+        "Previously discovered link",
+        "old-link",
+        "Linked file",
+        url="https://files.example.test/previous.pdf",
+    )
+    cached_link.mark_handled()
+    course_cache.cache_root_node(seeded)
+    cache_path = course_cache.course_cache_path(seeded, seeded_course)
+    cached_bytes = cache_path.read_bytes()
+
+    ctx, _, section = _context(tmp_path, extra_config=config)
+    assert ctx.linked_resources_by_course.get("101", {}) == {}
+    session = FakeSession()
+    session.add("HEAD", LINK_URL, FakeResponse(status_code=403))
+    session.add("GET", LINK_URL, FakeResponse(status_code=403))
+    session.add("GET", current_url, FakeResponse(content=current_body))
+    ctx.session = session
+    caplog.set_level(logging.WARNING, logger="syncmymoodle.links")
+
+    links.scan_for_links(ctx, LINK_URL, section, 101, single=True)
+    add_current_link(section)
+    downloader.download_node_tree(ctx, ctx.root_node)
+    course_cache.cache_root_node(ctx)
+
+    assert session.calls == [
+        ("HEAD", LINK_URL),
+        ("GET", LINK_URL),
+        ("GET", current_url),
+    ]
+    assert ctx.stats.downloaded == 1
+    assert ctx.stats.failed == 0
+    assert ctx.incomplete_course_ids == set()
+    assert ctx.inventory_filtered_course_ids == {101}
+    assert cache_path.read_bytes() != cached_bytes
+    assert caplog.messages == []
+
+    reloaded, reloaded_course, reloaded_section = _context(
+        tmp_path,
+        extra_config=config,
+    )
+    cached_root = course_cache.get_course_cache_root(reloaded, reloaded_course)
+    assert cached_root is not None
+    assert [child.name for child in cached_root.children[0].children] == [
+        "Current link"
+    ]
+    second_session = FakeSession()
+    second_session.add("HEAD", LINK_URL, FakeResponse(status_code=403))
+    second_session.add("GET", LINK_URL, FakeResponse(status_code=403))
+    reloaded.session = second_session
+
+    links.scan_for_links(
+        reloaded,
+        LINK_URL,
+        reloaded_section,
+        101,
+        single=True,
+    )
+    reloaded_link = add_current_link(reloaded_section)
+    downloader.download_node_tree(reloaded, reloaded.root_node)
+
+    artifact_path = node_path(reloaded, reloaded_link)
+    assert reloaded.stats.unchanged == 1
+    assert reloaded.stats.downloaded == 0
+    assert artifact_path.read_bytes() == current_body
+    assert list(artifact_path.parent.glob("*.syncconflict.*")) == []
+    assert second_session.calls == [("HEAD", LINK_URL), ("GET", LINK_URL)]
 
 
 def test_reused_link_result_obeys_per_course_domain_filter(tmp_path):

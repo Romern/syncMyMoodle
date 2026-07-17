@@ -1,9 +1,10 @@
 """Small helpers for interpreting HTTP responses and fetched pages."""
 
+import hashlib
 import logging
 import re
 import urllib.parse
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from enum import Enum
 from io import BytesIO
@@ -32,18 +33,48 @@ _SENSITIVE_QUERY_PARAMETER_NAMES = frozenset(
     {
         "access_token",
         "api_key",
+        "awsaccesskeyid",
+        "googleaccessid",
         "key",
+        "key-pair-id",
         "oauth_signature",
         "passport",
         "password",
+        "policy",
         "private_token",
         "privatetoken",
         "samlresponse",
         "sesskey",
         "signature",
+        "sig",
         "token",
         "wstoken",
+        "x-amz-credential",
+        "x-amz-security-token",
+        "x-amz-signature",
+        "x-goog-credential",
+        "x-goog-security-token",
+        "x-goog-signature",
     }
+)
+_ROTATING_SIGNED_QUERY_PARAMETER_NAMES = frozenset(
+    {
+        "expires",
+        "oauth_signature",
+        "se",
+        "sig",
+        "signature",
+        "st",
+        "x-amz-date",
+        "x-amz-expires",
+        "x-amz-signature",
+        "x-goog-date",
+        "x-goog-expires",
+        "x-goog-signature",
+    }
+)
+_REMOTE_IDENTITY_VOLATILE_QUERY_PARAMETER_NAMES = (
+    _SENSITIVE_QUERY_PARAMETER_NAMES | _ROTATING_SIGNED_QUERY_PARAMETER_NAMES
 )
 _QUERY_PARAMETER_RE = re.compile(r"([?&])([^=&#\s'\"]+)=([^&#\s'\"]*)")
 _URL_USERINFO_RE = re.compile(r"(\bhttps?://)[^/?#\s'\"@]+@", re.IGNORECASE)
@@ -143,6 +174,63 @@ def redact_url_secrets(value: Any) -> str:
 
     redacted = _URL_USERINFO_RE.sub(r"\1[REDACTED]@", str(value))
     return _QUERY_PARAMETER_RE.sub(redact_parameter, redacted)
+
+
+def canonical_remote_url(value: str) -> tuple[str, str]:
+    """Return a private comparison URL and a separately redacted display URL."""
+    display_url = redact_url_secrets(value).partition("#")[0]
+    try:
+        parsed = urllib.parse.urlsplit(display_url)
+        stable_query = urllib.parse.urlencode(
+            sorted(
+                (name, query_value)
+                for name, query_value in urllib.parse.parse_qsl(
+                    parsed.query,
+                    keep_blank_values=True,
+                )
+                if name.casefold()
+                not in _REMOTE_IDENTITY_VOLATILE_QUERY_PARAMETER_NAMES
+            )
+        )
+        identity_url = urllib.parse.urlunsplit(
+            (
+                parsed.scheme.casefold(),
+                parsed.netloc.casefold(),
+                parsed.path,
+                stable_query,
+                "",
+            )
+        )
+    except ValueError:
+        identity_url = display_url.partition("#")[0]
+    return identity_url, display_url
+
+
+def remote_request_scope_fingerprint(
+    value: str,
+    headers: Mapping[str, str] | None,
+) -> str:
+    """Hash request credentials that can change the resource representation."""
+    normalized_headers = sorted(
+        (name.casefold(), header_value)
+        for name, header_value in (headers or {}).items()
+    )
+    try:
+        parsed = urllib.parse.urlsplit(value)
+        userinfo, separator, _ = parsed.netloc.rpartition("@")
+        query = sorted(
+            (name.casefold(), query_value)
+            for name, query_value in urllib.parse.parse_qsl(
+                parsed.query,
+                keep_blank_values=True,
+            )
+            if name.casefold() not in _ROTATING_SIGNED_QUERY_PARAMETER_NAMES
+        )
+        url_scope = (userinfo if separator else "", query)
+    except ValueError:
+        url_scope = (value, [])
+    raw_scope = repr((normalized_headers, url_scope)).encode()
+    return hashlib.sha256(raw_scope).hexdigest()
 
 
 def safe_request_error(error: requests.RequestException) -> str:

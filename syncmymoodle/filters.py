@@ -98,6 +98,7 @@ def should_skip_url(
     context: str = "link",
     *,
     course_id: Any = None,
+    inventory: bool = True,
 ) -> bool:
     if not url:
         return False
@@ -114,6 +115,8 @@ def should_skip_url(
             f"{context}: {redact_url_secrets(url)}",
             f"matches {redact_url_secrets(pattern)!r}",
         )
+        if inventory:
+            ctx.mark_course_inventory_filtered(course_id)
         return True
 
     allowed_domains = pattern_list(config.allowed_domains, course_id=course_id)
@@ -129,6 +132,8 @@ def should_skip_url(
                     f"{context}: {redact_url_secrets(url)}",
                     f"host {parsed_url.hostname or parsed_url.netloc!r} is not allowed",
                 )
+                if inventory:
+                    ctx.mark_course_inventory_filtered(course_id)
                 return True
 
     return False
@@ -140,8 +145,15 @@ def require_url_allowed(
     context: str,
     *,
     course_id: Any = None,
+    inventory: bool = True,
 ) -> bool:
-    if should_skip_url(ctx, url, context, course_id=course_id):
+    if should_skip_url(
+        ctx,
+        url,
+        context,
+        course_id=course_id,
+        inventory=inventory,
+    ):
         raise FilteredRequestError(
             f"request excluded by configured filters: {redact_url_secrets(url)}"
         )
@@ -167,6 +179,7 @@ def should_skip_section(
             f"{section.get('name')} ({section.get('id')}) in course {course_id}",
             f"matches {pattern!r}",
         )
+        ctx.mark_course_inventory_filtered(course_id)
         return True
     return False
 
@@ -204,5 +217,6 @@ def should_skip_module(
             f"{module_name} ({module_id}) in course {course_id}",
             f"matches {redact_url_secrets(pattern)!r}",
         )
+        ctx.mark_course_inventory_filtered(course_id)
         return True
     return False
