@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "syncMyMoodle"
-version = "0.5.0"
+version = "1.0.0-rc.1"
 description = "Synchronization client for RWTH Moodle"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -17,7 +17,7 @@ keywords = ["moodle", "sync", "rwth", "cli"]
 classifiers = [
   "Programming Language :: Python :: 3",
   "Operating System :: OS Independent",
-  "Development Status :: 5 - Production/Stable"
+  "Development Status :: 4 - Beta"
 ]
 scripts = { syncmymoodle = "syncmymoodle.cli:main" }
 

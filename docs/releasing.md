@@ -52,6 +52,7 @@ Supported tag formats include:
 ```
 
 The tag must match the version in `pyproject.toml`.
+Prerelease versions are marked as prereleases on GitHub automatically.
 
 When the workflow runs, it will:
 
