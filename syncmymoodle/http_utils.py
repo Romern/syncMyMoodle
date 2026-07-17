@@ -45,12 +45,8 @@ _SENSITIVE_QUERY_PARAMETER_NAMES = frozenset(
         "wstoken",
     }
 )
-_SENSITIVE_QUERY_RE = re.compile(
-    r"([?&](?:"
-    + "|".join(re.escape(name) for name in _SENSITIVE_QUERY_PARAMETER_NAMES)
-    + r")=)[^&#\s'\"]*",
-    re.IGNORECASE,
-)
+_QUERY_PARAMETER_RE = re.compile(r"([?&])([^=&#\s'\"]+)=([^&#\s'\"]*)")
+_URL_USERINFO_RE = re.compile(r"(\bhttps?://)[^/?#\s'\"@]+@", re.IGNORECASE)
 SERVICE_OUTAGE_THRESHOLD = 3
 
 
@@ -136,8 +132,17 @@ class _ByteWriter(Protocol):
 
 
 def redact_url_secrets(value: Any) -> str:
-    """Redact credential-like query values from a URL or error message."""
-    return _SENSITIVE_QUERY_RE.sub(r"\1[REDACTED]", str(value))
+    """Redact URL userinfo and credential-like query values."""
+
+    def redact_parameter(match: re.Match[str]) -> str:
+        encoded_name = match.group(2)
+        name = urllib.parse.unquote_plus(encoded_name).casefold()
+        if name not in _SENSITIVE_QUERY_PARAMETER_NAMES:
+            return match.group(0)
+        return f"{match.group(1)}{encoded_name}=[REDACTED]"
+
+    redacted = _URL_USERINFO_RE.sub(r"\1[REDACTED]@", str(value))
+    return _QUERY_PARAMETER_RE.sub(redact_parameter, redacted)
 
 
 def safe_request_error(error: requests.RequestException) -> str:
@@ -223,8 +228,9 @@ def request_following_safe_redirects(
     url_allowed: Callable[[str], bool],
     **kwargs: Any,
 ) -> Any:
-    """Make a GET/HEAD request while validating each redirect before following it."""
+    """Make a request while validating each redirect before following it."""
     current_url = url
+    current_method = method.upper()
     request_kwargs = dict(kwargs)
     request_headers = dict(request_kwargs.get("headers") or {})
     for _ in range(11):
@@ -235,7 +241,7 @@ def request_following_safe_redirects(
             )
         try:
             response = session.request(
-                method,
+                current_method,
                 current_url,
                 allow_redirects=False,
                 **request_kwargs,
@@ -264,6 +270,21 @@ def request_following_safe_redirects(
                 if name.lower() not in _SENSITIVE_REDIRECT_HEADERS
             }
             request_kwargs["headers"] = request_headers
+        switch_to_get = (response.status_code == 303 and current_method != "HEAD") or (
+            response.status_code in {301, 302} and current_method == "POST"
+        )
+        if switch_to_get:
+            current_method = "GET"
+            for name in ("data", "files", "json"):
+                request_kwargs.pop(name, None)
+            request_headers = {
+                name: value
+                for name, value in request_headers.items()
+                if name.lower()
+                not in {"content-length", "content-type", "transfer-encoding"}
+            }
+            if "headers" in request_kwargs:
+                request_kwargs["headers"] = request_headers
         request_kwargs.pop("params", None)
         current_url = next_url
 

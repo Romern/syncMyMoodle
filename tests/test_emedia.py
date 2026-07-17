@@ -139,6 +139,28 @@ def test_manifest_revision_ignores_generated_session_values():
     assert first != changed
 
 
+def test_unusable_manifest_does_not_fabricate_a_revision_marker(monkeypatch):
+    api_session = FakeSession()
+    api_session.add("GET", MANIFEST_URL, FakeResponse(status_code=503))
+    monkeypatch.setattr(emedia.shutil, "which", lambda executable: f"/{executable}")
+    ctx = make_context()
+    ctx.emedia_api_session = api_session
+    ctx.emedia_video_cache[540] = emedia.EmediaVideo(540, "API title", PLAYLIST_URL)
+    first_parent = Node("First", 1, "Section", None)
+    second_parent = Node("Second", 2, "Section", None)
+    link = "https://emedia-medizin.rwth-aachen.de/web/veira_fe/#/watch/540"
+
+    emedia.add_video_node(ctx, first_parent, link)
+    emedia.add_video_node(ctx, second_parent, link)
+
+    assert api_session.calls == [("GET", MANIFEST_URL)]
+    assert ctx.emedia_revision_cache[PLAYLIST_URL] is None
+    assert first_parent.children[0].etag is None
+    assert first_parent.children[0].etag_kind is None
+    assert second_parent.children[0].etag is None
+    assert second_parent.children[0].etag_kind is None
+
+
 def test_emedia_without_ffmpeg_warns_once_and_uses_ts_extension(monkeypatch, caplog):
     monkeypatch.setattr(emedia.shutil, "which", lambda executable: None)
     ctx = make_context()

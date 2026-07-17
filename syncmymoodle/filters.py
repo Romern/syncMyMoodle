@@ -96,13 +96,17 @@ def should_skip_url(
     ctx: SyncContext,
     url: str | None,
     context: str = "link",
+    *,
+    course_id: Any = None,
 ) -> bool:
     if not url:
         return False
 
     config = ctx.config
     url = str(url).replace("&amp;", "&")
-    pattern = matching_pattern([url], pattern_list(config.exclude_links))
+    pattern = matching_pattern(
+        [url], pattern_list(config.exclude_links, course_id=course_id)
+    )
     if pattern is not None:
         ctx.record_filtered(
             "filters.exclude_links",
@@ -112,7 +116,7 @@ def should_skip_url(
         )
         return True
 
-    allowed_domains = pattern_list(config.allowed_domains)
+    allowed_domains = pattern_list(config.allowed_domains, course_id=course_id)
     if allowed_domains:
         parsed_url = urllib.parse.urlparse(url)
         if parsed_url.scheme in {"http", "https"} and parsed_url.netloc:
@@ -130,8 +134,14 @@ def should_skip_url(
     return False
 
 
-def require_url_allowed(ctx: SyncContext, url: str, context: str) -> bool:
-    if should_skip_url(ctx, url, context):
+def require_url_allowed(
+    ctx: SyncContext,
+    url: str,
+    context: str,
+    *,
+    course_id: Any = None,
+) -> bool:
+    if should_skip_url(ctx, url, context, course_id=course_id):
         raise FilteredRequestError(
             f"request excluded by configured filters: {redact_url_secrets(url)}"
         )

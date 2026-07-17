@@ -142,7 +142,7 @@ class SyncContext:
         tuple[str | None, str], tuple[tuple[str, str], ...] | None
     ] = field(default_factory=dict)
     emedia_video_cache: dict[int, EmediaVideo | None] = field(default_factory=dict)
-    emedia_revision_cache: dict[str, str] = field(default_factory=dict)
+    emedia_revision_cache: dict[str, str | None] = field(default_factory=dict)
     emedia_output_suffix: str | None = None
     downloaded_paths: set[Path] = field(default_factory=set)
     filtered_items: set[FilteredItem] = field(default_factory=set)
@@ -158,6 +158,10 @@ class SyncContext:
     )
     seen_linked_resources: set[tuple[str, str]] = field(default_factory=set)
     incomplete_course_ids: set[int] = field(default_factory=set)
+    legacy_course_cache_paths: dict[int, list[Path]] | None = field(
+        default=None,
+        repr=False,
+    )
 
     def __post_init__(self) -> None:
         self.auth = AuthState.from_config(self.config)

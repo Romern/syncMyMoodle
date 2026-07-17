@@ -2,4 +2,4 @@ Semester | 26ss |  |  |
 Course | 26ss/(UE) Software Quality |  |  |
 Section | 26ss/(UE) Software Quality/Assignments |  |  |
 Assignment | 26ss/(UE) Software Quality/Assignments/Video reflection |  |  |
-Opencast | 26ss/(UE) Software Quality/Assignments/Video reflection/Video reflection (presentation) | https://video.example.test/11111111-2222-4333-8444-555555555555/presentation.mp4 |  | 11111111111111111111111111111111
+Opencast | 26ss/(UE) Software Quality/Assignments/Video reflection/Video reflection (presentation).mp4 | https://video.example.test/11111111-2222-4333-8444-555555555555/presentation.mp4 |  | 11111111111111111111111111111111

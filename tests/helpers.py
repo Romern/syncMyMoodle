@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-import os
 from collections import Counter
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -17,12 +16,6 @@ from syncmymoodle.pathing import get_sanitized_node_path
 
 FIXTURES = Path(__file__).parent / "fixtures"
 SNAPSHOTS = Path(__file__).parent / "snapshots"
-
-# Set SMM_UPDATE_SNAPSHOTS=1 to rewrite snapshot files from the actual rows
-# instead of asserting against them. Use this after an intentional change to
-# the sync behavior, then review the resulting snapshot diff.
-UPDATE_SNAPSHOTS = os.environ.get("SMM_UPDATE_SNAPSHOTS") not in (None, "", "0")
-
 
 TEST_CONFIG_OVERRIDES = {
     "modules.quiz": "off",
@@ -50,6 +43,7 @@ class FakeKeyring:
 class FakeResponse:
     text: str = ""
     content: bytes | None = None
+    encoding: str | None = None
     status_code: int = 200
     headers: dict[str, str] = field(default_factory=dict)
     url: str | None = None
@@ -63,7 +57,14 @@ class FakeResponse:
 
     def iter_content(self, block_size: int):
         del block_size
-        yield from self.chunks or []
+        if self.chunks is not None:
+            yield from self.chunks
+            return
+        body = self.content
+        if body is None and self.text:
+            body = self.text.encode(self.encoding or "utf-8")
+        if body:
+            yield body
 
     def close(self) -> None:
         pass
@@ -131,14 +132,13 @@ def load_snapshot(name: str) -> list[str]:
     ]
 
 
-def assert_snapshot(name: str, actual: list[str]) -> None:
+def assert_snapshot(name: str, actual: list[str], *, update: bool = False) -> None:
     """Compare ``actual`` against a stored snapshot.
 
-    When ``SMM_UPDATE_SNAPSHOTS`` is set the snapshot is (re)written from
-    ``actual`` instead of asserted, so regenerating after an intentional change
-    is a one-liner rather than a hand-edit of the pipe-delimited files.
+    Passing the explicit pytest ``--update-snapshots`` option rewrites the
+    snapshot from ``actual``. Normal and CI runs always assert by default.
     """
-    if UPDATE_SNAPSHOTS:
+    if update:
         path = SNAPSHOTS / name
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text("\n".join(actual) + "\n", encoding="utf-8")

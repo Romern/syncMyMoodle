@@ -20,12 +20,15 @@ from syncmymoodle.constants import (
 from syncmymoodle.context import BrowserSessionUnavailable, SyncContext
 from syncmymoodle.http_utils import (
     HttpFailureKind,
+    RequestPolicyError,
     classify_http_failure,
     normalized_http_origin,
     parse_html,
     record_service_failure,
     redact_url_secrets,
+    request_following_safe_redirects,
     safe_request_error,
+    same_origin,
 )
 from syncmymoodle.node import DownloadKind, Node, RemoteMarkerKind
 
@@ -34,6 +37,7 @@ logger = logging.getLogger(__name__)
 OPENCAST_LTI_URL = f"{OPENCAST_URL}/lti"
 OPENCAST_SEARCH_URL = f"{OPENCAST_URL}/search/episode.json"
 OPENCAST_SERIES_PAGE_SIZE = 100
+OPENCAST_EPISODES_CACHE_FORMAT = "syncmymoodle.opencast-episodes.v1"
 
 
 @dataclass(frozen=True)
@@ -86,9 +90,8 @@ def _track_node_name(
         str(name) if name else urllib.parse.urlparse(track.url).path.rsplit("/", 1)[-1]
     )
     base_name = base_name or flavor_label
-    extension = base_name[-4:] if base_name.casefold().endswith(".mp4") else ""
-    stem = base_name[: -len(extension)] if extension else base_name
-    return f"{stem} ({flavor_label}){extension}"
+    stem = base_name[:-4] if base_name.casefold().endswith(".mp4") else base_name
+    return f"{stem} ({flavor_label}).mp4"
 
 
 def add_episode_nodes(
@@ -110,9 +113,14 @@ def add_episode_nodes(
         return
 
     for track in tracks:
-        if filters.should_skip_url(ctx, track.url, "Opencast video URL"):
+        if filters.should_skip_url(
+            ctx,
+            track.url,
+            "Opencast video URL",
+            course_id=course_id,
+        ):
             continue
-        parent_node.add_child(
+        parent_node.add_download_child(
             _track_node_name(name, track),
             episode_id,
             "Opencast",
@@ -187,6 +195,40 @@ def extract_lti_form_data(soup: Any) -> dict[str, Any]:
     }
 
 
+def lti_endpoint_allowed(endpoint: Any) -> bool:
+    """Return whether an LTI payload may be posted to the Opencast launch URL."""
+    if not isinstance(endpoint, str) or endpoint != endpoint.strip():
+        return False
+    try:
+        parsed = urllib.parse.urlsplit(endpoint)
+        expected = urllib.parse.urlsplit(OPENCAST_LTI_URL)
+    except ValueError:
+        return False
+    return (
+        parsed.username is None
+        and parsed.password is None
+        and same_origin(endpoint, OPENCAST_URL)
+        and parsed.path in {expected.path, f"{expected.path}/"}
+        and not parsed.query
+        and not parsed.fragment
+    )
+
+
+def opencast_redirect_url_allowed(url: Any) -> bool:
+    """Return whether an authenticated Opencast redirect stays on its origin."""
+    if not isinstance(url, str) or url != url.strip():
+        return False
+    try:
+        parsed = urllib.parse.urlsplit(url)
+    except ValueError:
+        return False
+    return (
+        parsed.username is None
+        and parsed.password is None
+        and same_origin(url, OPENCAST_URL)
+    )
+
+
 def submit_lti_form(
     ctx: SyncContext,
     engage_data: dict[str, Any],
@@ -201,13 +243,27 @@ def submit_lti_form(
     if not engage_data:
         log.warning("Opencast: missing LTI form fields for %s", context)
         return False
+    if not lti_endpoint_allowed(endpoint):
+        log.warning("Opencast: refusing unexpected LTI endpoint for %s", context)
+        return False
 
     try:
-        response = ctx.require_session().post(
+        response = request_following_safe_redirects(
+            ctx.require_session(),
+            "POST",
             endpoint,
+            opencast_redirect_url_allowed,
             data=engage_data,
             timeout=HTTP_TIMEOUT_SECONDS,
         )
+    except RequestPolicyError as error:
+        ctx.service_outages.record_available(OPENCAST_URL)
+        log.warning(
+            "Opencast: refusing unsafe LTI redirect for %s: %s",
+            context,
+            safe_request_error(error),
+        )
+        return False
     except requests.RequestException as error:
         log_backend_issue(
             ctx,
@@ -527,6 +583,54 @@ def episode_from_cache_data(value: Any) -> OpencastEpisode | None:
     )
 
 
+def _cached_episode_entries(value: Any) -> dict[str, OpencastEpisode]:
+    entries: dict[str, OpencastEpisode] = {}
+    if (
+        not isinstance(value, dict)
+        or value.get("format") != OPENCAST_EPISODES_CACHE_FORMAT
+        or not isinstance(value.get("episodes"), dict)
+    ):
+        return entries
+    for episode_id, raw_episode in value["episodes"].items():
+        if not isinstance(episode_id, str) or not episode_id:
+            continue
+        episode = episode_from_cache_data(raw_episode)
+        if episode is not None:
+            entries[episode_id] = episode
+    return entries
+
+
+def restore_cached_episodes(ctx: SyncContext, course_id: Any, value: Any) -> None:
+    """Restore persisted episodes into the provider's runtime cache."""
+    course_key = _course_id_key(course_id)
+    for episode_id, episode in _cached_episode_entries(value).items():
+        ctx.opencast_episode_cache.setdefault((course_key, episode_id), episode)
+
+
+def cached_episodes_data(ctx: SyncContext, course_id: Any) -> dict[str, Any] | None:
+    """Snapshot episodes discovered for one course during this run."""
+    course_key = _course_id_key(course_id)
+    entries = {
+        episode_id: episode
+        for (
+            cached_course_id,
+            episode_id,
+        ), episode in ctx.opencast_episode_cache.items()
+        if cached_course_id == course_key
+        and course_key is not None
+        and (course_key, episode_id) in ctx.opencast_seen_episodes
+    }
+    if not entries:
+        return None
+    return {
+        "format": OPENCAST_EPISODES_CACHE_FORMAT,
+        "episodes": {
+            episode_id: episode_cache_data(episode)
+            for episode_id, episode in sorted(entries.items())
+        },
+    }
+
+
 def infer_checksum_type(checksum: str) -> str | None:
     for checksum_type, expected_length in CHECKSUM_LENGTHS_BY_ALGO.items():
         if len(checksum) == expected_length:
@@ -719,10 +823,16 @@ def _series_id_from_entries(
 
 
 def _entries_include_media(entries: list[Any]) -> bool:
-    return any(
-        (mediapackage := _mediapackage(entry)) is not None and "media" in mediapackage
-        for entry in entries
-    )
+    for entry in entries:
+        mediapackage = _mediapackage(entry)
+        media = mediapackage.get("media") if mediapackage is not None else None
+        tracks = media.get("track") if isinstance(media, dict) else None
+        if isinstance(tracks, dict) or (
+            isinstance(tracks, list)
+            and all(isinstance(track, dict) for track in tracks)
+        ):
+            return True
+    return False
 
 
 def _cache_episode_entries(
@@ -871,7 +981,6 @@ def list_series_episodes(
             log,
         )
         if page is None:
-            _cache_series_entries(ctx, course_id, series_id, entries, False)
             ctx.opencast_series_cache[cache_key] = None
             return None
 
@@ -891,7 +1000,10 @@ def list_series_episodes(
             break
         offset += OPENCAST_SERIES_PAGE_SIZE
 
-    _cache_series_entries(ctx, course_id, series_id, entries, complete)
+    if not complete:
+        ctx.opencast_series_cache[cache_key] = None
+        return None
+    _cache_series_entries(ctx, course_id, series_id, entries, True)
     result = tuple((episode_id, title) for episode_id, title, _ in entries)
     ctx.opencast_series_cache[cache_key] = result
     return result

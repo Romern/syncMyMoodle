@@ -1,8 +1,8 @@
 Semester | 26ss |  |  |
 Course | 26ss/(VO) Data Science |  |  |
 Section | 26ss/(VO) Data Science/Opencast |  |  |
-Opencast | 26ss/(VO) Data Science/Opencast/Single recording (presentation) | https://video.example.test/opencast/presentation-high.mp4 |  | 44444444444444444444444444444444
-Opencast | 26ss/(VO) Data Science/Opencast/Single recording (presenter) | https://video.example.test/opencast/single-high.mp4 |  | 22222222222222222222222222222222
+Opencast | 26ss/(VO) Data Science/Opencast/Single recording (presentation).mp4 | https://video.example.test/opencast/presentation-high.mp4 |  | 44444444444444444444444444444444
+Opencast | 26ss/(VO) Data Science/Opencast/Single recording (presenter).mp4 | https://video.example.test/opencast/single-high.mp4 |  | 22222222222222222222222222222222
 Section | 26ss/(VO) Data Science/Series recordings |  |  |
-Opencast | 26ss/(VO) Data Science/Series recordings/Series episode A (presenter) | https://video.example.test/opencast/series-a.mp4 |  | aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
-Opencast | 26ss/(VO) Data Science/Series recordings/Series episode B (presenter) | https://video.example.test/opencast/series-b.mp4 |  | bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+Opencast | 26ss/(VO) Data Science/Series recordings/Series episode A (presenter).mp4 | https://video.example.test/opencast/series-a.mp4 |  | aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+Opencast | 26ss/(VO) Data Science/Series recordings/Series episode B (presenter).mp4 | https://video.example.test/opencast/series-b.mp4 |  | bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb

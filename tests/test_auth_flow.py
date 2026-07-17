@@ -211,7 +211,7 @@ def test_setup_token_file_fallback_prompt_is_clear(tmp_path, monkeypatch, capsys
 
     assert (
         "File for securely storing Moodle tokens "
-        f"[{cli.pathing.user_config_dir() / 'moodle-tokens.env'}]: "
+        f"[{cli.pathing.user_config_dir() / 'moodle-tokens.env'}]:"
         in capsys.readouterr().out
     )
     assert config == {
@@ -904,10 +904,17 @@ def test_auth_forget_still_removes_session_when_token_delete_fails(
     assert "keyring is locked" in capsys.readouterr().err
 
 
-def test_normal_sync_uses_valid_stored_token_without_sso(monkeypatch):
+def test_normal_sync_uses_valid_stored_token_without_sso(monkeypatch, tmp_path):
     stored = tokens()
     store = MemoryStore(stored)
-    ctx = SyncContext(Config.from_dict({"auth": {"user": stored.username}}))
+    ctx = SyncContext(
+        Config.from_dict(
+            {
+                "auth": {"user": stored.username},
+                "paths": {"sync_directory": str(tmp_path)},
+            }
+        )
+    )
     calls = []
     token_session = SimpleNamespace(auth="mobile-token-auth")
 
@@ -947,6 +954,7 @@ def test_normal_sync_uses_valid_stored_token_without_sso(monkeypatch):
     assert ctx.moodle_functions == frozenset({cli.moodle_api.MOODLE_UPDATE_FUNCTION})
     assert ctx.moodle_update_watermark == 995
     assert store.writes == []
+    assert (tmp_path / ".syncmymoodle-cache" / "run.lock").is_file()
 
 
 def test_unknown_token_validation_never_logs_in_or_replaces_store(monkeypatch):

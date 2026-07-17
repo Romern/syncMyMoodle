@@ -41,6 +41,7 @@ from syncmymoodle.http_utils import (
     parse_html,
     parse_xml,
     read_capped_body,
+    redact_url_secrets,
     request_following_safe_redirects,
     same_origin,
 )
@@ -170,13 +171,15 @@ class _QuizAssetContext:
                     self.log.info(
                         "Skipping quiz snapshot %s %s because Moodle returned HTTP %s",
                         description,
-                        url,
+                        redact_url_secrets(url),
                         response.status_code,
                     )
                     return None
                 if _content_length_too_large(response):
                     self.log.info(
-                        "Skipping oversized quiz snapshot %s %s", description, url
+                        "Skipping oversized quiz snapshot %s %s",
+                        description,
+                        redact_url_secrets(url),
                     )
                     return None
 
@@ -187,7 +190,7 @@ class _QuizAssetContext:
                     self.log.info(
                         "Skipping quiz snapshot %s %s with content type %s",
                         description,
-                        url,
+                        redact_url_secrets(url),
                         content_type,
                     )
                     return None
@@ -200,12 +203,16 @@ class _QuizAssetContext:
             self.log.info(
                 "Skipping quiz snapshot %s %s because it could not be fetched",
                 description,
-                url,
+                redact_url_secrets(url),
             )
             return None
 
         if body is None:
-            self.log.info("Skipping oversized quiz snapshot %s %s", description, url)
+            self.log.info(
+                "Skipping oversized quiz snapshot %s %s",
+                description,
+                redact_url_secrets(url),
+            )
             return None
 
         self.remaining_bytes -= len(body)
@@ -764,9 +771,9 @@ def _same_quiz_revision(node: Node, old_node: Node | None) -> bool:
 def _known_quiz_artifacts(
     node: Node,
     old_node: Node | None,
-    artifacts: dict[str, Path],
+    baselines: dict[str, storage.FileSnapshot],
 ) -> set[str]:
-    existing = {kind for kind, path in artifacts.items() if path.exists()}
+    existing = {kind for kind, baseline in baselines.items() if baseline.exists}
     if node.etag is None or (old_node is not None and old_node.is_verified):
         return existing
     if old_node is None:
@@ -814,18 +821,24 @@ def _install_quiz_artifact(
     kind: str,
     staged_path: Path,
     target_path: Path,
+    baseline: storage.FileSnapshot,
     rename_local: bool,
     log: logging.Logger,
 ) -> DownloadOutcome:
     existed = target_path.exists()
-    if not storage.install_staged_file(
+    install_result = storage.install_staged_file(
         staged_path,
         target_path,
+        baseline=baseline,
         rename_local=rename_local,
+        target_change_policy=ctx.config.conflict_handling,
         description="the updated quiz artifact",
         log=log,
-    ):
+    )
+    if install_result is not storage.InstallResult.INSTALLED:
         staged_path.unlink(missing_ok=True)
+        if install_result is storage.InstallResult.KEPT_LOCAL:
+            return DownloadOutcome(unchanged=1, cache_verified=False)
         return FAILED_DOWNLOAD
 
     digest = storage.file_sha256(target_path)
@@ -838,17 +851,17 @@ def _install_quiz_artifact(
 
 def _quiz_modified_artifacts(
     old_node: Node | None,
-    artifacts: dict[str, Path],
+    baselines: dict[str, storage.FileSnapshot],
 ) -> set[str]:
     baseline = old_node if old_node is not None and old_node.is_verified else None
     return {
         kind
-        for kind, path in artifacts.items()
-        if path.exists()
+        for kind, snapshot in baselines.items()
+        if snapshot.exists
         and (
             baseline is None
             or baseline.artifact_hashes.get(kind) is None
-            or storage.file_sha256(path) != baseline.artifact_hashes[kind]
+            or snapshot.digest != baseline.artifact_hashes[kind]
         )
     }
 
@@ -891,11 +904,14 @@ def _stage_quiz_snapshot(
     log: logging.Logger,
 ) -> Path | None:
     if node.url is None:
-        log.warning("No token-derived quiz review is available for %s", node.url)
+        log.warning("No token-derived quiz review is available for %s", node.name)
         return None
     review_html = ctx.quiz_review_cache.get(node.url)
     if review_html is None:
-        log.warning("No token-derived quiz review is available for %s", node.url)
+        log.warning(
+            "No token-derived quiz review is available for %s",
+            redact_url_secrets(node.url),
+        )
         return None
     ctx.output.action("Downloading", html_path, "Quiz")
     html_path.parent.mkdir(parents=True, exist_ok=True)
@@ -950,9 +966,9 @@ def _install_prepared_quiz_artifacts(
     pdf_path: Path,
     html_stage: Path | None,
     pdf_stage: Path | None,
+    baselines: dict[str, storage.FileSnapshot],
     *,
     want_html: bool,
-    pdf_needed: bool,
     prepared: bool,
     modified: set[str],
     log: logging.Logger,
@@ -972,6 +988,7 @@ def _install_prepared_quiz_artifacts(
                 "html",
                 html_stage,
                 html_path,
+                baselines["html"],
                 rename_conflicts and "html" in modified,
                 log,
             )
@@ -990,6 +1007,7 @@ def _install_prepared_quiz_artifacts(
                 "pdf",
                 pdf_stage,
                 pdf_path,
+                baselines["pdf"],
                 rename_conflicts and "pdf" in modified,
                 log,
             )
@@ -1047,14 +1065,23 @@ def download_quiz(
         )
         if wanted
     }
+    baselines = {
+        "html": storage.snapshot_file(html_path),
+        "pdf": storage.snapshot_file(pdf_path),
+    }
+    artifact_baselines = {kind: baselines[kind] for kind in artifacts}
     existing = {
-        kind for kind, artifact_path in artifacts.items() if artifact_path.exists()
+        kind for kind, baseline in artifact_baselines.items() if baseline.exists
     }
     _initialize_quiz_artifact_hashes(node, old_node, same_revision)
-    known = _known_quiz_artifacts(node, old_node, artifacts) if same_revision else set()
+    known = (
+        _known_quiz_artifacts(node, old_node, artifact_baselines)
+        if same_revision
+        else set()
+    )
     if same_revision:
         for kind in known:
-            digest = storage.file_sha256(artifacts[kind])
+            digest = artifact_baselines[kind].digest
             if digest is not None:
                 node.artifact_hashes.setdefault(kind, digest)
     if same_revision and len(known) == len(artifacts):
@@ -1063,7 +1090,7 @@ def download_quiz(
     unverified_existing = existing - known if same_revision else set()
     modified = set(unverified_existing)
     if refresh:
-        modified.update(_quiz_modified_artifacts(old_node, artifacts))
+        modified.update(_quiz_modified_artifacts(old_node, artifact_baselines))
     policy_outcome = _quiz_policy_outcome(
         ctx,
         node,
@@ -1109,8 +1136,8 @@ def download_quiz(
             pdf_path,
             html_stage,
             pdf_stage,
+            baselines,
             want_html=want_html,
-            pdf_needed=pdf_needed,
             prepared=prepared,
             modified=modified,
             log=log,

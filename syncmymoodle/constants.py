@@ -7,6 +7,10 @@ INVALID_CHARS = '~"#%*:<>?/\\{|}'
 # Chunk size for streamed HTTP reads.
 DEFAULT_BLOCK_SIZE = 1024
 
+# Maximum HTML body inspected for links. Linked pages are untrusted and may be
+# streamed without a Content-Length, so the limit is enforced while reading.
+LINKED_PAGE_MAX_BYTES = 2 * 1024 * 1024
+
 # Bound every direct HTTP request so an unavailable service cannot hang a run.
 HTTP_TIMEOUT_SECONDS = 15
 

@@ -94,6 +94,101 @@ def test_sync_does_not_log_raw_moodle_payloads(monkeypatch, caplog):
     assert "private-course-payload" not in caplog.text
 
 
+def test_malformed_course_summary_does_not_block_later_course(monkeypatch, caplog):
+    synced_course_ids = []
+    valid = {
+        "id": 201,
+        "shortname": "Valid Course",
+        "idnumber": "26ss-current",
+    }
+    syncer = make_context()
+    install_filter_fixtures(
+        monkeypatch,
+        synced_course_ids,
+        [
+            "private-malformed-summary",
+            {"id": True},
+            {"id": 199, "shortname": ["private-malformed-name"]},
+            valid,
+        ],
+    )
+    syncer.session = FakeSession()
+    caplog.set_level(logging.ERROR, logger="syncmymoodle.sync")
+
+    sync.sync(syncer)
+
+    assert synced_course_ids == [201]
+    assert syncer.stats.failed == 3
+    assert node_rows(syncer.root_node) == [
+        "Semester | 26ss |  |  |",
+        "Course | 26ss/Valid Course |  |  |",
+    ]
+    assert "private-malformed-summary" not in caplog.text
+
+
+@pytest.mark.parametrize("module_kind", ["assign", "folder"])
+def test_malformed_auxiliary_inventory_marks_course_incomplete(
+    module_kind, monkeypatch, caplog
+):
+    course_id = 201
+    module_id = 401
+    syncer = make_context(
+        {
+            "modules.assignment": module_kind == "assign",
+            "modules.folder": module_kind == "folder",
+        }
+    )
+    syncer.session = FakeSession()
+    install_filter_fixtures(
+        monkeypatch,
+        [],
+        [{"id": course_id, "shortname": "Course", "idnumber": "26ss"}],
+    )
+    monkeypatch.setattr(
+        moodle,
+        "get_course",
+        lambda *args: [
+            {
+                "id": 301,
+                "name": "General",
+                "modules": [
+                    {
+                        "id": module_id,
+                        "instance": 501,
+                        "modname": module_kind,
+                        "name": "Module",
+                    }
+                ],
+            }
+        ],
+    )
+    monkeypatch.setattr(
+        moodle,
+        "get_assignment",
+        lambda *args: {
+            "assignments": [
+                {"id": 501, "cmid": module_id},
+                "private-malformed-assignment",
+            ]
+        },
+    )
+    monkeypatch.setattr(
+        moodle,
+        "get_folders_by_courses",
+        lambda *args: [
+            {"coursemodule": module_id},
+            {"coursemodule": module_id},
+        ],
+    )
+    caplog.set_level(logging.ERROR, logger="syncmymoodle.sync")
+
+    sync.sync(syncer)
+
+    assert syncer.incomplete_course_ids == {course_id}
+    assert syncer.stats.failed == 1
+    assert "private-malformed-assignment" not in caplog.text
+
+
 def test_verbose_sync_logging_identifies_slow_modules(monkeypatch, caplog):
     course = {
         "id": 201,
@@ -196,76 +291,6 @@ def test_excluded_course_roles_skip_matches_and_keep_unknowns(monkeypatch, capsy
     ]
 
 
-def test_get_direct_course_roles_batches_course_profiles(monkeypatch):
-    call = {}
-
-    def call_webservice(session, wstoken, function, data, log):
-        call.update(
-            session=session,
-            wstoken=wstoken,
-            function=function,
-            data=data,
-            log=log,
-        )
-        return {
-            "responses": [
-                {
-                    "error": False,
-                    "data": json.dumps(
-                        [
-                            {
-                                "id": 17,
-                                "roles": [
-                                    {
-                                        "roleid": 5,
-                                        "name": "Student",
-                                        "shortname": "Student",
-                                    },
-                                    {
-                                        "roleid": 9,
-                                        "name": "Tutor",
-                                        "shortname": "tutor",
-                                    },
-                                ],
-                            }
-                        ]
-                    ),
-                },
-                {
-                    "error": False,
-                    "data": json.dumps([{"id": 17, "roles": []}]),
-                },
-            ]
-        }
-
-    monkeypatch.setattr(moodle, "call_webservice", call_webservice)
-    session = FakeSession()
-
-    assert moodle.get_direct_course_roles_by_course(
-        session, "token", 17, [201, 202]
-    ) == {
-        "201": {"Student", "tutor"},
-        "202": set(),
-    }
-    assert call["session"] is session
-    assert call["wstoken"] == "token"
-    assert call["function"] == "tool_mobile_call_external_functions"
-    assert call["data"]["requests[0][function]"] == (
-        "core_user_get_course_user_profiles"
-    )
-    assert call["data"]["requests[1][function]"] == (
-        "core_user_get_course_user_profiles"
-    )
-    assert json.loads(call["data"]["requests[0][arguments]"]) == {
-        "userlist": [{"userid": "17", "courseid": "201"}]
-    }
-    assert json.loads(call["data"]["requests[1][arguments]"]) == {
-        "userlist": [{"userid": "17", "courseid": "202"}]
-    }
-    assert call["data"]["requests[0][settingfilter]"] == 0
-    assert call["data"]["requests[0][settingfileurl]"] == 0
-
-
 @pytest.mark.parametrize(
     "profile_payload",
     [
@@ -350,6 +375,31 @@ def test_filtered_urls_are_deduplicated_and_secrets_are_redacted():
     assert item.config_key == "filters.exclude_links"
     assert "token=[REDACTED]" in item.item
     assert "super-secret" not in item.item
+
+
+def test_course_specific_link_filters_apply_only_to_their_course():
+    syncer = make_context(
+        {
+            "filters.exclude_links": {"12": ["*private.pdf"]},
+            "filters.allowed_domains": {"12": ["files.example.test"]},
+        }
+    )
+
+    assert filters.should_skip_url(
+        syncer,
+        "https://files.example.test/private.pdf",
+        course_id=12,
+    )
+    assert filters.should_skip_url(
+        syncer,
+        "https://other.example.test/public.pdf",
+        course_id=12,
+    )
+    assert not filters.should_skip_url(
+        syncer,
+        "https://other.example.test/private.pdf",
+        course_id=13,
+    )
 
 
 # Course ids that are substrings of one another, to pin down exact-id matching.

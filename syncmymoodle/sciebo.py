@@ -1,5 +1,7 @@
 import base64
 import logging
+import posixpath
+import urllib.parse
 from typing import Any, cast
 
 import requests
@@ -14,14 +16,17 @@ from syncmymoodle.constants import (
 from syncmymoodle.context import SyncContext
 from syncmymoodle.http_utils import (
     HttpFailureKind,
+    RequestPolicyError,
     classify_http_failure,
     get_input_value,
     parse_html,
     parse_xml,
     record_service_failure,
+    request_following_safe_redirects,
     safe_request_error,
+    same_origin,
 )
-from syncmymoodle.node import Node, RemoteMarkerKind
+from syncmymoodle.node import Node, NodeKind, RemoteMarkerKind
 
 logger = logging.getLogger(__name__)
 
@@ -49,6 +54,37 @@ PROPFIND_BODY = """<?xml version="1.0" encoding="UTF-8"?>
 </d:propfind>"""
 
 
+def _sciebo_url_allowed(url: str) -> bool:
+    try:
+        parsed = urllib.parse.urlsplit(url)
+    except ValueError:
+        return False
+    return (
+        parsed.username is None
+        and parsed.password is None
+        and same_origin(url, SCIEBO_URL)
+    )
+
+
+def _canonical_webdav_href(value: Any) -> str | None:
+    if not isinstance(value, str) or not value:
+        return None
+    try:
+        parsed = urllib.parse.urlsplit(value)
+    except ValueError:
+        return None
+    if parsed.scheme or parsed.netloc or parsed.query or parsed.fragment:
+        return None
+    decoded = urllib.parse.unquote(parsed.path)
+    if not decoded.startswith("/"):
+        return None
+    is_folder = decoded.endswith("/")
+    normalized = posixpath.normpath(decoded)
+    if is_folder and normalized != "/":
+        normalized += "/"
+    return normalized if normalized.startswith(WEBDAV_LOCATION) else None
+
+
 def _record_failure(
     ctx: SyncContext,
     kind: HttpFailureKind,
@@ -71,22 +107,27 @@ def scan_public_shares(
     text: str,
     parent_node: Node,
     log: logging.Logger = logger,
+    *,
+    course_id: Any = None,
 ) -> None:
     for link in sorted(set(SCIEBO_LINK_RE.findall(text))):
         if ctx.service_outages.should_skip(SCIEBO_URL):
             return
         log.info(f"Found Sciebo Link: {link}")
-        if filters.should_skip_url(ctx, link, "Sciebo link"):
+        if filters.should_skip_url(
+            ctx,
+            link,
+            "Sciebo link",
+            course_id=course_id,
+        ):
             continue
         if _reuse_cached_share(ctx, link, parent_node):
             continue
         ctx.output.sync_progress.module_status("connecting to Sciebo share")
         if not _scan_new_share(ctx, link, parent_node, log):
-            current: Node | None = parent_node
-            while current is not None and current.type != "Course":
-                current = current.parent
-            if current is not None:
-                ctx.mark_course_incomplete(current.id)
+            course_node = parent_node.ancestor(NodeKind.COURSE)
+            if course_node is not None:
+                ctx.mark_course_incomplete(course_node.id)
 
 
 def _reuse_cached_share(
@@ -188,8 +229,6 @@ def _scan_new_share(
     sciebo_root = parent_node.add_child(
         f"sciebo-{sharing_token}", None, "Sciebo Folder"
     )
-    if sciebo_root is None:
-        return True
 
     if _add_sciebo_files(
         ctx,
@@ -225,13 +264,22 @@ def _fetch_webdav_listing(
         "Content-Type": "application/xml",
     }
     try:
-        propfind_response = ctx.require_session().request(
+        propfind_response = request_following_safe_redirects(
+            ctx.require_session(),
             "PROPFIND",
             SCIEBO_URL + href,
+            _sciebo_url_allowed,
             headers=headers,
             data=PROPFIND_BODY,
             timeout=HTTP_TIMEOUT_SECONDS,
         )
+    except RequestPolicyError as error:
+        ctx.service_outages.record_available(SCIEBO_URL)
+        log.warning(
+            "Sciebo WebDAV request refused: %s",
+            safe_request_error(error),
+        )
+        return None
     except requests.RequestException as error:
         _record_failure(
             ctx,
@@ -282,14 +330,33 @@ def _add_sciebo_files(
     if soup_xml is None:
         return False
 
+    current_href = _canonical_webdav_href(href)
+    responses: list[tuple[Any, str]] = []
+    seen_hrefs: set[str] = set()
     for resp in soup_xml.find_all("d:response"):
-        # get the href of the response
         href_tag = resp.find("d:href")
-        if href_tag is None or not href_tag.text:
-            continue
-        new_href = href_tag.text
+        new_href = _canonical_webdav_href(href_tag.text if href_tag else None)
+        relative = (
+            new_href[len(current_href) :].rstrip("/")
+            if current_href is not None
+            and new_href is not None
+            and new_href.startswith(current_href)
+            else None
+        )
+        if (
+            current_href is None
+            or new_href is None
+            or new_href in seen_hrefs
+            or (new_href != current_href and (not relative or "/" in relative))
+        ):
+            ctx.service_outages.record_available(SCIEBO_URL)
+            log.warning("Sciebo WebDAV returned a malformed href; skipping this share")
+            return False
+        seen_hrefs.add(new_href)
+        responses.append((resp, new_href))
 
-        if new_href == href:
+    for resp, new_href in responses:
+        if new_href == current_href:
             log.info(
                 "Sciebo: skipping %s because it is the current folder",
                 new_href,
@@ -323,8 +390,6 @@ def _add_sciebo_files(
                 etag_kind=etag_kind,
                 remote_size=remote_size,
             )
-            if folder_node is None:
-                continue
             # recursive call to get all files in the folder
             if not _add_sciebo_files(
                 ctx, new_href, folder_node, sharing_token, auth_header, log
@@ -332,7 +397,7 @@ def _add_sciebo_files(
                 return False
         else:
             # create a new node for the file
-            parent_node.add_child(
+            parent_node.add_download_child(
                 displayname,
                 None,
                 "Sciebo File",

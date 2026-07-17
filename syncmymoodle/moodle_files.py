@@ -43,7 +43,7 @@ def get_or_add_child(
     name: str,
     id: Any,  # noqa: A002 - keep Moodle payload name
     type: str,  # noqa: A002 - keep Moodle payload name
-) -> Node | None:
+) -> Node:
     filesystem_name = sanitize_path_part(name).casefold()
     for child in parent_node.children:
         if (
@@ -65,10 +65,10 @@ def add_moodle_file_node(
     remote_size: int | None = None,
     name_clash_id: Any = NAME_CLASH_ID_UNSET,
     remote_content_hash: Any = None,
-) -> Node | None:
+) -> Node:
     if url is not None:
         url = canonicalize_moodle_file_url(url)
-    target_node: Node | None = parent_node
+    target_node = parent_node
     path_segments = [
         segment
         for segment in str(moodle_filepath or "").strip("/").split("/")
@@ -76,15 +76,7 @@ def add_moodle_file_node(
     ]
 
     for segment in path_segments:
-        if target_node is None:
-            return None
-        child_node = get_or_add_child(target_node, segment, None, "Folder")
-        if child_node is None:
-            return None
-        target_node = child_node
-
-    if target_node is None:
-        return None
+        target_node = get_or_add_child(target_node, segment, None, "Folder")
 
     content_hash = (
         remote_content_hash.lower()
@@ -95,17 +87,16 @@ def add_moodle_file_node(
         )
         else None
     )
-    return target_node.add_child(
-        filename,
-        id,
-        type,
-        url=url,
-        timemodified=timemodified,
-        etag=content_hash,
-        etag_kind=RemoteMarkerKind.CONTENT_HASH if content_hash else None,
-        remote_size=remote_size,
-        name_clash_id=name_clash_id,
-    )
+    kwargs = {
+        "timemodified": timemodified,
+        "etag": content_hash,
+        "etag_kind": RemoteMarkerKind.CONTENT_HASH if content_hash else None,
+        "remote_size": remote_size,
+        "name_clash_id": name_clash_id,
+    }
+    if url is None:
+        return target_node.add_child(filename, id, type, **kwargs)
+    return target_node.add_download_child(filename, id, type, url=url, **kwargs)
 
 
 def add_moodle_content_file_node(

@@ -7,12 +7,13 @@ import ntpath
 import os
 import re
 import sys
+import unicodedata
 import urllib.parse
 from dataclasses import dataclass
 from pathlib import Path, PureWindowsPath
 
 from syncmymoodle.constants import INVALID_CHARS
-from syncmymoodle.node import DownloadKind, Node
+from syncmymoodle.node import DownloadKind, Node, NodeKind
 
 WINDOWS_EXTENDED_PATH_THRESHOLD = 240
 # Leave room for download sidecars and ``.syncconflict`` suffixes while staying
@@ -96,6 +97,7 @@ def sanitize_path_part(path: str) -> str:
     path = urllib.parse.unquote(path)
     while (unescaped := html.unescape(path)) != path:
         path = unescaped
+    path = unicodedata.normalize("NFC", path)
     path = "".join(
         character
         for character in path
@@ -146,6 +148,23 @@ def _stable_clash_name(node: Node) -> str:
     return f"{filename.stem}_{_clash_suffix(node)}{filename.suffix}"
 
 
+def _same_url_clash_name(node: Node) -> str:
+    filename = Path(node.name)
+    identity = (
+        node.url,
+        node.name,
+        node.id,
+        node.type,
+        node.name_clash_id,
+        node.download_kind,
+    )
+    digest = hashlib.md5(
+        repr(identity).encode("utf-8"), usedforsecurity=False
+    ).hexdigest()
+    suffix = base64.urlsafe_b64encode(digest.encode("utf-8")).decode()[:10]
+    return f"{filename.stem}_{suffix}{filename.suffix}"
+
+
 def _opencast_clash_name(node: Node) -> str:
     return f"{Path(node.name).name}_{str(node.url).split('/')[-1]}"
 
@@ -163,9 +182,11 @@ def _general_name_clash(left: Node, right: Node) -> bool:
         return False
     if left.url != right.url:
         return True
+    if left.url is not None:
+        return True
     return (
-        left.type == "Course"
-        and right.type == "Course"
+        left.type == NodeKind.COURSE
+        and right.type == NodeKind.COURSE
         and left.name_clash_id != right.name_clash_id
     )
 
@@ -211,9 +232,19 @@ def _apply_general_name_clashes(children: list[Node]) -> list[Node]:
         if not siblings:
             continue
 
-        child.name = _stable_clash_name(child)
-        for sibling in siblings:
-            sibling.name = _stable_clash_name(sibling)
+        clashing_nodes = [child, *siblings]
+        names = [
+            (
+                _same_url_clash_name(node)
+                if node.url is not None
+                and sum(other.url == node.url for other in clashing_nodes) > 1
+                else _stable_clash_name(node)
+            )
+            for node in clashing_nodes
+        ]
+        child.name = names[0]
+        for sibling, name in zip(siblings, names[1:], strict=True):
+            sibling.name = name
             remaining.remove(sibling)
             renamed.append(sibling)
 

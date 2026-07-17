@@ -1,7 +1,9 @@
+import pytest
+
 from syncmymoodle import moodle_files
 from syncmymoodle.config import Config
 from syncmymoodle.filters import format_course_name as format_course_name_impl
-from syncmymoodle.node import DownloadKind, Node
+from syncmymoodle.node import DownloadKind, Node, NodeKind, RemoteMarkerKind
 from syncmymoodle.pathing import resolve_node_path_clashes, sanitize_path_part
 
 
@@ -10,25 +12,25 @@ def format_course_name(handling, name):
     return format_course_name_impl(name, config)
 
 
-def test_keep_preserves_course_name():
-    assert format_course_name("keep", "(VO) Analysis") == "(VO) Analysis"
-
-
-def test_remove_strips_two_character_prefix():
-    assert format_course_name("remove", "(VO) Analysis") == "Analysis"
-
-
-def test_suffix_moves_two_character_prefix_to_end():
-    assert (
-        format_course_name("suffix", "(VU) Software Quality Assurance")
-        == "Software Quality Assurance (VU)"
-    )
-
-
-def test_other_two_character_prefixes_are_supported():
-    assert (
-        format_course_name("suffix", "(RE) Exercise Session") == "Exercise Session (RE)"
-    )
+@pytest.mark.parametrize(
+    ("handling", "name", "expected"),
+    [
+        ("keep", "(VO) Analysis", "(VO) Analysis"),
+        ("remove", "(VO) Analysis", "Analysis"),
+        (
+            "suffix",
+            "(VU) Software Quality Assurance",
+            "Software Quality Assurance (VU)",
+        ),
+        ("suffix", "(RE) Exercise Session", "Exercise Session (RE)"),
+    ],
+)
+def test_course_prefix_handling(
+    handling: str,
+    name: str,
+    expected: str,
+):
+    assert format_course_name(handling, name) == expected
 
 
 def test_non_matching_names_are_preserved():
@@ -63,20 +65,176 @@ def test_moodle_file_url_normalization_is_origin_aware_and_query_safe():
     assert child.url == external_url
 
 
-def test_same_course_folder_name_without_url_gets_stable_suffixes():
-    root = Node("", -1, "Root", None)
-    semester = root.add_child("26ss", None, "Semester")
-    semester.add_child("Software Quality Assurance", 101, "Course")
-    semester.add_child("Software Quality Assurance", 102, "Course")
+def test_structural_children_are_unconditional_and_have_typed_ancestors():
+    root = Node("", -1, NodeKind.ROOT, None)
+    section = root.add_child("General", 1, NodeKind.SECTION)
+    first = section.add_child("First", 2, "File", url="https://example.test/file")
+    second = section.add_child("Second", 3, "File", url="https://example.test/file")
+
+    assert section.children == [first, second]
+    assert second.ancestor(NodeKind.SECTION) is section
+    assert second.ancestor(NodeKind.ROOT) is root
+    assert second.ancestor(NodeKind.COURSE) is None
+
+
+def test_explicit_download_dedup_strengthens_missing_metadata():
+    parent = Node("Section", 1, NodeKind.SECTION, None)
+    first = parent.add_download_child(
+        "slides.pdf",
+        2,
+        "File",
+        url="https://example.test/slides.pdf",
+    )
+    second = parent.add_download_child(
+        "slides.pdf",
+        2,
+        "File",
+        url="https://example.test/slides.pdf",
+        etag="a" * 40,
+        etag_kind=RemoteMarkerKind.CONTENT_HASH,
+        remote_size=123,
+    )
+
+    assert second is first
+    assert parent.children == [first]
+    assert first.etag == "a" * 40
+    assert first.etag_kind is RemoteMarkerKind.CONTENT_HASH
+    assert first.remote_size == 123
+
+
+def test_explicit_download_dedup_uses_materialized_name_and_url():
+    parent = Node("Section", 1, NodeKind.SECTION, None)
+    first = parent.add_download_child(
+        "slides.pdf",
+        2,
+        "File",
+        url="https://example.test/slides.pdf",
+    )
+    second = parent.add_download_child(
+        "slides.pdf",
+        999,
+        "File",
+        url="https://example.test/slides.pdf",
+    )
+
+    assert second is first
+    assert parent.children == [first]
+
+
+def test_explicit_download_dedup_rejects_conflicting_processors():
+    parent = Node("Section", 1, NodeKind.SECTION, None)
+    parent.add_download_child(
+        "video.mp4",
+        2,
+        "File",
+        url="https://example.test/video.mp4",
+    )
+
+    with pytest.raises(ValueError, match="conflicting download semantics"):
+        parent.add_download_child(
+            "video.mp4",
+            2,
+            "File",
+            url="https://example.test/video.mp4",
+            download_kind=DownloadKind.OPENCAST,
+        )
+
+
+@pytest.mark.parametrize("etags", [("a", "b"), ("b", "a")])
+def test_explicit_download_dedup_invalidates_conflicting_metadata(etags):
+    parent = Node("Section", 1, NodeKind.SECTION, None)
+    first = parent.add_download_child(
+        "slides.pdf",
+        2,
+        "File",
+        url="https://example.test/slides.pdf",
+        etag=etags[0] * 40,
+        etag_kind=RemoteMarkerKind.CONTENT_HASH,
+    )
+    second = parent.add_download_child(
+        "slides.pdf",
+        2,
+        "File",
+        url="https://example.test/slides.pdf",
+        etag=etags[1] * 40,
+        etag_kind=RemoteMarkerKind.CONTENT_HASH,
+    )
+
+    assert second is first
+    assert parent.children == [first]
+    assert first.etag is None
+    assert first.etag_kind is None
+    assert first.has_remote_marker_conflict
+
+
+def test_node_repr_does_not_expose_download_url_secrets():
+    node = Node(
+        "https://example.test/private.pdf?token=name-secret",
+        "https://example.test/resource?id=id-secret",
+        "File",
+        None,
+        url="https://user:password@example.test/file?token=secret",
+    )
+
+    assert "password" not in repr(node)
+    assert "secret" not in repr(node)
+
+
+def test_unicode_equivalent_names_share_a_normalized_path_key():
+    assert sanitize_path_part("Cafe\N{COMBINING ACUTE ACCENT}.pdf") == "Café.pdf"
+    root = Node("", -1, NodeKind.ROOT, None)
+    section = root.add_child("General", 1, NodeKind.SECTION)
+    first = section.add_child("Café.pdf", 2, "File", url="https://example.test/first")
+    second = section.add_child(
+        "Cafe\N{COMBINING ACUTE ACCENT}.pdf",
+        3,
+        "File",
+        url="https://example.test/second",
+    )
 
     resolve_node_path_clashes(root)
 
-    names = [course.name for course in semester.children]
-    assert len(names) == 2
-    assert len(set(names)) == 2
-    assert "Software Quality Assurance" not in names
-    for name in names:
-        assert name.startswith("Software Quality Assurance_")
+    assert sanitize_path_part(first.name) != sanitize_path_part(second.name)
+
+
+def test_same_url_aliases_get_distinct_materialized_names():
+    root = Node("", -1, NodeKind.ROOT, None)
+    section = root.add_child("General", 1, NodeKind.SECTION)
+    first = section.add_download_child(
+        "a:b.pdf",
+        2,
+        "File",
+        url="https://example.test/slides.pdf",
+    )
+    second = section.add_download_child(
+        "ab.pdf",
+        3,
+        "File",
+        url="https://example.test/slides.pdf",
+    )
+
+    resolve_node_path_clashes(root)
+
+    assert len(section.children) == 2
+    assert (
+        sanitize_path_part(first.name).casefold()
+        != sanitize_path_part(second.name).casefold()
+    )
+
+
+@pytest.mark.parametrize("course_ids", [(101, 102), (102, 101)])
+def test_same_course_folder_name_without_url_gets_stable_suffixes(course_ids):
+    root = Node("", -1, "Root", None)
+    semester = root.add_child("26ss", None, "Semester")
+    for course_id in course_ids:
+        semester.add_child("Software Quality Assurance", course_id, "Course")
+
+    resolve_node_path_clashes(root)
+
+    assert {course.id: course.name for course in semester.children} == {
+        101: "Software Quality Assurance_MzhiM2VmZj",
+        102: "Software Quality Assurance_ZWM4OTU2Nj",
+    }
 
 
 def test_same_section_name_without_url_keeps_legacy_merged_path():
@@ -144,20 +302,25 @@ def test_same_file_in_merged_sections_keeps_shared_name():
     assert first_file.name == second_file.name == "slides.pdf"
 
 
-def test_same_name_with_different_urls_still_gets_stable_suffixes():
+@pytest.mark.parametrize(
+    "urls",
+    [
+        ("https://example.com/slides-a", "https://example.com/slides-b"),
+        ("https://example.com/slides-b", "https://example.com/slides-a"),
+    ],
+)
+def test_same_name_with_different_urls_still_gets_stable_suffixes(urls):
     root = Node("", -1, "Root", None)
     section = root.add_child("General", None, "Section")
-    section.add_child("Slides", 201, "URL", url="https://example.com/slides-a")
-    section.add_child("Slides", 202, "URL", url="https://example.com/slides-b")
+    for index, url in enumerate(urls, 201):
+        section.add_child("Slides", index, "URL", url=url)
 
     resolve_node_path_clashes(root)
 
-    names = [link.name for link in section.children]
-    assert len(names) == 2
-    assert len(set(names)) == 2
-    assert "Slides" not in names
-    for name in names:
-        assert name.startswith("Slides_")
+    assert {link.url: link.name for link in section.children} == {
+        "https://example.com/slides-a": "Slides_NDQyZjVlND",
+        "https://example.com/slides-b": "Slides_M2I1MDA3Nm",
+    }
 
 
 def test_clashing_files_without_name_clash_id_use_url_for_distinct_names():
@@ -235,56 +398,42 @@ def test_generated_file_name_cannot_collide_with_existing_file():
     assert len(materialized_names) == len(set(materialized_names))
 
 
-def test_names_that_sanitize_to_same_windows_path_get_distinct_suffixes():
+@pytest.mark.parametrize(
+    ("names", "urls", "expected"),
+    [
+        (
+            ("CON.pdf", "_CON.pdf"),
+            ("https://a.example/con.pdf", "https://b.example/con.pdf"),
+            {
+                "https://a.example/con.pdf": "CON_YzY2ZWUxZT.pdf",
+                "https://b.example/con.pdf": "_CON_NzE1MGU5NT.pdf",
+            },
+        ),
+        (
+            ("Notes.pdf", "notes.pdf"),
+            ("https://a.example/notes.pdf", "https://b.example/notes.pdf"),
+            {
+                "https://a.example/notes.pdf": "Notes_NDZiMGU3Yz.pdf",
+                "https://b.example/notes.pdf": "notes_NTk3NTA3MD.pdf",
+            },
+        ),
+    ],
+)
+def test_filesystem_equivalent_names_get_stable_suffixes(names, urls, expected):
     root = Node("", -1, "Root", None)
     section = root.add_child("General", None, "Section")
-    section.add_child(
-        "CON.pdf",
-        None,
-        "Linked file [application/pdf]",
-        url="https://a.example/con.pdf",
-        name_clash_id=None,
-    )
-    section.add_child(
-        "_CON.pdf",
-        None,
-        "Linked file [application/pdf]",
-        url="https://b.example/con.pdf",
-        name_clash_id=None,
-    )
+    for name, url in zip(names, urls, strict=True):
+        section.add_child(
+            name,
+            None,
+            "Linked file [application/pdf]",
+            url=url,
+            name_clash_id=None,
+        )
 
     resolve_node_path_clashes(root)
 
-    materialized_names = [
-        sanitize_path_part(child.name).casefold() for child in section.children
-    ]
-    assert len(set(materialized_names)) == 2
-
-
-def test_case_only_file_name_clashes_get_distinct_suffixes():
-    root = Node("", -1, "Root", None)
-    section = root.add_child("General", None, "Section")
-    section.add_child(
-        "Notes.pdf",
-        None,
-        "Linked file [application/pdf]",
-        url="https://a.example/notes.pdf",
-        name_clash_id=None,
-    )
-    section.add_child(
-        "notes.pdf",
-        None,
-        "Linked file [application/pdf]",
-        url="https://b.example/notes.pdf",
-        name_clash_id=None,
-    )
-
-    resolve_node_path_clashes(root)
-
-    materialized_names = [
-        sanitize_path_part(child.name).casefold() for child in section.children
-    ]
-    assert len(set(materialized_names)) == 2
+    assert {child.url: child.name for child in section.children} == expected
 
 
 def test_opencast_name_clashes_use_uploaded_filename_suffix():

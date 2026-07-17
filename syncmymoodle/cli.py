@@ -11,18 +11,31 @@ from argparse import (
     BooleanOptionalAction,
     Namespace,
 )
-from collections.abc import Callable, Mapping, MutableMapping, Sequence
-from dataclasses import dataclass, field
+from collections.abc import Callable, Iterator, Mapping, MutableMapping, Sequence
+from contextlib import contextmanager, nullcontext
+from dataclasses import dataclass, field, replace
 from importlib import metadata, resources
 from pathlib import Path
 from typing import Any, NoReturn
 
 import tomlkit
 
-from syncmymoodle import cleanup, course_cache, downloader, output, pathing, rwth, sync
+from syncmymoodle import (
+    cleanup,
+    course_cache,
+    downloader,
+    output,
+    pathing,
+    rwth,
+    storage,
+    sync,
+)
 from syncmymoodle import moodle as moodle_api
 from syncmymoodle.config import (
     CONFIG_OPTIONS,
+    DEFAULT_LOGIN_PROVIDER,
+    DEFAULT_TOKEN_STORE,
+    TOKEN_STORE_OPTIONS,
     CommandAuthSource,
     Config,
     ConfigDict,
@@ -245,8 +258,8 @@ def build_parser() -> ArgumentParser:
     )
     migrate_parser.add_argument(
         "--token-store",
-        choices=("keyring", "env-file"),
-        default="keyring",
+        choices=TOKEN_STORE_OPTIONS,
+        default=DEFAULT_TOKEN_STORE,
         help="secure store for the migrated Moodle tokens",
     )
     migrate_parser.add_argument(
@@ -293,7 +306,7 @@ def build_parser() -> ArgumentParser:
     )
     auth_migrate_parser.add_argument(
         "--to",
-        choices=("keyring", "env-file"),
+        choices=TOKEN_STORE_OPTIONS,
         required=True,
         help="secure store to use for Moodle tokens",
     )
@@ -616,7 +629,7 @@ def migrate_config_command(args: Namespace, parser: ArgumentParser) -> None:
         validate_migration_paths(input_path, output_path, args.force)
         raw, unresolved = read_legacy_config_file(input_path)
         config_values = resolve_relative_path_options(unresolved, input_path.parent)
-        config_values["auth.login.provider"] = "prompt"
+        config_values["auth.login.provider"] = DEFAULT_LOGIN_PROVIDER
         config_values.pop("auth.login.keyring_store_totp_secret", None)
         config_values["auth.tokens.store"] = args.token_store
         if args.token_store == "env-file":
@@ -729,7 +742,7 @@ def login_auth_command(
     keyring_backend: Any,
 ) -> None:
     ctx = configured_auth_context(args, parser, keyring_backend)
-    ctx.config.dry_run = False
+    ctx.config = replace(ctx.config, dry_run=False)
     try:
         store = token_store_from_config(ctx.config, keyring_backend)
     except ProviderSecretError as error:
@@ -766,7 +779,7 @@ def prompt_setup_config(
     config: ConfigDict = {
         "auth.user": username,
         "auth.login.totp_serial": totp_serial,
-        "auth.login.provider": "prompt",
+        "auth.login.provider": DEFAULT_LOGIN_PROVIDER,
         "paths.sync_directory": setup_sync_directory_value(sync_directory),
     }
     return config, username, totp_serial
@@ -860,7 +873,7 @@ def prompt_setup_token_store(
         "Store Moodle tokens in the system keyring (recommended)", default=True
     )
     if use_keyring:
-        config["auth.tokens.store"] = "keyring"
+        config["auth.tokens.store"] = DEFAULT_TOKEN_STORE
         return
     if not availability.available:
         output.warning(
@@ -1301,7 +1314,7 @@ def reset_token_auth_command(
     if not output.confirm("Reset the shared Moodle API token"):
         output.caution("Token reset cancelled.")
         return
-    ctx.config.dry_run = False
+    ctx.config = replace(ctx.config, dry_run=False)
     try:
         store = token_store_from_config(ctx.config, keyring_backend)
     except ProviderSecretError as error:
@@ -1377,12 +1390,30 @@ def cleanup_root_from_args(args: Namespace, parser: ArgumentParser) -> Path:
     return root
 
 
+@contextmanager
+def cleanup_lock(
+    root: Path,
+    *,
+    apply: bool,
+    parser: ArgumentParser,
+) -> Iterator[None]:
+    if not apply:
+        yield
+        return
+    try:
+        with storage.sync_run_lock(root):
+            yield
+    except storage.SyncRunLockedError as error:
+        parser.error(str(error))
+
+
 def clean_conflicts_command(args: Namespace, parser: ArgumentParser) -> None:
     root = cleanup_root_from_args(args, parser)
-    conflicts = cleanup.iter_conflicts(root)
-    plan = cleanup.conflict_cleanup_plan(conflicts)
-    if args.apply:
-        cleanup.delete_paths(plan.remove)
+    with cleanup_lock(root, apply=args.apply, parser=parser):
+        conflicts = cleanup.iter_conflicts(root)
+        plan = cleanup.conflict_cleanup_plan(conflicts)
+        if args.apply:
+            cleanup.delete_paths(plan.remove)
     action = "Deleted" if args.apply else "Would delete"
     report = output.success if args.apply else output.caution
     for path in plan.remove:
@@ -1400,13 +1431,14 @@ def clean_conflicts_command(args: Namespace, parser: ArgumentParser) -> None:
 
 def clean_caches_command(args: Namespace, parser: ArgumentParser) -> None:
     root = cleanup_root_from_args(args, parser)
-    cache_paths = cleanup.iter_course_caches(root)
-    output.caution(
-        "This resets syncMyMoodle metadata caches. It is usually only useful "
-        "when recovering from broken or stale cache metadata."
-    )
-    if args.apply:
-        cleanup.delete_paths(cache_paths)
+    with cleanup_lock(root, apply=args.apply, parser=parser):
+        cache_paths = cleanup.iter_course_caches(root)
+        output.caution(
+            "This resets syncMyMoodle metadata caches. It is usually only useful "
+            "when recovering from broken or stale cache metadata."
+        )
+        if args.apply:
+            cleanup.delete_paths(cache_paths)
     action = "Deleted" if args.apply else "Would delete"
     report = output.success if args.apply else output.caution
     for path in cache_paths:
@@ -2015,12 +2047,21 @@ def run(ctx: SyncContext, *, show_filtered: bool = False) -> None:
         user_private_access_key,
     )
     configure_browser_session_resolver(ctx)
-    with ctx.output.sync_progress:
-        sync.sync(ctx)
-        downloader.download_all_files(ctx, logger)
-        if not ctx.config.dry_run:
-            ctx.output.sync_progress.finalizing("saving course metadata")
-            course_cache.cache_root_node(ctx, logger)
+    run_lock = (
+        nullcontext()
+        if ctx.config.dry_run
+        else storage.sync_run_lock(Path(ctx.config.sync_directory))
+    )
+    try:
+        with run_lock, ctx.output.sync_progress:
+            sync.sync(ctx)
+            downloader.download_all_files(ctx, logger)
+            if not ctx.config.dry_run:
+                ctx.output.sync_progress.finalizing("saving course metadata")
+                course_cache.cache_root_node(ctx, logger)
+    except storage.SyncRunLockedError as error:
+        logger.critical("%s", error)
+        raise SystemExit(1) from error
     report_filtered_items(ctx, show_filtered)
     ctx.output.summary(
         ctx.stats,

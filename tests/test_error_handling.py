@@ -90,8 +90,17 @@ def test_get_all_courses_exits_clearly_on_api_error(caplog):
     assert "delete the cookie file" not in caplog.text
 
 
-def test_get_course_skips_course_on_api_error(caplog):
-    assert moodle.get_course(_error_session(), "token", 101) is None
+@pytest.mark.parametrize(
+    "getter",
+    [
+        moodle.get_course,
+        moodle.get_assignment,
+        moodle.get_folders_by_courses,
+    ],
+    ids=["course", "assignment", "folders"],
+)
+def test_course_fetchers_skip_course_on_api_error(getter, caplog):
+    assert getter(_error_session(), "token", 101) is None
     assert "invalidtoken" in caplog.text
 
 
@@ -105,11 +114,6 @@ def test_get_course_skips_cleanly_when_request_times_out(caplog):
 
     assert moodle.get_course(session, "token", 101) is None
     assert "Moodle did not respond" in caplog.text
-
-
-def test_get_assignment_skips_course_on_api_error(caplog):
-    assert moodle.get_assignment(_error_session(), "token", 101) is None
-    assert "invalidtoken" in caplog.text
 
 
 def test_course_updates_distinguish_changed_unknown_and_unchanged_modules():
@@ -206,11 +210,6 @@ def test_course_update_api_failure_is_silent_optional_cache_miss(caplog):
 
     assert moodle.check_course_updates(session, "token", 101, {43: 500}) is None
     assert "array_keys" not in caplog.text
-
-
-def test_get_folders_distinguishes_api_error_from_empty_course(caplog):
-    assert moodle.get_folders_by_courses(_error_session(), "token", 101) is None
-    assert "invalidtoken" in caplog.text
 
 
 def test_course_module_inventory_rejects_malformed_items():

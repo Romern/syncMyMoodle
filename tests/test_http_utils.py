@@ -11,7 +11,11 @@ from syncmymoodle.http_utils import (
     classify_request_failure,
     normalized_http_origin,
     record_service_failure,
+    redact_url_secrets,
+    request_following_safe_redirects,
 )
+
+from .helpers import FakeResponse, FakeSession
 
 
 @pytest.mark.parametrize(
@@ -95,3 +99,84 @@ def test_request_policy_failures_do_not_count_as_transient_outages():
     assert classify_request_failure(requests.ConnectionError("offline")) is (
         HttpFailureKind.TRANSIENT
     )
+
+
+def test_url_redaction_covers_userinfo_and_encoded_sensitive_names():
+    value = (
+        "failed https://alice:password@example.test/private"
+        "?%74%6f%6b%65%6e=secret&safe=visible&OAuth_Signature=signed"
+    )
+
+    redacted = redact_url_secrets(value)
+
+    assert "alice" not in redacted
+    assert "password" not in redacted
+    assert "secret" not in redacted
+    assert "signed" not in redacted
+    assert "safe=visible" in redacted
+    assert redacted.count("[REDACTED]") == 3
+
+
+def test_safe_redirect_changes_post_to_get_without_resending_body():
+    session = FakeSession()
+    start_url = "https://allowed.example.test/start"
+    destination_url = "https://allowed.example.test/destination"
+    session.add(
+        "POST",
+        start_url,
+        FakeResponse(status_code=303, headers={"Location": destination_url}),
+    )
+
+    def destination(url, kwargs):
+        del url
+        assert "data" not in kwargs
+        assert kwargs["headers"] == {"Accept": "text/html"}
+        return FakeResponse(text="ok")
+
+    session.add("GET", destination_url, destination)
+
+    response = request_following_safe_redirects(
+        session,
+        "POST",
+        start_url,
+        lambda url: url.startswith("https://allowed.example.test/"),
+        data={"password": "must-not-be-resent"},
+        headers={"Accept": "text/html", "Content-Type": "application/x-form"},
+        timeout=15,
+    )
+
+    assert response.text == "ok"
+    assert session.calls == [("POST", start_url), ("GET", destination_url)]
+
+
+def test_safe_redirect_preserves_webdav_method_and_body():
+    session = FakeSession()
+    start_url = "https://allowed.example.test/webdav"
+    destination_url = f"{start_url}/"
+    session.add(
+        "PROPFIND",
+        start_url,
+        FakeResponse(status_code=301, headers={"Location": destination_url}),
+    )
+
+    def destination(url, kwargs):
+        del url
+        assert kwargs["data"] == "<propfind />"
+        return FakeResponse(text="ok")
+
+    session.add("PROPFIND", destination_url, destination)
+
+    response = request_following_safe_redirects(
+        session,
+        "PROPFIND",
+        start_url,
+        lambda url: url.startswith("https://allowed.example.test/"),
+        data="<propfind />",
+        timeout=15,
+    )
+
+    assert response.text == "ok"
+    assert session.calls == [
+        ("PROPFIND", start_url),
+        ("PROPFIND", destination_url),
+    ]

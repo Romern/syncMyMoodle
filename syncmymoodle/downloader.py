@@ -115,6 +115,12 @@ class TransferPlan:
         self.etag_sidecar.unlink(missing_ok=True)
 
 
+@dataclass(frozen=True)
+class PlannedTransfer:
+    action: ConflictAction
+    baseline: storage.FileSnapshot
+
+
 class YtDlpLogger:
     """Route yt-dlp messages through the application's logging policy."""
 
@@ -165,7 +171,11 @@ def yt_dlp_output_options(
     }
 
 
-def classify_local_file(path: Path, marker: str | None) -> FileMatch:
+def classify_local_file(
+    path: Path,
+    marker: str | None,
+    snapshot: storage.FileSnapshot | None = None,
+) -> FileMatch:
     """Compare a local file against a remote ``marker``.
 
     Only strong markers carrying a plain MD5/SHA1/SHA256 hex digest can verify
@@ -180,11 +190,16 @@ def classify_local_file(path: Path, marker: str | None) -> FileMatch:
     algo = HASH_ALGOS_BY_LENGTH.get(len(hex_str))
     if algo is None:
         return FileMatch.UNKNOWN
-    try:
-        with path.open("rb") as f:
-            digest = hashlib.file_digest(f, algo).hexdigest()
-    except OSError:
-        return FileMatch.UNKNOWN
+    if snapshot is not None:
+        digest = snapshot.digest_for(algo)
+        if digest is None:
+            return FileMatch.UNKNOWN
+    else:
+        try:
+            with path.open("rb") as f:
+                digest = hashlib.file_digest(f, algo).hexdigest()
+        except OSError:
+            return FileMatch.UNKNOWN
     return FileMatch.MATCH if digest == hex_str else FileMatch.DIFFER
 
 
@@ -205,10 +220,11 @@ def chunk_looks_like_html(chunk: bytes) -> bool:
 def request_node_url(
     ctx: SyncContext,
     node: Node,
-    log: logging.Logger,
     **kwargs: Any,
 ) -> Any:
     assert node.url is not None
+    course_node = _course_node(node)
+    course_id = course_node.id if course_node is not None else None
     return request_following_safe_redirects(
         ctx.require_session(),
         "GET",
@@ -217,6 +233,7 @@ def request_node_url(
             ctx,
             url,
             f"redirected {node.type} file",
+            course_id=course_id,
         ),
         **kwargs,
     )
@@ -258,7 +275,7 @@ def download_response_is_usable(
         log.warning(
             "Skipping download of %s from %s because the server returned no content",
             downloadpath,
-            node.url,
+            redact_url_secrets(node.url),
         )
         return False
 
@@ -266,7 +283,7 @@ def download_response_is_usable(
         log.warning(
             "Skipping download of %s from %s because the server returned HTTP %s",
             downloadpath,
-            node.url,
+            redact_url_secrets(node.url),
             response.status_code,
         )
         return False
@@ -279,7 +296,7 @@ def download_response_is_usable(
                 "HTML instead of the expected file. This usually means the "
                 "link requires a separate login or points to an error page.",
                 downloadpath,
-                node.url,
+                redact_url_secrets(node.url),
             )
             return False
 
@@ -320,7 +337,6 @@ def conditional_get_confirms_unchanged(
             request_node_url(
                 ctx,
                 node,
-                log,
                 headers=headers,
                 stream=True,
                 timeout=HTTP_TIMEOUT_SECONDS,
@@ -352,14 +368,40 @@ def remote_unchanged(
     log: logging.Logger = logger,
 ) -> bool:
     """Whether the remote file is provably unchanged since our last download."""
+    if node.has_remote_marker_conflict:
+        return False
     old_etag = getattr(old_node, "etag", None)
     node_etag = getattr(node, "etag", None)
+
+    # Comparable current markers are authoritative. In particular, a changed
+    # content hash must win over a timestamp whose resolution is only seconds.
+    if node_etag and node.etag_kind is RemoteMarkerKind.CONTENT_HASH:
+        return bool(
+            old_etag == node_etag
+            and old_node.etag_kind in (None, RemoteMarkerKind.CONTENT_HASH)
+        )
+    if (
+        old_etag
+        and node_etag
+        and old_node.etag_kind is not None
+        and node.etag_kind is not None
+        and old_node.etag_kind is not node.etag_kind
+    ):
+        return False
+    if (
+        old_etag
+        and node_etag
+        and (
+            old_node.etag_kind == node.etag_kind
+            or old_node.etag_kind is None
+            or node.etag_kind is None
+        )
+    ):
+        return bool(node_etag == old_etag)
 
     if cached_timemodified is not None:
         return bool(node.timemodified == cached_timemodified)
 
-    if old_etag and node_etag == old_etag:
-        return True
     if (
         old_etag
         and node_etag is None
@@ -398,18 +440,22 @@ def assess_local_copy(
     downloadpath: Path,
     old_node: Node | None,
     cached_timemodified: Any,
+    baseline: storage.FileSnapshot,
 ) -> LocalCopyState:
     """Classify the on-disk file when the remote may have changed."""
     remote_etag = getattr(node, "etag", None)
     remote_etag_kind = node.etag_kind
     if (
         remote_etag_kind == RemoteMarkerKind.CONTENT_HASH
-        and classify_local_file(downloadpath, remote_etag) is FileMatch.MATCH
+        and classify_local_file(downloadpath, remote_etag, baseline) is FileMatch.MATCH
     ):
-        align_mtime_with_timemodified(node, downloadpath)
         return LocalCopyState.UP_TO_DATE
 
-    verdict = classify_local_file(downloadpath, local_verification_marker(old_node))
+    verdict = classify_local_file(
+        downloadpath,
+        local_verification_marker(old_node),
+        baseline,
+    )
     if verdict is FileMatch.MATCH:
         return LocalCopyState.CLEAN
     if verdict is FileMatch.DIFFER:
@@ -431,6 +477,8 @@ def decide_download(
     node: Node,
     downloadpath: Path,
     log: logging.Logger = logger,
+    *,
+    baseline: storage.FileSnapshot | None = None,
 ) -> DownloadDecision:
     """Decide whether ``node`` must be (re)downloaded and whether the local copy
     is user-modified.
@@ -447,7 +495,14 @@ def decide_download(
         getattr(old_node, "timemodified", None) if old_node is not None else None
     )
 
-    verdict = assess_local_copy(node, downloadpath, old_node, cached_timemodified)
+    baseline = baseline or storage.snapshot_file(downloadpath)
+    verdict = assess_local_copy(
+        node,
+        downloadpath,
+        old_node,
+        cached_timemodified,
+        baseline,
+    )
     if verdict is LocalCopyState.UP_TO_DATE:
         return DownloadDecision.SKIP
     if old_node is not None and remote_unchanged(
@@ -462,10 +517,21 @@ def decide_download(
 def should_skip_before_decision(
     ctx: SyncContext, node: Node, downloadpath: Path
 ) -> DownloadOutcome | None:
-    if filters.should_skip_url(ctx, node.url, f"{node.type} file"):
+    course_node = _course_node(node)
+    course_id = course_node.id if course_node is not None else None
+    if filters.should_skip_url(
+        ctx,
+        node.url,
+        f"{node.type} file",
+        course_id=course_id,
+    ):
         return SKIPPED_DOWNLOAD
-    extension = node.name.split(".")[-1]
-    if extension in ctx.config.exclude_filetypes:
+    extension = Path(node.name).suffix.removeprefix(".").casefold()
+    excluded_extensions = {
+        configured.removeprefix(".").casefold()
+        for configured in ctx.config.exclude_filetypes
+    }
+    if extension and extension in excluded_extensions:
         ctx.record_filtered(
             "filters.exclude_filetypes",
             "file",
@@ -588,11 +654,33 @@ def download_violates_size_limits(
     return record_size_limit_filter(ctx, str(downloadpath), total_size, "size")
 
 
-def _opencast_course_node(node: Node) -> Node | None:
+def _course_node(node: Node) -> Node | None:
     try:
         return course_cache.get_course_node(node)
     except Exception:
         return None
+
+
+def stable_download_decision(
+    ctx: SyncContext,
+    node: Node,
+    downloadpath: Path,
+    log: logging.Logger,
+) -> tuple[DownloadDecision, storage.FileSnapshot]:
+    """Classify a target against a content baseline that stayed unchanged."""
+    for _ in range(3):
+        baseline = storage.snapshot_file(downloadpath)
+        decision = decide_download(ctx, node, downloadpath, log, baseline=baseline)
+        if baseline.metadata_still_matches(downloadpath):
+            return decision, baseline
+
+    # A continuously changing target cannot be classified reliably. Treat it
+    # as a conflict so the configured policy fails closed.
+    baseline = storage.snapshot_file(downloadpath)
+    decision = (
+        DownloadDecision.CONFLICT if baseline.exists else DownloadDecision.DOWNLOAD
+    )
+    return decision, baseline
 
 
 def planned_download_action(
@@ -600,13 +688,13 @@ def planned_download_action(
     node: Node,
     downloadpath: Path,
     log: logging.Logger = logger,
-) -> ConflictAction | DownloadOutcome:
+) -> PlannedTransfer | DownloadOutcome:
     """Return the transfer action or the outcome when no transfer is needed."""
     early_outcome = should_skip_before_decision(ctx, node, downloadpath)
     if early_outcome is not None:
         return early_outcome
     if node.download_kind is DownloadKind.OPENCAST:
-        course_node = _opencast_course_node(node)
+        course_node = _course_node(node)
         course_id = course_node.id if course_node is not None else None
         if opencast.episode_metadata_is_stale(
             ctx,
@@ -624,10 +712,16 @@ def planned_download_action(
     if known_remote_size_violates_limit(ctx, node, downloadpath):
         return SKIPPED_DOWNLOAD
 
-    decision = decide_download(ctx, node, downloadpath, log)
+    decision, baseline = stable_download_decision(ctx, node, downloadpath, log)
     if decision is DownloadDecision.POLICY_SKIP:
         return POLICY_SKIPPED_DOWNLOAD
     if decision is DownloadDecision.SKIP:
+        if (
+            node.etag_kind is RemoteMarkerKind.CONTENT_HASH
+            and classify_local_file(downloadpath, node.etag, baseline)
+            is FileMatch.MATCH
+        ):
+            align_mtime_with_timemodified(node, downloadpath)
         return UNCHANGED_DOWNLOAD
     action = (
         conflict_action(ctx, downloadpath, log)
@@ -636,7 +730,7 @@ def planned_download_action(
     )
     if action == ConflictAction.SKIP:
         return POLICY_SKIPPED_DOWNLOAD
-    return action
+    return PlannedTransfer(action, baseline)
 
 
 def report_planned_download(
@@ -729,7 +823,7 @@ def response_body_is_usable(
         "with HTML instead of the expected file. This usually means the link "
         "requires a separate login or points to an error page.",
         downloadpath,
-        node.url,
+        redact_url_secrets(node.url),
     )
     return False
 
@@ -775,20 +869,39 @@ def write_response_body(
 def install_downloaded_file(
     downloadpath: Path,
     transfer: TransferPlan,
-    action: ConflictAction,
+    planned: PlannedTransfer,
+    target_change_policy: str,
     log: logging.Logger = logger,
-) -> bool:
-    if not storage.install_staged_file(
+) -> storage.InstallResult:
+    result = storage.install_staged_file(
         transfer.tmp_path,
         downloadpath,
-        rename_local=action is ConflictAction.RENAME_LOCAL,
+        baseline=planned.baseline,
+        rename_local=planned.action is ConflictAction.RENAME_LOCAL,
+        target_change_policy=target_change_policy,
         description="the updated file from Moodle",
         log=log,
-    ):
+    )
+    if result is not storage.InstallResult.INSTALLED:
         transfer.discard_partial()
-        return False
+        return result
     transfer.etag_sidecar.unlink(missing_ok=True)
-    return True
+    return result
+
+
+def noninstalled_download_outcome(
+    result: storage.InstallResult,
+    transferred_bytes: int,
+) -> DownloadOutcome | None:
+    if result is storage.InstallResult.INSTALLED:
+        return None
+    if result is storage.InstallResult.KEPT_LOCAL:
+        return DownloadOutcome(
+            unchanged=1,
+            transferred_bytes=transferred_bytes,
+            cache_verified=False,
+        )
+    return FAILED_DOWNLOAD
 
 
 def record_download_metadata(
@@ -812,7 +925,7 @@ def process_download_response(
     response: Any,
     transfer: TransferPlan | None,
     downloadpath: Path,
-    action: ConflictAction,
+    planned: PlannedTransfer,
     log: logging.Logger,
 ) -> DownloadOutcome:
     etag_header = response.headers.get("ETag")
@@ -855,8 +968,19 @@ def process_download_response(
             unchanged=1,
             transferred_bytes=transferred_bytes,
         )
-    if not install_downloaded_file(downloadpath, transfer, action, log):
-        return FAILED_DOWNLOAD
+    install_result = install_downloaded_file(
+        downloadpath,
+        transfer,
+        planned,
+        ctx.config.conflict_handling,
+        log,
+    )
+    install_outcome = noninstalled_download_outcome(
+        install_result,
+        transferred_bytes,
+    )
+    if install_outcome is not None:
+        return install_outcome
     record_download_metadata(node, downloadpath, etag_header, staged_hash)
     ctx.downloaded_paths.add(downloadpath)
     return completed_download(existed=existed, transferred_bytes=transferred_bytes)
@@ -894,7 +1018,7 @@ def authorize_opencast_download(
     node: Node,
     log: logging.Logger,
 ) -> tuple[bool, Any]:
-    course_node = _opencast_course_node(node)
+    course_node = _course_node(node)
     if course_node is None:
         log.warning("Cannot authorize Opencast download outside a course")
         return False, None
@@ -934,7 +1058,7 @@ def download_file(
     action_or_outcome = planned_download_action(ctx, node, downloadpath, log)
     if isinstance(action_or_outcome, DownloadOutcome):
         return action_or_outcome
-    action = action_or_outcome
+    planned = action_or_outcome
 
     if ctx.config.dry_run and (
         node.download_kind is DownloadKind.OPENCAST or not size_limits_configured(ctx)
@@ -959,7 +1083,6 @@ def download_file(
         response = request_node_url(
             ctx,
             node,
-            log,
             headers=headers,
             stream=True,
             timeout=HTTP_TIMEOUT_SECONDS,
@@ -986,7 +1109,7 @@ def download_file(
             response,
             transfer,
             downloadpath,
-            action,
+            planned,
             log,
         )
         if (
@@ -1030,8 +1153,6 @@ def download_leaf(
             return download_emedia_video(ctx, node, log)
         if node.download_kind is DownloadKind.QUIZ:
             return quiz.download_quiz(ctx, node, log)
-        if node.download_kind is DownloadKind.OPENCAST and ".mp4" not in node.name:
-            node.name = f"{node.name}.mp4" if node.name else node.url.rsplit("/", 1)[-1]
         return download_file(ctx, node, log)
     except Exception:
         log.exception("Failed to download the module %s", node)
@@ -1088,7 +1209,7 @@ def download_emedia_video(
     action_or_outcome = planned_download_action(ctx, node, downloadpath, log)
     if isinstance(action_or_outcome, DownloadOutcome):
         return action_or_outcome
-    action = action_or_outcome
+    planned = action_or_outcome
     if cached_yt_dlp_size_violates_limit(ctx, node, downloadpath, log):
         return SKIPPED_DOWNLOAD
     if ctx.config.dry_run and not size_limits_configured(ctx):
@@ -1134,8 +1255,19 @@ def download_emedia_video(
         temporary_path.with_name(temporary_path.name + ".etag"),
         {},
     )
-    if not install_downloaded_file(downloadpath, transfer, action, log):
-        return FAILED_DOWNLOAD
+    install_result = install_downloaded_file(
+        downloadpath,
+        transfer,
+        planned,
+        ctx.config.conflict_handling,
+        log,
+    )
+    install_outcome = noninstalled_download_outcome(
+        install_result,
+        progress.transferred_bytes,
+    )
+    if install_outcome is not None:
+        return install_outcome
     record_download_metadata(node, downloadpath, None)
     ctx.downloaded_paths.add(downloadpath)
     return completed_download(
@@ -1166,7 +1298,14 @@ def scan_and_download_youtube(
         return FAILED_DOWNLOAD
     path = pathing.get_sanitized_node_path(node.parent, Path(ctx.config.sync_directory))
     link = node.url
-    if filters.should_skip_url(ctx, link, "YouTube link"):
+    course_node = _course_node(node)
+    course_id = course_node.id if course_node is not None else None
+    if filters.should_skip_url(
+        ctx,
+        link,
+        "YouTube link",
+        course_id=course_id,
+    ):
         return SKIPPED_DOWNLOAD
     video_id = links.youtube_video_id_from_node(node)
     if youtube_download_exists(path, video_id):

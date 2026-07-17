@@ -38,8 +38,14 @@ ConfigDict: TypeAlias = dict[str, Any]
 CliValueKind: TypeAlias = Literal["scalar", "csv", "flag"]
 
 CONFLICT_HANDLING_OPTIONS = ("rename", "keep", "overwrite")
-TOKEN_STORE_OPTIONS = ("keyring", "env-file")
-LOGIN_PROVIDER_OPTIONS = ("prompt", "keyring", "env-file", *SECRET_PROVIDER_OPTIONS)
+DEFAULT_TOKEN_STORE = "keyring"
+DEFAULT_LOGIN_PROVIDER = "prompt"
+TOKEN_STORE_OPTIONS = (DEFAULT_TOKEN_STORE, "env-file")
+LOGIN_PROVIDER_OPTIONS = (
+    DEFAULT_LOGIN_PROVIDER,
+    *TOKEN_STORE_OPTIONS,
+    *SECRET_PROVIDER_OPTIONS,
+)
 
 
 def identity(value: Any) -> Any:
@@ -266,7 +272,7 @@ AuthSource: TypeAlias = (
 )
 
 
-@dataclass
+@dataclass(frozen=True)
 class Config:
     """Typed view of the user configuration.
 
@@ -283,7 +289,7 @@ class Config:
         cli=cli_arg("user", "set your RWTH Single Sign-On username"),
     )
     token_store: str = option(
-        "keyring",
+        DEFAULT_TOKEN_STORE,
         group="auth.tokens",
         key="store",
         falsey_uses_default=True,
@@ -298,7 +304,7 @@ class Config:
         resolve_relative_path=True,
     )
     login_provider: str = option(
-        "prompt",
+        DEFAULT_LOGIN_PROVIDER,
         group="auth.login",
         key="provider",
         falsey_uses_default=True,
@@ -917,11 +923,11 @@ def managed_path_errors(
             canonical.get("paths.cookie_file") or default_cookie_file(),
         )
     )
-    if (canonical.get("auth.login.provider") or "prompt") == "env-file":
+    if (canonical.get("auth.login.provider") or DEFAULT_LOGIN_PROVIDER) == "env-file":
         managed_paths.append(
             ("auth.login.env_file", canonical.get("auth.login.env_file"))
         )
-    if (canonical.get("auth.tokens.store") or "keyring") == "env-file":
+    if (canonical.get("auth.tokens.store") or DEFAULT_TOKEN_STORE) == "env-file":
         managed_paths.append(
             ("auth.tokens.env_file", canonical.get("auth.tokens.env_file"))
         )
@@ -979,8 +985,8 @@ def _login_reference_errors(canonical: ConfigDict, provider: Any) -> list[str]:
 
 def auth_source_errors(canonical: ConfigDict) -> list[str]:
     errors: list[str] = []
-    token_store = canonical.get("auth.tokens.store") or "keyring"
-    provider = canonical.get("auth.login.provider") or "prompt"
+    token_store = canonical.get("auth.tokens.store") or DEFAULT_TOKEN_STORE
+    provider = canonical.get("auth.login.provider") or DEFAULT_LOGIN_PROVIDER
 
     if token_store == "env-file" and not canonical.get("auth.tokens.env_file"):
         errors.append(
@@ -1145,7 +1151,9 @@ def convert_legacy_config(raw: Mapping[str, Any] | None) -> ConfigDict:
             # they must never enter the current TOML configuration model.
             continue
         elif key == "use_secret_service":
-            converted["auth.login.provider"] = "keyring" if value else "prompt"
+            converted["auth.login.provider"] = (
+                "keyring" if value else DEFAULT_LOGIN_PROVIDER
+            )
         elif key == "secret_service_store_totp_secret":
             converted["auth.login.keyring_store_totp_secret"] = value
         elif key in LEGACY_KEY_MAP:

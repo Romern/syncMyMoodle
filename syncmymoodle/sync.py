@@ -1,13 +1,13 @@
 import logging
 import time
 from dataclasses import dataclass
-from typing import Any, cast
+from typing import Any
 
 from syncmymoodle import course_cache, filters, pathing, sync_handlers
 from syncmymoodle import moodle as moodle_api
 from syncmymoodle.context import SyncContext
 from syncmymoodle.http_utils import redact_url_secrets
-from syncmymoodle.node import Node
+from syncmymoodle.node import Node, NodeKind
 
 logger = logging.getLogger(__name__)
 SLOW_MODULE_SECONDS = 1.0
@@ -33,8 +33,8 @@ class _CourseRun:
     course: _PreparedCourse
     section_total: int
     module_total: int
-    assignments_by_cmid: dict[Any, Any]
-    folders_by_coursemodule: dict[Any, Any]
+    assignments_by_cmid: dict[int, dict[str, Any]]
+    folders_by_coursemodule: dict[int, dict[str, Any]]
     course_updates: moodle_api.CourseUpdates | None
     module_index: int = 0
 
@@ -53,27 +53,62 @@ class _CourseRun:
         )
 
 
-def _has_complete_module_inventory(course_sections: list[object]) -> bool:
-    for section in course_sections:
-        if not isinstance(section, dict):
-            return False
-        modules = section.get("modules")
-        if not isinstance(modules, list):
-            return False
-        for module in modules:
-            if not isinstance(module, dict):
-                return False
-            module_id = module.get("id")
+def _positive_int(value: Any) -> int | None:
+    return (
+        value
+        if isinstance(value, int) and not isinstance(value, bool) and value > 0
+        else None
+    )
+
+
+def _normalized_course_sections(
+    value: object,
+) -> tuple[list[dict[str, Any]], bool]:
+    """Return a safe course inventory and whether Moodle supplied it intact."""
+    if not isinstance(value, list):
+        return [], False
+
+    complete = True
+    sections: list[dict[str, Any]] = []
+    for raw_section in value:
+        if not isinstance(raw_section, dict):
+            complete = False
+            continue
+
+        section = dict(raw_section)
+        section_id = _positive_int(section.get("id"))
+        section_name = section.get("name")
+        if section_id is None or not isinstance(section_name, str) or not section_name:
+            complete = False
+            section["id"] = section_id
+            section["name"] = (
+                section_name
+                if isinstance(section_name, str) and section_name
+                else f"section {section_id or 'unknown'}"
+            )
+
+        raw_modules = section.get("modules")
+        if not isinstance(raw_modules, list):
+            complete = False
+            raw_modules = []
+        modules: list[dict[str, Any]] = []
+        for raw_module in raw_modules:
+            if not isinstance(raw_module, dict):
+                complete = False
+                continue
+            module = dict(raw_module)
+            module_id = _positive_int(module.get("id"))
             module_kind = module.get("modname")
-            if (
-                not isinstance(module_id, int)
-                or isinstance(module_id, bool)
-                or module_id <= 0
-                or not isinstance(module_kind, str)
-                or not module_kind
-            ):
-                return False
-    return True
+            if module_id is None or not isinstance(module_kind, str) or not module_kind:
+                complete = False
+                continue
+            if not isinstance(module.get("name"), str) or not module["name"]:
+                complete = False
+                module["name"] = f"module {module_id}"
+            modules.append(module)
+        section["modules"] = modules
+        sections.append(section)
+    return sections, complete
 
 
 def _course_passes_local_filters(ctx: SyncContext, course: _CourseSpec) -> bool:
@@ -116,23 +151,64 @@ def _course_passes_local_filters(ctx: SyncContext, course: _CourseSpec) -> bool:
     return True
 
 
+def _course_spec_from_summary(
+    ctx: SyncContext,
+    value: object,
+    position: int,
+) -> _CourseSpec | None:
+    if not isinstance(value, dict):
+        logger.error(
+            "Ignoring malformed Moodle course summary at position %s", position
+        )
+        ctx.stats.failed += 1
+        return None
+    course_id = _positive_int(value.get("id"))
+    if course_id is None:
+        logger.error(
+            "Ignoring Moodle course summary with an invalid id at position %s",
+            position,
+        )
+        ctx.stats.failed += 1
+        return None
+
+    shortname = value.get("shortname")
+    idnumber = value.get("idnumber")
+    malformed = (shortname is not None and not isinstance(shortname, str)) or (
+        idnumber is not None and not isinstance(idnumber, str)
+    )
+    if malformed:
+        logger.error(
+            "Ignoring malformed Moodle course summary for course %s",
+            course_id,
+        )
+        ctx.stats.failed += 1
+        return None
+    safe_shortname = shortname if isinstance(shortname, str) else ""
+    safe_idnumber = idnumber if isinstance(idnumber, str) else ""
+    return _CourseSpec(
+        filters.format_course_name(
+            safe_shortname or f"course-{course_id}",
+            ctx.config,
+            logger,
+        ),
+        course_id,
+        safe_idnumber[:4] or "unknown-semester",
+    )
+
+
 def _locally_selected_courses(ctx: SyncContext) -> list[_CourseSpec]:
     account = ctx.require_moodle_account()
     courses: list[_CourseSpec] = []
-    for course in moodle_api.get_all_courses(
+    summaries = moodle_api.get_all_courses(
         ctx.require_session(), account.wstoken, account.user_id
-    ):
-        course_id = int(course["id"])
-        spec = _CourseSpec(
-            filters.format_course_name(
-                course.get("shortname") or f"course-{course_id}",
-                ctx.config,
-                logger,
-            ),
-            course_id,
-            (course.get("idnumber") or "")[:4] or "unknown-semester",
-        )
-        if _course_passes_local_filters(ctx, spec):
+    )
+    if not isinstance(summaries, list):
+        logger.error("Moodle returned a malformed course summary inventory")
+        ctx.stats.failed += 1
+        return courses
+    for position, summary in enumerate(summaries, start=1):
+        spec = _course_spec_from_summary(ctx, summary, position)
+        if spec is not None and _course_passes_local_filters(ctx, spec):
             courses.append(spec)
     return courses
 
@@ -179,13 +255,12 @@ def _prepare_course_nodes(
     for course in courses:
         semester_node = semester_nodes.get(course.semester)
         if semester_node is None:
-            semester_node = cast(
-                Node, root_node.add_child(course.semester, None, "Semester")
+            semester_node = root_node.add_child(
+                course.semester, None, NodeKind.SEMESTER
             )
             semester_nodes[course.semester] = semester_node
-        course_node = cast(
-            Node,
-            semester_node.add_child(course.name, course.course_id, "Course"),
+        course_node = semester_node.add_child(
+            course.name, course.course_id, NodeKind.COURSE
         )
         prepared.append(_PreparedCourse(course.name, course.course_id, course_node))
     return prepared
@@ -198,16 +273,6 @@ def _remove_course_node(root_node: Node, course_node: Node) -> None:
     semester_node.children.remove(course_node)
     if not semester_node.children:
         root_node.children.remove(semester_node)
-
-
-def _course_modules(course_sections: list[Any]) -> list[dict[str, Any]]:
-    return [
-        module
-        for section in course_sections
-        if isinstance(section, dict)
-        for module in section.get("modules", [])
-        if isinstance(module, dict)
-    ]
 
 
 def _cached_module_update_times(
@@ -270,7 +335,7 @@ def _assignments_by_cmid(
     ctx: SyncContext,
     course: _PreparedCourse,
     module_names: set[Any],
-) -> dict[Any, Any]:
+) -> dict[int, dict[str, Any]]:
     assignments = None
     if ctx.config.module_assignment and "assign" in module_names:
         account = ctx.require_moodle_account()
@@ -279,18 +344,44 @@ def _assignments_by_cmid(
         )
         if assignments is None:
             ctx.mark_course_incomplete(course.node.id)
-    return {
-        assignment["cmid"]: assignment
-        for assignment in ((assignments or {}).get("assignments") or [])
-        if "cmid" in assignment
-    }
+            return {}
+        indexed = _inventory_by_positive_id(assignments.get("assignments"), "cmid")
+        if indexed is None or any(
+            _positive_int(assignment.get("id")) is None
+            for assignment in indexed.values()
+        ):
+            logger.error(
+                "Moodle returned a malformed assignment inventory for %s", course.name
+            )
+            ctx.stats.failed += 1
+            ctx.mark_course_incomplete(course.node.id)
+            return {}
+        return indexed
+    return {}
+
+
+def _inventory_by_positive_id(
+    value: object,
+    key: str,
+) -> dict[int, dict[str, Any]] | None:
+    if not isinstance(value, list):
+        return None
+    indexed: dict[int, dict[str, Any]] = {}
+    for item in value:
+        if not isinstance(item, dict):
+            return None
+        item_id = _positive_int(item.get(key))
+        if item_id is None or item_id in indexed:
+            return None
+        indexed[item_id] = item
+    return indexed
 
 
 def _folders_by_coursemodule(
     ctx: SyncContext,
     course: _PreparedCourse,
     module_names: set[Any],
-) -> dict[Any, Any]:
+) -> dict[int, dict[str, Any]]:
     folders: list[dict[str, Any]] | None = []
     if ctx.config.module_folder and "folder" in module_names:
         account = ctx.require_moodle_account()
@@ -299,7 +390,17 @@ def _folders_by_coursemodule(
         )
         if folders is None:
             ctx.mark_course_incomplete(course.node.id)
-    return {folder.get("coursemodule"): folder for folder in folders or []}
+            return {}
+        indexed = _inventory_by_positive_id(folders, "coursemodule")
+        if indexed is None:
+            logger.error(
+                "Moodle returned a malformed folder inventory for %s", course.name
+            )
+            ctx.stats.failed += 1
+            ctx.mark_course_incomplete(course.node.id)
+            return {}
+        return indexed
+    return {}
 
 
 def _sync_module(
@@ -340,25 +441,17 @@ def _sync_module(
 
 def _sync_section(
     run: _CourseRun,
-    section: Any,
+    section: dict[str, Any],
     section_index: int,
 ) -> None:
-    if not isinstance(section, dict):
-        logger.error("Moodle returned an invalid section for %s", run.course.name)
-        run.ctx.stats.failed += 1
-        run.ctx.mark_course_incomplete(run.course.node.id)
-        run.update_progress(section_index)
-        return
-
     run.update_progress(section_index)
     if filters.should_skip_section(run.ctx, section, run.course.course_id):
         run.module_index += len(section["modules"])
         run.update_progress(section_index)
         return
 
-    section_node = cast(
-        Node,
-        run.course.node.add_child(section["name"], section["id"], "Section"),
+    section_node = run.course.node.add_child(
+        section["name"], section["id"], NodeKind.SECTION
     )
     module_context = sync_handlers.ModuleContext(
         ctx=run.ctx,
@@ -392,18 +485,17 @@ def _sync_course(
         ctx.output.sync_progress.finish_course(course_index)
         return
 
+    course_sections, complete_inventory = _normalized_course_sections(course_sections)
     section_total = len(course_sections)
-    module_total = sum(
-        len(section.get("modules", []))
-        for section in course_sections
-        if isinstance(section, dict)
-    )
+    module_total = sum(len(section["modules"]) for section in course_sections)
     run = _CourseRun(ctx, course, section_total, module_total, {}, {}, None)
     run.update_progress(0)
-    modules = _course_modules(course_sections)
-    if _has_complete_module_inventory(course_sections):
+    modules = [module for section in course_sections for module in section["modules"]]
+    if complete_inventory:
         course_cache.retain_current_modules(ctx, course.node, modules, logger)
     else:
+        logger.error("Moodle returned a malformed inventory for %s", course.name)
+        ctx.stats.failed += 1
         ctx.mark_course_incomplete(course.node.id)
     module_names = {module.get("modname") for module in modules}
     run.course_updates = _course_updates(ctx, course, modules)
@@ -414,9 +506,24 @@ def _sync_course(
     ctx.output.sync_progress.finish_course(course_index)
 
 
+def _sync_course_safely(
+    ctx: SyncContext,
+    root_node: Node,
+    course: _PreparedCourse,
+    course_index: int,
+) -> None:
+    try:
+        _sync_course(ctx, root_node, course, course_index)
+    except Exception:
+        ctx.stats.failed += 1
+        ctx.mark_course_incomplete(course.node.id)
+        logger.exception("Failed to process Moodle course %s", course.name)
+        ctx.output.sync_progress.finish_course(course_index)
+
+
 def sync(ctx: SyncContext) -> None:
     """Retrieve the file tree for all courses into ``ctx.root_node``."""
-    root_node = Node("", -1, "Root", None)
+    root_node = Node("", -1, NodeKind.ROOT, None)
     ctx.root_node = root_node
     ctx.output.sync_progress.discovering_courses()
     courses = _courses_after_role_filter(ctx, _locally_selected_courses(ctx))
@@ -428,5 +535,5 @@ def sync(ctx: SyncContext) -> None:
     for course_index, course in enumerate(prepared_courses, start=1):
         ctx.stats.courses += 1
         progress.start_course(course_index, course.name)
-        _sync_course(ctx, root_node, course, course_index)
+        _sync_course_safely(ctx, root_node, course, course_index)
     pathing.resolve_node_path_clashes(root_node)

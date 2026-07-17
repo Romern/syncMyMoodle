@@ -1,6 +1,5 @@
 import hashlib
 import logging
-import math
 import urllib.parse
 from collections.abc import Iterator
 from dataclasses import dataclass, field
@@ -9,36 +8,52 @@ from typing import Any
 
 from syncmymoodle import links, opencast
 from syncmymoodle.constants import COURSE_CACHE_FILENAME
-from syncmymoodle.context import LinkedResourceCacheEntry, SyncContext
-from syncmymoodle.http_utils import HTML_CONTENT_TYPES, normalized_http_origin
+from syncmymoodle.context import SyncContext
 from syncmymoodle.moodle_tokens import normalized_site
 from syncmymoodle.node import (
     NAME_CLASH_ID_UNSET,
     DownloadKind,
     DownloadStatus,
     Node,
+    NodeKind,
 )
-from syncmymoodle.pathing import get_sanitized_node_path
+from syncmymoodle.pathing import (
+    get_sanitized_node_path,
+    with_windows_extended_length_prefix,
+)
 from syncmymoodle.storage import read_private_gzip_json, write_private_gzip_json
 
 logger = logging.getLogger(__name__)
-COURSE_CACHE_FORMAT = "syncmymoodle.course-cache.v1"
+LEGACY_COURSE_CACHE_FORMAT = "syncmymoodle.course-cache.v1"
+COURSE_CACHE_FORMAT = "syncmymoodle.course-cache.v2"
 COURSE_CACHE_DIRECTORY = ".syncmymoodle-cache"
 MODULE_CACHE_KEY = "module_data"
 CACHED_TEXT_CACHE_KEY = "cached_text"
 OPENCAST_EPISODES_CACHE_KEY = "opencast_episodes"
-OPENCAST_EPISODES_CACHE_FORMAT = "syncmymoodle.opencast-episodes.v1"
 LINKED_RESOURCES_CACHE_KEY = "linked_resources"
-LINKED_RESOURCES_CACHE_FORMAT = "syncmymoodle.linked-resources.v1"
 H5P_CONTENT_KIND = "h5p"
 PAGE_CONTENT_KIND = "page"
 CACHED_TEXT_KINDS = (H5P_CONTENT_KIND, PAGE_CONTENT_KIND)
 LEGACY_DOWNLOAD_KINDS = {
     "Youtube": DownloadKind.YOUTUBE,
-    "Emedia": DownloadKind.EMEDIA,
     "Quiz": DownloadKind.QUIZ,
     "Opencast": DownloadKind.OPENCAST,
 }
+LEGACY_NODE_FIELDS = frozenset(
+    {
+        "name",
+        "id",
+        "type",
+        "url",
+        "timemodified",
+        "etag",
+        "etag_kind",
+        "content_hash",
+        "name_clash_id",
+        "download_status",
+        "children",
+    }
+)
 
 
 @dataclass(frozen=True)
@@ -71,8 +86,6 @@ class CourseCacheState:
     )
     assignments: dict[int, AssignmentCacheEntry] = field(default_factory=dict)
     quizzes: dict[int, QuizCacheEntry] = field(default_factory=dict)
-    opencast_episodes: dict[str, opencast.OpencastEpisode] = field(default_factory=dict)
-    linked_resources: dict[str, LinkedResourceCacheEntry] = field(default_factory=dict)
     complete_module_inventory: bool = False
 
 
@@ -108,7 +121,7 @@ def course_cache_path(ctx: SyncContext, course_node: Node) -> Path:
     """Return the stable, account-bound cache path for one Moodle course."""
     identity = _cache_identity(ctx, course_node)
     site_key = hashlib.sha256(str(identity["site"]).encode("utf-8")).hexdigest()
-    return (
+    cache_path = (
         Path(ctx.config.sync_directory).expanduser()
         / COURSE_CACHE_DIRECTORY
         / site_key
@@ -116,6 +129,7 @@ def course_cache_path(ctx: SyncContext, course_node: Node) -> Path:
         / str(identity["course_id"])
         / COURSE_CACHE_FILENAME
     )
+    return with_windows_extended_length_prefix(cache_path)
 
 
 def _cache_identity(ctx: SyncContext, course_node: Node) -> dict[str, Any]:
@@ -152,12 +166,28 @@ def _legacy_course_cache_paths(
     if direct_path.is_file():
         yield direct_path
     stable_directory = sync_directory / COURSE_CACHE_DIRECTORY
+    if ctx.legacy_course_cache_paths is None:
+        paths_by_course: dict[int, list[Path]] = {}
+        for path in sync_directory.rglob(COURSE_CACHE_FILENAME):
+            if not path.is_file() or path.is_relative_to(stable_directory):
+                continue
+            payload = read_private_gzip_json(path, "legacy course cache")
+            if (
+                not isinstance(payload, dict)
+                or set(payload) != {"format", "course"}
+                or payload.get("format") != LEGACY_COURSE_CACHE_FORMAT
+                or not isinstance(payload.get("course"), dict)
+            ):
+                continue
+            course_id = _module_id(payload["course"].get("id"))
+            if course_id is not None:
+                paths_by_course.setdefault(course_id, []).append(path)
+        ctx.legacy_course_cache_paths = paths_by_course
+    course_id = _module_id(course_node.id)
     yield from (
         path
-        for path in sync_directory.rglob(COURSE_CACHE_FILENAME)
-        if path != direct_path
-        and path.is_file()
-        and not path.is_relative_to(stable_directory)
+        for path in ctx.legacy_course_cache_paths.get(course_id or -1, [])
+        if path != direct_path and path.is_file()
     )
 
 
@@ -168,7 +198,7 @@ def _node_tree_has_site_url(course_root: Node, site: str) -> bool:
     while pending:
         node = pending.pop()
         pending.extend(node.children)
-        if not node.url:
+        if not isinstance(node.url, str) or not node.url:
             continue
         actual = urllib.parse.urlsplit(node.url)
         if (
@@ -180,29 +210,33 @@ def _node_tree_has_site_url(course_root: Node, site: str) -> bool:
     return False
 
 
-def _cached_download_kind(data: dict[str, Any]) -> DownloadKind | str | None:
-    value = data.get("download_kind")
-    if isinstance(value, str):
-        return value
+def _legacy_download_kind(data: dict[str, Any]) -> DownloadKind:
     node_type = data.get("type")
-    return LEGACY_DOWNLOAD_KINDS.get(node_type) if isinstance(node_type, str) else None
+    return (
+        LEGACY_DOWNLOAD_KINDS.get(node_type, DownloadKind.DIRECT)
+        if isinstance(node_type, str)
+        else DownloadKind.DIRECT
+    )
 
 
 def _shared_legacy_node_data(data: dict[str, Any]) -> dict[str, Any] | None:
     node_type = data.get("type")
-    download_kind = _cached_download_kind(data)
+    download_kind = _legacy_download_kind(data)
     if node_type == "Assignment File" or download_kind == DownloadKind.QUIZ:
         return None
 
-    shared = dict(data)
+    shared = {key: value for key, value in data.items() if key in LEGACY_NODE_FIELDS}
+    shared["download_kind"] = str(download_kind)
     children = data.get("children")
     if isinstance(children, list):
-        shared["children"] = [
-            shared_child
-            for child in children
-            if isinstance(child, dict)
-            and (shared_child := _shared_legacy_node_data(child)) is not None
-        ]
+        if all(isinstance(child, dict) for child in children):
+            shared["children"] = [
+                shared_child
+                for child in children
+                if (shared_child := _shared_legacy_node_data(child)) is not None
+            ]
+        else:
+            shared["children"] = children
     return shared
 
 
@@ -211,6 +245,11 @@ def _account_bound_legacy_payload(
     course_node: Node,
     payload: dict[str, Any],
 ) -> dict[str, Any] | None:
+    if (
+        set(payload) != {"format", "course"}
+        or payload.get("format") != LEGACY_COURSE_CACHE_FORMAT
+    ):
+        return None
     identity = _cache_identity(ctx, course_node)
     course_data = payload.get("course")
     if (
@@ -218,45 +257,20 @@ def _account_bound_legacy_payload(
         or _module_id(course_data.get("id")) != identity["course_id"]
     ):
         return None
+    shared_course = _shared_legacy_node_data(course_data)
+    if shared_course is None:
+        return None
     try:
-        course_root = node_from_cache_data(course_data)
+        course_root = node_from_cache_data(shared_course)
     except (TypeError, ValueError):
         return None
-
-    cached_identity = payload.get("identity")
-    if cached_identity is not None:
-        if not isinstance(cached_identity, dict) or (
-            cached_identity.get("site") != identity["site"]
-            or cached_identity.get("course_id") != identity["course_id"]
-        ):
-            return None
-        owner_matches = cached_identity.get("user_id") == identity["user_id"]
-    else:
-        if not _node_tree_has_site_url(course_root, str(identity["site"])):
-            return None
-        raw_module_cache = payload.get(MODULE_CACHE_KEY)
-        owner_matches = isinstance(raw_module_cache, dict) and (
-            raw_module_cache.get("owner_user_id") == identity["user_id"]
-        )
-
-    migrated = {**payload, "identity": identity}
-    if owner_matches:
-        return migrated
-
-    shared_course = _shared_legacy_node_data(course_data)
-    assert shared_course is not None
-    migrated["course"] = shared_course
-    raw_module_cache = payload.get(MODULE_CACHE_KEY)
-    cached_text = (
-        raw_module_cache.get(CACHED_TEXT_CACHE_KEY)
-        if isinstance(raw_module_cache, dict)
-        else None
-    )
-    if cached_text is None:
-        migrated.pop(MODULE_CACHE_KEY, None)
-    else:
-        migrated[MODULE_CACHE_KEY] = {CACHED_TEXT_CACHE_KEY: cached_text}
-    return migrated
+    if not _node_tree_has_site_url(course_root, str(identity["site"])):
+        return None
+    return {
+        "format": COURSE_CACHE_FORMAT,
+        "identity": identity,
+        "course": shared_course,
+    }
 
 
 def _migrate_legacy_course_cache(
@@ -266,8 +280,8 @@ def _migrate_legacy_course_cache(
     log: logging.Logger,
 ) -> dict[str, Any] | None:
     for legacy_path in _legacy_course_cache_paths(ctx, course_node):
-        payload = _read_course_cache_payload(legacy_path, log)
-        if payload is None:
+        payload = read_private_gzip_json(legacy_path, "legacy course cache")
+        if not isinstance(payload, dict):
             continue
         migrated = _account_bound_legacy_payload(ctx, course_node, payload)
         if migrated is None:
@@ -405,114 +419,6 @@ def _quiz_cache_entries(value: Any) -> dict[int, QuizCacheEntry]:
     return entries
 
 
-def _opencast_episode_entries(
-    value: Any,
-) -> dict[str, opencast.OpencastEpisode]:
-    entries: dict[str, opencast.OpencastEpisode] = {}
-    if (
-        not isinstance(value, dict)
-        or value.get("format") != OPENCAST_EPISODES_CACHE_FORMAT
-        or not isinstance(value.get("episodes"), dict)
-    ):
-        return entries
-    for episode_id, raw_episode in value["episodes"].items():
-        if not isinstance(episode_id, str) or not episode_id:
-            continue
-        episode = opencast.episode_from_cache_data(raw_episode)
-        if episode is not None:
-            entries[episode_id] = episode
-    return entries
-
-
-def _linked_resource_entries(value: Any) -> dict[str, LinkedResourceCacheEntry]:
-    entries: dict[str, LinkedResourceCacheEntry] = {}
-    if (
-        not isinstance(value, dict)
-        or value.get("format") != LINKED_RESOURCES_CACHE_FORMAT
-        or not isinstance(value.get("resources"), dict)
-    ):
-        return entries
-    for requested_url, raw_entry in value["resources"].items():
-        if (
-            not isinstance(requested_url, str)
-            or normalized_http_origin(requested_url) is None
-        ):
-            continue
-        if not isinstance(raw_entry, dict):
-            continue
-        final_url = raw_entry.get("final_url")
-        content_type = raw_entry.get("content_type")
-        html = raw_entry.get("html")
-        etag = raw_entry.get("etag")
-        last_modified = raw_entry.get("last_modified")
-        fresh_until = raw_entry.get("fresh_until")
-        remote_size = raw_entry.get("remote_size")
-        if (
-            not isinstance(final_url, str)
-            or normalized_http_origin(final_url) is None
-            or not isinstance(content_type, str)
-            or not content_type
-            or (html is not None and not isinstance(html, str))
-            or ((content_type in HTML_CONTENT_TYPES) != isinstance(html, str))
-            or (etag is not None and (not isinstance(etag, str) or not etag))
-            or (
-                last_modified is not None
-                and (not isinstance(last_modified, str) or not last_modified)
-            )
-            or (
-                fresh_until is not None
-                and (
-                    not isinstance(fresh_until, (int, float))
-                    or isinstance(fresh_until, bool)
-                    or not math.isfinite(fresh_until)
-                    or fresh_until < 0
-                )
-            )
-            or (
-                remote_size is not None
-                and (
-                    not isinstance(remote_size, int)
-                    or isinstance(remote_size, bool)
-                    or remote_size < 0
-                )
-            )
-        ):
-            continue
-        entries[requested_url] = LinkedResourceCacheEntry(
-            final_url,
-            content_type,
-            html,
-            etag,
-            last_modified,
-            float(fresh_until) if fresh_until is not None else None,
-            remote_size,
-        )
-    return entries
-
-
-def _course_linked_resources(
-    ctx: SyncContext,
-    course_id: int | None,
-    raw_cache: dict[str, Any],
-    personal_cache_matches: bool,
-) -> dict[str, LinkedResourceCacheEntry]:
-    linked_resources = (
-        _linked_resource_entries(raw_cache.get(LINKED_RESOURCES_CACHE_KEY))
-        if personal_cache_matches
-        else {}
-    )
-    if course_id is None:
-        return linked_resources
-    course_key = str(course_id)
-    runtime_resources = ctx.linked_resources_by_course.get(course_key)
-    if runtime_resources is None:
-        ctx.linked_resources_by_course[course_key] = linked_resources
-        return linked_resources
-    for requested_url, entry in linked_resources.items():
-        runtime_resources.setdefault(requested_url, entry)
-    return runtime_resources
-
-
 def _course_cache_state(
     ctx: SyncContext,
     course_node: Node,
@@ -552,12 +458,6 @@ def _course_cache_state(
         and raw_cache.get("owner_user_id") == current_user_id
     )
     course_id = _module_id(course_node.id)
-    linked_resources = _course_linked_resources(
-        ctx,
-        course_id,
-        raw_cache,
-        personal_cache_matches,
-    )
     state = CourseCacheState(
         course_root=course_root,
         cached_text={
@@ -574,19 +474,18 @@ def _course_cache_state(
             if personal_cache_matches
             else {}
         ),
-        opencast_episodes=(
-            _opencast_episode_entries(raw_cache.get(OPENCAST_EPISODES_CACHE_KEY))
-            if personal_cache_matches
-            else {}
-        ),
-        linked_resources=linked_resources,
     )
-    if course_id is not None:
-        for episode_id, episode in state.opencast_episodes.items():
-            ctx.opencast_episode_cache.setdefault(
-                (str(course_id), episode_id),
-                episode,
-            )
+    if personal_cache_matches and course_id is not None:
+        opencast.restore_cached_episodes(
+            ctx,
+            course_id,
+            raw_cache.get(OPENCAST_EPISODES_CACHE_KEY),
+        )
+        links.restore_cached_resources(
+            ctx,
+            course_id,
+            raw_cache.get(LINKED_RESOURCES_CACHE_KEY),
+        )
     ctx.course_cache_states[course_node] = state
     return state
 
@@ -739,50 +638,6 @@ def _cached_text_data(
     }
 
 
-def _opencast_episodes_data(
-    entries: dict[str, opencast.OpencastEpisode],
-) -> dict[str, Any]:
-    return {
-        "format": OPENCAST_EPISODES_CACHE_FORMAT,
-        "episodes": {
-            episode_id: opencast.episode_cache_data(episode)
-            for episode_id, episode in sorted(entries.items())
-        },
-    }
-
-
-def _linked_resources_data(
-    entries: dict[str, LinkedResourceCacheEntry],
-) -> dict[str, Any]:
-    return {
-        "format": LINKED_RESOURCES_CACHE_FORMAT,
-        "resources": {
-            requested_url: {
-                "final_url": entry.final_url,
-                "content_type": entry.content_type,
-                **({"html": entry.html} if entry.html is not None else {}),
-                **({"etag": entry.etag} if entry.etag is not None else {}),
-                **(
-                    {"last_modified": entry.last_modified}
-                    if entry.last_modified is not None
-                    else {}
-                ),
-                **(
-                    {"fresh_until": entry.fresh_until}
-                    if entry.fresh_until is not None
-                    else {}
-                ),
-                **(
-                    {"remote_size": entry.remote_size}
-                    if entry.remote_size is not None
-                    else {}
-                ),
-            }
-            for requested_url, entry in sorted(entries.items())
-        },
-    }
-
-
 def _course_module_cache_data(
     ctx: SyncContext,
     state: CourseCacheState,
@@ -790,29 +645,18 @@ def _course_module_cache_data(
 ) -> dict[str, Any]:
     data: dict[str, Any] = {}
     course_id = _module_id(course_node.id)
-    if course_id is not None:
-        course_key = str(course_id)
-        state.opencast_episodes = {
-            episode_id: episode
-            for (
-                cached_course_id,
-                episode_id,
-            ), episode in ctx.opencast_episode_cache.items()
-            if cached_course_id == course_key
-            and (course_key, episode_id) in ctx.opencast_seen_episodes
-        }
-        if state.complete_module_inventory:
-            seen_urls = {
-                requested_url
-                for seen_course, requested_url in ctx.seen_linked_resources
-                if seen_course == course_key
-            }
-            state.linked_resources = {
-                requested_url: entry
-                for requested_url, entry in state.linked_resources.items()
-                if requested_url in seen_urls
-            }
-            ctx.linked_resources_by_course[course_key] = state.linked_resources
+    opencast_data = (
+        opencast.cached_episodes_data(ctx, course_id) if course_id is not None else None
+    )
+    linked_resources_data = (
+        links.cached_resources_data(
+            ctx,
+            course_id,
+            complete_inventory=state.complete_module_inventory,
+        )
+        if course_id is not None
+        else None
+    )
     cached_text = {
         kind: _cached_text_data(state.cached_text[kind], kind)
         for kind in CACHED_TEXT_KINDS
@@ -820,12 +664,7 @@ def _course_module_cache_data(
     }
     if cached_text:
         data[CACHED_TEXT_CACHE_KEY] = cached_text
-    if (
-        state.assignments
-        or state.quizzes
-        or state.opencast_episodes
-        or state.linked_resources
-    ):
+    if state.assignments or state.quizzes or opencast_data or linked_resources_data:
         if ctx.moodle_account is None:
             return data
         data["owner_user_id"] = ctx.moodle_account.user_id
@@ -848,14 +687,10 @@ def _course_module_cache_data(
             }
             for module_id, entry in sorted(state.quizzes.items())
         }
-    if state.opencast_episodes:
-        data[OPENCAST_EPISODES_CACHE_KEY] = _opencast_episodes_data(
-            state.opencast_episodes
-        )
-    if state.linked_resources:
-        data[LINKED_RESOURCES_CACHE_KEY] = _linked_resources_data(
-            state.linked_resources
-        )
+    if opencast_data is not None:
+        data[OPENCAST_EPISODES_CACHE_KEY] = opencast_data
+    if linked_resources_data is not None:
+        data[LINKED_RESOURCES_CACHE_KEY] = linked_resources_data
     return data
 
 
@@ -969,9 +804,6 @@ def node_from_cache_data(data: dict[str, Any], parent: Node | None = None) -> No
     ):
         raise ValueError("course cache node has invalid children")
 
-    download_status = data.get("download_status")
-    if download_status is None and data.get("is_downloaded") is True:
-        download_status = DownloadStatus.HANDLED
     node = Node(
         name,
         data.get("id"),
@@ -985,8 +817,8 @@ def node_from_cache_data(data: dict[str, Any], parent: Node | None = None) -> No
         artifact_hashes=data.get("artifact_hashes"),
         remote_size=data.get("remote_size"),
         name_clash_id=data.get("name_clash_id", NAME_CLASH_ID_UNSET),
-        download_status=download_status,
-        download_kind=_cached_download_kind(data),
+        download_status=data.get("download_status"),
+        download_kind=data.get("download_kind"),
     )
     node.children = [node_from_cache_data(child, node) for child in children]
     return node
@@ -994,12 +826,10 @@ def node_from_cache_data(data: dict[str, Any], parent: Node | None = None) -> No
 
 def get_course_node(node: Node) -> Node:
     """Return the enclosing course node for the given node."""
-    cur = node
-    while cur is not None and cur.parent is not None:
-        if cur.type == "Course":
-            return cur
-        cur = cur.parent
-    raise Exception("Node is not part of a course subtree")
+    course_node = node.ancestor(NodeKind.COURSE)
+    if course_node is None:
+        raise ValueError("Node is not part of a course subtree")
+    return course_node
 
 
 def get_course_cache_root(
@@ -1019,7 +849,7 @@ def get_old_node_for(
     """Return the cached node for this node from the course cache, if any."""
     try:
         course_node = get_course_node(node)
-    except Exception:
+    except ValueError:
         return None
 
     cached_course_root = get_course_cache_root(ctx, course_node, log)
@@ -1053,10 +883,10 @@ def cache_root_node(
         return
 
     for semester_node in ctx.root_node.children:
-        if semester_node.type != "Semester":
+        if semester_node.type != NodeKind.SEMESTER:
             continue
         for course_node in semester_node.children:
-            if course_node.type != "Course":
+            if course_node.type != NodeKind.COURSE:
                 continue
             state = _course_cache_state(ctx, course_node, log)
             if course_node.id in ctx.incomplete_course_ids:

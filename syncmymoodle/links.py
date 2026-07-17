@@ -1,4 +1,5 @@
 import logging
+import math
 import time
 import urllib.parse
 from collections.abc import Callable
@@ -9,12 +10,13 @@ import requests
 from yt_dlp.extractor.youtube import YoutubeIE  # type: ignore[import-untyped]
 
 from syncmymoodle import emedia as emedia_api
-from syncmymoodle import filters
+from syncmymoodle import filters, moodle_files
 from syncmymoodle import opencast as opencast_api
 from syncmymoodle import sciebo as sciebo_api
 from syncmymoodle.constants import (
     EMEDIA_LINK_RE,
     HTTP_TIMEOUT_SECONDS,
+    LINKED_PAGE_MAX_BYTES,
     OPENCAST_LINK_RE,
     SCIEBO_LINK_RE,
     YOUTUBE_LINK_RE,
@@ -31,6 +33,7 @@ from syncmymoodle.http_utils import (
     filename_from_url,
     normalized_http_origin,
     parse_html,
+    read_capped_body,
     record_service_failure,
     redact_url_secrets,
     request_following_safe_redirects,
@@ -39,6 +42,7 @@ from syncmymoodle.http_utils import (
 from syncmymoodle.node import DownloadKind, Node, RemoteMarkerKind
 
 logger = logging.getLogger(__name__)
+LINKED_RESOURCES_CACHE_FORMAT = "syncmymoodle.linked-resources.v1"
 
 
 def _response_header(response: Any, name: str) -> str | None:
@@ -126,6 +130,135 @@ def _conditional_headers(cached: LinkedResourceCacheEntry | None) -> dict[str, s
     return headers
 
 
+def _cached_resource_entries(value: Any) -> dict[str, LinkedResourceCacheEntry]:
+    entries: dict[str, LinkedResourceCacheEntry] = {}
+    if (
+        not isinstance(value, dict)
+        or value.get("format") != LINKED_RESOURCES_CACHE_FORMAT
+        or not isinstance(value.get("resources"), dict)
+    ):
+        return entries
+    for requested_url, raw_entry in value["resources"].items():
+        if (
+            not isinstance(requested_url, str)
+            or normalized_http_origin(requested_url) is None
+            or not isinstance(raw_entry, dict)
+        ):
+            continue
+        final_url = raw_entry.get("final_url")
+        content_type = raw_entry.get("content_type")
+        html = raw_entry.get("html")
+        etag = raw_entry.get("etag")
+        last_modified = raw_entry.get("last_modified")
+        fresh_until = raw_entry.get("fresh_until")
+        remote_size = raw_entry.get("remote_size")
+        if (
+            not isinstance(final_url, str)
+            or normalized_http_origin(final_url) is None
+            or not isinstance(content_type, str)
+            or not content_type
+            or (html is not None and not isinstance(html, str))
+            or ((content_type in HTML_CONTENT_TYPES) != isinstance(html, str))
+            or (etag is not None and (not isinstance(etag, str) or not etag))
+            or (
+                last_modified is not None
+                and (not isinstance(last_modified, str) or not last_modified)
+            )
+            or (
+                fresh_until is not None
+                and (
+                    not isinstance(fresh_until, (int, float))
+                    or isinstance(fresh_until, bool)
+                    or not math.isfinite(fresh_until)
+                    or fresh_until < 0
+                )
+            )
+            or (
+                remote_size is not None
+                and (
+                    not isinstance(remote_size, int)
+                    or isinstance(remote_size, bool)
+                    or remote_size < 0
+                )
+            )
+        ):
+            continue
+        entries[requested_url] = LinkedResourceCacheEntry(
+            final_url,
+            content_type,
+            html,
+            etag,
+            last_modified,
+            float(fresh_until) if fresh_until is not None else None,
+            remote_size,
+        )
+    return entries
+
+
+def restore_cached_resources(ctx: SyncContext, course_id: Any, value: Any) -> None:
+    """Restore persisted link metadata into the provider's runtime cache."""
+    course_key = str(course_id)
+    cached = ctx.linked_resources_by_course.get(course_key)
+    restored = _cached_resource_entries(value)
+    if cached is None:
+        ctx.linked_resources_by_course[course_key] = restored
+        return
+    for requested_url, entry in restored.items():
+        cached.setdefault(requested_url, entry)
+
+
+def cached_resources_data(
+    ctx: SyncContext,
+    course_id: Any,
+    *,
+    complete_inventory: bool,
+) -> dict[str, Any] | None:
+    """Snapshot the link metadata that remains relevant to one course."""
+    course_key = str(course_id)
+    entries = ctx.linked_resources_by_course.get(course_key, {})
+    if complete_inventory:
+        seen_urls = {
+            requested_url
+            for seen_course, requested_url in ctx.seen_linked_resources
+            if seen_course == course_key
+        }
+        entries = {
+            requested_url: entry
+            for requested_url, entry in entries.items()
+            if requested_url in seen_urls
+        }
+        ctx.linked_resources_by_course[course_key] = entries
+    if not entries:
+        return None
+    return {
+        "format": LINKED_RESOURCES_CACHE_FORMAT,
+        "resources": {
+            requested_url: {
+                "final_url": entry.final_url,
+                "content_type": entry.content_type,
+                **({"html": entry.html} if entry.html is not None else {}),
+                **({"etag": entry.etag} if entry.etag is not None else {}),
+                **(
+                    {"last_modified": entry.last_modified}
+                    if entry.last_modified is not None
+                    else {}
+                ),
+                **(
+                    {"fresh_until": entry.fresh_until}
+                    if entry.fresh_until is not None
+                    else {}
+                ),
+                **(
+                    {"remote_size": entry.remote_size}
+                    if entry.remote_size is not None
+                    else {}
+                ),
+            }
+            for requested_url, entry in sorted(entries.items())
+        },
+    }
+
+
 def _head_linked_resource(
     ctx: SyncContext,
     url: str,
@@ -167,6 +300,36 @@ def _head_linked_resource(
                 entry, cacheable = _response_cache_entry(response, None)
                 return entry, final_url, request_origin, cacheable
             return None, final_url, request_origin, True
+
+
+def _linked_page_html(
+    response: Any,
+    final_url: str,
+    log: logging.Logger,
+) -> tuple[str | None, bool]:
+    content_type = content_type_without_parameters(response)
+    if content_type and content_type not in HTML_CONTENT_TYPES:
+        return None, True
+    declared_size = content_length(response)
+    if declared_size is not None and declared_size > LINKED_PAGE_MAX_BYTES:
+        log.warning(
+            "Skipping linked page %s because its declared size exceeds the "
+            "inspection limit",
+            redact_url_secrets(final_url),
+        )
+        return None, False
+    body = read_capped_body(response, LINKED_PAGE_MAX_BYTES)
+    if body is None:
+        log.warning(
+            "Skipping linked page %s because it exceeds the inspection limit",
+            redact_url_secrets(final_url),
+        )
+        return None, False
+    encoding = getattr(response, "encoding", None) or "utf-8"
+    try:
+        return body.decode(encoding, errors="replace"), True
+    except LookupError:
+        return body.decode("utf-8", errors="replace"), True
 
 
 def _get_linked_resource(
@@ -224,18 +387,16 @@ def _get_linked_resource(
 
             if response_origin:
                 ctx.service_outages.record_available(response_origin)
-            content_type = content_type_without_parameters(response)
-            html = (
-                None
-                if content_type and content_type not in HTML_CONTENT_TYPES
-                else response.text
-            )
+            html, usable = _linked_page_html(response, final_url, log)
+            if not usable:
+                return None, False
             return _response_cache_entry(response, html)
 
 
 def _fresh_cached_resource(
     ctx: SyncContext,
     cached: LinkedResourceCacheEntry | None,
+    course_id: Any,
 ) -> tuple[bool, LinkedResourceCacheEntry | None]:
     if (
         cached is None
@@ -243,7 +404,12 @@ def _fresh_cached_resource(
         or time.time() >= cached.fresh_until
     ):
         return False, None
-    if filters.should_skip_url(ctx, cached.final_url, "cached linked resource"):
+    if filters.should_skip_url(
+        ctx,
+        cached.final_url,
+        "cached linked resource",
+        course_id=course_id,
+    ):
         return True, None
     return True, cached
 
@@ -272,25 +438,33 @@ def _handle_link_request_error(
         error, filters.FilteredRequestError
     ):
         log.warning("Skipping link request: %s", reason)
-    return None, True
+    # A course-specific URL policy rejection must not become a global negative
+    # result for a later course with a more permissive policy.
+    return None, not isinstance(error, filters.FilteredRequestError)
 
 
 def _resolve_linked_resource(
     ctx: SyncContext,
     url: str,
     cached: LinkedResourceCacheEntry | None,
+    course_id: Any,
     log: logging.Logger,
 ) -> tuple[LinkedResourceCacheEntry | None, bool]:
     link_origin = normalized_http_origin(url)
     request_origin = link_origin
-    use_cached, fresh_resource = _fresh_cached_resource(ctx, cached)
+    use_cached, fresh_resource = _fresh_cached_resource(ctx, cached, course_id)
     if use_cached:
         return fresh_resource, True
     if link_origin and ctx.service_outages.should_skip(link_origin):
         return None, True
 
     def url_allowed(candidate: str) -> bool:
-        return filters.require_url_allowed(ctx, candidate, "redirected link")
+        return filters.require_url_allowed(
+            ctx,
+            candidate,
+            "redirected link",
+            course_id=course_id,
+        )
 
     try:
         if cached is not None and cached.html is not None and ctx.config.follow_links:
@@ -343,6 +517,53 @@ def _known_provider_link(url: str) -> bool:
     )
 
 
+def _linked_resource_for_course(
+    ctx: SyncContext,
+    url: str,
+    course_id: Any,
+    log: logging.Logger,
+) -> LinkedResourceCacheEntry | None:
+    course_key = str(course_id)
+    cache = ctx.linked_resources_by_course.setdefault(course_key, {})
+    cached_resource = cache.get(url)
+    if cached_resource is not None and filters.should_skip_url(
+        ctx,
+        cached_resource.final_url,
+        "cached linked resource",
+        course_id=course_id,
+    ):
+        return None
+    ctx.seen_linked_resources.add((course_key, url))
+    if url in ctx.linked_resource_results:
+        resource = ctx.linked_resource_results[url]
+        if resource is not None and filters.should_skip_url(
+            ctx,
+            resource.final_url,
+            "cached linked resource",
+            course_id=course_id,
+        ):
+            return None
+        if resource is not None:
+            cache[url] = resource
+    else:
+        resource, cacheable = _resolve_linked_resource(
+            ctx,
+            url,
+            cached_resource,
+            course_id,
+            log,
+        )
+        if cacheable:
+            if resource is not None:
+                cache[url] = resource
+            ctx.linked_resource_results[url] = resource
+        else:
+            cache.pop(url, None)
+    if resource is None and cached_resource is not None:
+        ctx.mark_course_incomplete(course_id)
+    return resource
+
+
 def _scan_single_link(
     ctx: SyncContext,
     url: str,
@@ -352,31 +573,13 @@ def _scan_single_link(
     log: logging.Logger,
 ) -> bool:
     """Resolve one generic link and return whether it is a direct file."""
-    if filters.should_skip_url(ctx, url, "link"):
+    if filters.should_skip_url(ctx, url, "link", course_id=course_id):
         return False
-    course_key = str(course_id)
-    cache = ctx.linked_resources_by_course.setdefault(course_key, {})
-    cached_resource = cache.get(url)
-    ctx.seen_linked_resources.add((course_key, url))
-    if url in ctx.linked_resource_results:
-        resource = ctx.linked_resource_results[url]
-        if resource is not None:
-            cache[url] = resource
-    else:
-        resource, cacheable = _resolve_linked_resource(ctx, url, cache.get(url), log)
-        if cacheable:
-            if resource is not None:
-                cache[url] = resource
-            ctx.linked_resource_results[url] = resource
-        else:
-            cache.pop(url, None)
-
+    resource = _linked_resource_for_course(ctx, url, course_id, log)
     if resource is None:
-        if cached_resource is not None:
-            ctx.mark_course_incomplete(course_id)
         return False
     if resource.html is None:
-        parent_node.add_child(
+        parent_node.add_download_child(
             filename_from_url(resource.final_url),
             None,
             f"Linked file [{resource.content_type}]",
@@ -440,9 +643,16 @@ def scan_html_text_for_links(
             videojs = videojs.select_one("source")
             if videojs and videojs.get("src"):
                 video_src = cast(str, videojs["src"])
-                link = urllib.parse.urljoin(str(base_url or ""), video_src)
-                if not filters.should_skip_url(ctx, link, "embedded video"):
-                    parent_node.add_child(
+                link = moodle_files.canonicalize_moodle_file_url(
+                    urllib.parse.urljoin(str(base_url or ""), video_src)
+                )
+                if not filters.should_skip_url(
+                    ctx,
+                    link,
+                    "embedded video",
+                    course_id=course_id,
+                ):
+                    parent_node.add_download_child(
                         video_src.split("/")[-1],
                         None,
                         "Embedded videojs",
@@ -464,19 +674,25 @@ def _scan_youtube_links(
     ctx: SyncContext,
     text: str,
     parent_node: Node,
+    course_id: Any,
     module_title: Any,
 ) -> None:
     if not ctx.config.link_source_enabled("youtube"):
         return
     for match in YOUTUBE_LINK_RE.finditer(text):
         link = match.group(1)
-        if filters.should_skip_url(ctx, link, "YouTube link"):
+        if filters.should_skip_url(
+            ctx,
+            link,
+            "YouTube link",
+            course_id=course_id,
+        ):
             continue
         video_id = youtube_video_id(link)
         if video_id is None:
             continue
         canonical_url = canonical_youtube_url(video_id)
-        parent_node.add_child(
+        parent_node.add_download_child(
             f"Youtube: {module_title or canonical_url}",
             video_id,
             "Youtube",
@@ -496,11 +712,19 @@ def _scan_opencast_links(
     if not ctx.config.link_source_enabled("opencast"):
         return
     for video_url in OPENCAST_LINK_RE.findall(text):
-        if filters.should_skip_url(ctx, video_url, "Opencast link"):
+        if filters.should_skip_url(
+            ctx,
+            video_url,
+            "Opencast link",
+            course_id=course_id,
+        ):
             continue
         video_id = opencast_api.extract_episode_id(video_url)
         if not video_id:
-            log.warning("Opencast: could not extract episode id from url %s", video_url)
+            log.warning(
+                "Opencast: could not extract episode id from url %s",
+                redact_url_secrets(video_url),
+            )
             continue
         opencast_api.add_episode_nodes(
             ctx,
@@ -516,6 +740,7 @@ def _scan_emedia_links(
     ctx: SyncContext,
     text: str,
     parent_node: Node,
+    course_id: Any,
     module_title: Any,
     log: logging.Logger,
 ) -> None:
@@ -523,10 +748,22 @@ def _scan_emedia_links(
         return
     for match in EMEDIA_LINK_RE.finditer(text):
         link = match.group(0)
-        if filters.should_skip_url(ctx, link, "emedia link"):
+        if filters.should_skip_url(
+            ctx,
+            link,
+            "emedia link",
+            course_id=course_id,
+        ):
             continue
         ctx.output.sync_progress.module_status("resolving emedia video")
-        emedia_api.add_video_node(ctx, parent_node, link, module_title, log)
+        emedia_api.add_video_node(
+            ctx,
+            parent_node,
+            link,
+            module_title,
+            log,
+            course_id=course_id,
+        )
 
 
 def scan_for_links(
@@ -539,7 +776,7 @@ def scan_for_links(
     log: logging.Logger = logger,
 ) -> None:
     if single:
-        text = text.replace("webservice/pluginfile.php", "pluginfile.php")
+        text = moodle_files.canonicalize_moodle_file_url(text)
         if not _known_provider_link(text) and _scan_single_link(
             ctx,
             text,
@@ -552,8 +789,14 @@ def scan_for_links(
     if not ctx.config.follow_links:
         return
 
-    _scan_youtube_links(ctx, text, parent_node, module_title)
+    _scan_youtube_links(ctx, text, parent_node, course_id, module_title)
     _scan_opencast_links(ctx, text, parent_node, course_id, module_title, log)
-    _scan_emedia_links(ctx, text, parent_node, module_title, log)
+    _scan_emedia_links(ctx, text, parent_node, course_id, module_title, log)
     if ctx.config.link_source_enabled("sciebo"):
-        sciebo_api.scan_public_shares(ctx, text, parent_node, log)
+        sciebo_api.scan_public_shares(
+            ctx,
+            text,
+            parent_node,
+            log,
+            course_id=course_id,
+        )

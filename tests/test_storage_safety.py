@@ -1,4 +1,5 @@
 import gzip
+import hashlib
 import importlib
 import json
 import os
@@ -19,11 +20,16 @@ from syncmymoodle.pathing import (
     windows_extended_length_path,
 )
 from syncmymoodle.storage import (
+    InstallResult,
+    SyncRunLockedError,
     chmod_private_best_effort,
+    install_staged_file,
     load_session_from_data,
     read_private_gzip_json,
     save_session,
     session_to_data,
+    snapshot_file,
+    sync_run_lock,
     write_private_gzip_json,
     write_private_text,
 )
@@ -133,6 +139,31 @@ def test_user_config_dir_uses_windows_appdata(tmp_path, monkeypatch):
     monkeypatch.setattr(pathing, "is_windows", lambda: True)
 
     assert pathing.user_config_dir() == tmp_path / "appdata" / "syncmymoodle"
+
+
+@pytest.mark.parametrize(
+    ("platform", "windows", "parts"),
+    [
+        ("linux", False, (".config",)),
+        ("darwin", False, ("Library", "Application Support")),
+        ("win32", True, ("AppData", "Roaming")),
+    ],
+)
+def test_user_config_dir_uses_platform_default_without_environment_override(
+    tmp_path,
+    monkeypatch,
+    platform,
+    windows,
+    parts,
+):
+    monkeypatch.delenv("XDG_CONFIG_HOME", raising=False)
+    monkeypatch.delenv("APPDATA", raising=False)
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("USERPROFILE", str(tmp_path))
+    monkeypatch.setattr(pathing.sys, "platform", platform)
+    monkeypatch.setattr(pathing, "is_windows", lambda: windows)
+
+    assert pathing.user_config_dir() == tmp_path.joinpath(*parts, "syncmymoodle")
 
 
 def test_conflict_path_applies_windows_prefix_after_suffix(tmp_path, monkeypatch):
@@ -259,6 +290,63 @@ def test_private_text_write_is_atomic_and_private(tmp_path, monkeypatch):
 
     assert target.read_text(encoding="utf-8") == "original"
     assert list(tmp_path.glob(".config.toml.*")) == []
+
+
+def test_failed_conflict_install_restores_original_file(tmp_path, monkeypatch):
+    target = tmp_path / "slides.pdf"
+    staged = tmp_path / ".slides.pdf.smmpart"
+    target.write_bytes(b"local edit")
+    staged.write_bytes(b"remote update")
+    baseline = snapshot_file(target)
+
+    monkeypatch.setattr(
+        os,
+        "replace",
+        lambda source, destination: (_ for _ in ()).throw(OSError("disk full")),
+    )
+
+    result = install_staged_file(
+        staged,
+        target,
+        baseline=baseline,
+        rename_local=True,
+        target_change_policy="rename",
+        description="test update",
+    )
+
+    assert result is InstallResult.FAILED
+    assert target.read_bytes() == b"local edit"
+    assert list(tmp_path.glob("*.syncconflict.*")) == []
+
+
+def test_file_snapshot_captures_common_digests_in_one_baseline(tmp_path):
+    target = tmp_path / "slides.pdf"
+    content = b"snapshot contents"
+    target.write_bytes(content)
+
+    baseline = snapshot_file(target)
+
+    assert (
+        baseline.digest_for("md5")
+        == hashlib.md5(content, usedforsecurity=False).hexdigest()
+    )
+    assert (
+        baseline.digest_for("sha1")
+        == hashlib.sha1(content, usedforsecurity=False).hexdigest()
+    )
+    assert baseline.digest_for("sha256") == hashlib.sha256(content).hexdigest()
+    assert baseline.metadata_still_matches(target)
+    assert baseline.still_matches(target)
+
+
+def test_sync_run_lock_rejects_a_concurrent_writer(tmp_path):
+    with sync_run_lock(tmp_path):
+        with pytest.raises(SyncRunLockedError, match="another sync is already using"):
+            with sync_run_lock(tmp_path):
+                pass
+
+    with sync_run_lock(tmp_path):
+        pass
 
 
 def test_private_text_restricts_temp_before_writing_on_windows(tmp_path, monkeypatch):

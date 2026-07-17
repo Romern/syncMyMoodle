@@ -70,6 +70,80 @@ def test_classify_local_file_is_tristate(tmp_path):
     assert classify_local_file(tmp_path / "nope", sha1(b"x")) is FileMatch.UNKNOWN
 
 
+def test_conflicting_discovered_markers_force_download(tmp_path, monkeypatch):
+    content = b"cached file"
+    path = tmp_path / "slides.pdf"
+    path.write_bytes(content)
+    old = Node(
+        "slides.pdf",
+        2,
+        "File",
+        None,
+        etag=sha1(content),
+        etag_kind=RemoteMarkerKind.CONTENT_HASH,
+        timemodified=123,
+    )
+    old.mark_handled()
+    parent = Node("Section", 1, "Section", None)
+    current = parent.add_download_child(
+        "slides.pdf",
+        2,
+        "File",
+        url=URL,
+        etag=sha1(content),
+        etag_kind=RemoteMarkerKind.CONTENT_HASH,
+        timemodified=123,
+    )
+    parent.add_download_child(
+        "slides.pdf",
+        2,
+        "File",
+        url=URL,
+        etag=sha1(b"different remote bytes"),
+        etag_kind=RemoteMarkerKind.CONTENT_HASH,
+        timemodified=123,
+    )
+    monkeypatch.setattr(course_cache, "get_old_node_for", lambda *args: old)
+    ctx = make_context({"downloads.update_files": True})
+
+    assert (
+        downloader.decide_download(ctx, current, path)
+        is downloader.DownloadDecision.DOWNLOAD
+    )
+
+
+def test_incompatible_marker_kinds_override_equal_timestamp(tmp_path, monkeypatch):
+    content = b"cached file"
+    path = tmp_path / "slides.pdf"
+    path.write_bytes(content)
+    old = Node(
+        "slides.pdf",
+        2,
+        "File",
+        None,
+        etag=sha1(content),
+        etag_kind=RemoteMarkerKind.CONTENT_HASH,
+        timemodified=123,
+    )
+    old.mark_handled()
+    current = Node(
+        "slides.pdf",
+        2,
+        "File",
+        None,
+        etag='"opaque-revision"',
+        etag_kind=RemoteMarkerKind.OPAQUE,
+        timemodified=123,
+    )
+    monkeypatch.setattr(course_cache, "get_old_node_for", lambda *args: old)
+    ctx = make_context({"downloads.update_files": True})
+
+    assert (
+        downloader.decide_download(ctx, current, path)
+        is downloader.DownloadDecision.DOWNLOAD
+    )
+
+
 def test_moodle_content_hash_skips_identical_untracked_file(tmp_path):
     content = b"already downloaded Moodle file"
     ctx = make_context(
@@ -571,6 +645,39 @@ def test_download_is_skipped_for_excluded_filetypes(tmp_path):
     }
 
 
+def test_excluded_filetypes_are_case_insensitive_and_accept_a_leading_dot(tmp_path):
+    syncer = make_context(
+        {
+            "paths.sync_directory": str(tmp_path),
+            "filters.exclude_filetypes": [".pDf"],
+        }
+    )
+    node = Node("SLIDES.PDF", 1, "File", None, url=URL)
+
+    assert (
+        downloader.should_skip_before_decision(
+            syncer,
+            node,
+            tmp_path / node.name,
+        )
+        is not None
+    )
+    assert {item.reason for item in syncer.filtered_items} == {
+        "extension 'pdf' is excluded"
+    }
+
+
+def test_extensionless_name_is_not_treated_as_a_filetype(tmp_path):
+    syncer = make_context({"filters.exclude_filetypes": ["README"]})
+    node = Node("README", 1, "File", None, url="https://example.test/README")
+
+    assert (
+        downloader.should_skip_before_decision(syncer, node, tmp_path / node.name)
+        is None
+    )
+    assert syncer.filtered_items == set()
+
+
 def test_download_is_skipped_for_excluded_filename_pattern(tmp_path):
     config = {
         "paths.sync_directory": str(tmp_path),
@@ -949,11 +1056,10 @@ def test_download_path_is_deduplicated_within_a_run(tmp_path):
     )
     _, first_node = build_single_file_tree("dup.pdf", URL)
     section = first_node.parent
-    # Bypass add_child's duplicate-url guard to get a second node at the same path.
-    second_node = Node(
-        "dup.pdf", URL + "?v=2", "Linked file [application/pdf]", section, url=URL
+    assert section is not None
+    second_node = section.add_child(
+        "dup.pdf", URL + "?v=2", "Linked file [application/pdf]", url=URL
     )
-    section.children.append(second_node)
 
     assert download_file(syncer, first_node).is_handled
     assert download_file(syncer, second_node).is_handled
@@ -1078,6 +1184,98 @@ def test_unchanged_timemodified_skips_download_despite_local_edit(tmp_path):
     assert list(download_path.parent.glob("*.syncconflict.*")) == []
 
 
+@pytest.mark.parametrize("has_cached_hash", [False, True])
+def test_changed_content_hash_wins_over_equal_timemodified(tmp_path, has_cached_hash):
+    original = b"original remote content"
+    updated = b"updated remote content"
+    config = {
+        "paths.sync_directory": str(tmp_path),
+        "downloads.update_files": True,
+    }
+    seeded = make_context(config)
+    seeded.root_node, seeded_file = build_single_file_tree(
+        "slides.pdf",
+        URL,
+        timemodified=1710000300,
+        etag=sha1(original) if has_cached_hash else None,
+    )
+    if has_cached_hash:
+        seeded_file.etag_kind = RemoteMarkerKind.CONTENT_HASH
+    seeded_file.mark_handled()
+    course_cache.cache_root_node(seeded)
+
+    current, current_file = make_run_syncer(
+        config,
+        timemodified=1710000300,
+        etag=sha1(updated),
+    )
+    current_file.etag_kind = RemoteMarkerKind.CONTENT_HASH
+    download_path = node_path(current, current_file)
+    download_path.parent.mkdir(parents=True, exist_ok=True)
+    download_path.write_bytes(original)
+    os.utime(download_path, (1710000300, 1710000300))
+    current.session.add(
+        "GET",
+        URL,
+        FakeResponse(
+            headers={"Content-Type": "application/pdf"},
+            chunks=[updated],
+        ),
+    )
+
+    assert download_file(current, current_file).updated == 1
+    assert download_path.read_bytes() == updated
+    assert current.session.calls == [("GET", URL)]
+
+
+@pytest.mark.parametrize(
+    ("conflict_mode", "expected_target", "expected_conflict"),
+    [
+        ("keep", b"edit made during transfer", None),
+        ("rename", b"updated remote content", b"edit made during transfer"),
+        ("overwrite", b"updated remote content", None),
+    ],
+)
+def test_target_changed_during_transfer_obeys_conflict_policy(
+    tmp_path,
+    conflict_mode,
+    expected_target,
+    expected_conflict,
+):
+    original = b"original remote content"
+    updated = b"updated remote content"
+    config = {
+        "paths.sync_directory": str(tmp_path),
+        "downloads.update_files": True,
+        "downloads.conflict_handling": conflict_mode,
+    }
+    seed_course_cache(config, timemodified=100, etag=sha1(original))
+    current, current_file = make_run_syncer(config, timemodified=200)
+    download_path = node_path(current, current_file)
+    download_path.parent.mkdir(parents=True, exist_ok=True)
+    download_path.write_bytes(original)
+
+    def edit_while_request_is_in_flight(url, kwargs):
+        download_path.write_bytes(b"edit made during transfer")
+        return FakeResponse(
+            headers={"Content-Type": "application/pdf"},
+            chunks=[updated],
+        )
+
+    current.session.add("GET", URL, edit_while_request_is_in_flight)
+
+    outcome = download_file(current, current_file)
+
+    assert outcome.is_handled
+    assert download_path.read_bytes() == expected_target
+    conflicts = list(download_path.parent.glob("*.syncconflict.*"))
+    if expected_conflict is None:
+        assert conflicts == []
+    else:
+        assert len(conflicts) == 1
+        assert conflicts[0].read_bytes() == expected_conflict
+
+
 def test_legacy_course_cache_prevents_unchanged_file_false_conflict(tmp_path):
     config = {
         "paths.sync_directory": str(tmp_path),
@@ -1094,6 +1292,7 @@ def test_legacy_course_cache_prevents_unchanged_file_false_conflict(tmp_path):
     stable_path = course_cache.course_cache_path(seeded, course_node)
     payload = read_private_gzip_json(stable_path, "course cache")
     assert isinstance(payload, dict)
+    payload["format"] = course_cache.LEGACY_COURSE_CACHE_FORMAT
     payload.pop("identity")
     legacy_path = node_path(seeded, course_node) / COURSE_CACHE_FILENAME
     write_private_gzip_json(legacy_path, payload)
@@ -1466,7 +1665,8 @@ def test_etag_failure_falls_back_to_timestamp_heuristic_conflict(tmp_path, monke
     )
     new_body = _add_new_remote(syncer)
 
-    def unverifiable(path, marker):
+    def unverifiable(path, marker, snapshot=None):
+        del path, marker, snapshot
         return downloader.FileMatch.UNKNOWN
 
     monkeypatch.setattr("syncmymoodle.downloader.classify_local_file", unverifiable)
@@ -1490,7 +1690,8 @@ def test_etag_failure_falls_back_to_timestamp_heuristic_no_conflict(
     os.utime(download_path, (1710000300, 1710000300))
     new_body = _add_new_remote(syncer)
 
-    def unverifiable(path, marker):
+    def unverifiable(path, marker, snapshot=None):
+        del path, marker, snapshot
         return downloader.FileMatch.UNKNOWN
 
     monkeypatch.setattr("syncmymoodle.downloader.classify_local_file", unverifiable)

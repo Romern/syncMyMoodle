@@ -2,6 +2,7 @@ import json
 import logging
 import os
 import tomllib
+from dataclasses import FrozenInstanceError
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -12,7 +13,11 @@ import syncmymoodle.cli as cli
 import syncmymoodle.secret_providers as secret_providers
 from syncmymoodle.config import (
     CONFIG_OPTIONS,
+    DEFAULT_LOGIN_PROVIDER,
+    DEFAULT_TOKEN_STORE,
     LEGACY_KEY_MAP,
+    LOGIN_PROVIDER_OPTIONS,
+    TOKEN_STORE_OPTIONS,
     Config,
     ConfigValidationError,
     canonicalize,
@@ -612,6 +617,8 @@ def test_defaults_applied_for_empty_config(tmp_path, monkeypatch):
     assert cfg.cookie_file == str(tmp_path / "xdg" / "syncmymoodle" / "session")
     assert cfg.course_prefix_handling == "keep"
     assert cfg.conflict_handling == "rename"
+    assert cfg.token_store == DEFAULT_TOKEN_STORE
+    assert cfg.login_provider == DEFAULT_LOGIN_PROVIDER
     assert cfg.follow_links is True
     assert cfg.update_files is False
     assert cfg.selected_courses == []
@@ -624,6 +631,18 @@ def test_defaults_applied_for_empty_config(tmp_path, monkeypatch):
     assert cfg.link_source_enabled("emedia")
     # HTML is the safe quiz default: it archives attempts without a browser.
     assert cfg.quiz_mode == "html"
+
+    with pytest.raises(FrozenInstanceError):
+        cfg.dry_run = True
+
+
+def test_auth_defaults_and_choices_have_one_source_of_truth():
+    options = {option.canonical_key: option for option in CONFIG_OPTIONS}
+
+    assert options["auth.tokens.store"].choices == TOKEN_STORE_OPTIONS
+    assert options["auth.login.provider"].choices == LOGIN_PROVIDER_OPTIONS
+    args = cli.build_parser().parse_args(["config", "migrate"])
+    assert args.token_store == DEFAULT_TOKEN_STORE
 
 
 def test_legacy_key_aliases_are_resolved():

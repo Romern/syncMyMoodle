@@ -25,7 +25,7 @@ Content sources / parsing:
     links           scans HTML/text for embedded videos and shared files
 
 Sync tree:
-    sync_handlers   per-module-type handlers + @register_handler registry
+    sync_handlers   per-module-type handlers and explicit module dispatch
 
 Download:
     downloader      tree walk, update/conflict policy, ETag/resume handling
@@ -34,11 +34,11 @@ Download:
 Persistence:
     storage         private gzip-JSON and cookie (de)serialization
     course_cache    account-bound per-course sync-tree cache
-    pathing         path sanitization, traversal safety, conflict paths
+    pathing         node materialization, path safety, and conflict paths
     cleanup         local cleanup of redundant conflict files and caches
 
 Core (cross-cutting):
-    node            Node tree model and name-clash resolution
+    node            generic Node tree and download metadata model
     context         SyncContext: per-run mutable state (session, caches, ...)
     outcomes        typed download outcomes and per-run statistics
     output          Rich terminal output, progress, logging, and run summaries

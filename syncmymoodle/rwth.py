@@ -2,10 +2,11 @@ import logging
 import sys
 import time
 import urllib.parse
+from collections.abc import Callable, Collection
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import requests
 
@@ -23,7 +24,9 @@ from syncmymoodle.context import SyncContext
 from syncmymoodle.http_utils import (
     get_input_value,
     parse_html,
+    request_following_safe_redirects,
     safe_error_message,
+    same_origin,
     session_key_from_html,
 )
 from syncmymoodle.storage import (
@@ -35,6 +38,8 @@ from syncmymoodle.totp import totp as generate_totp
 
 logger = logging.getLogger(__name__)
 SESSION_REMAINING_URL = f"{MOODLE_URL}lib/ajax/service.php"
+RWTH_SSO_ORIGINS = frozenset({"https://sso.rwth-aachen.de"})
+SAML_RESPONSE_URL = f"{MOODLE_URL}Shibboleth.sso/SAML2/POST"
 
 
 class SessionStatusKind(Enum):
@@ -334,18 +339,79 @@ def load_cached_session(cookie_file: Path) -> tuple[requests.Session, str] | Non
     return session, session_key
 
 
+def _url_on_allowed_origin(url: str, allowed_origins: Collection[str]) -> bool:
+    try:
+        parsed = urllib.parse.urlsplit(url)
+    except ValueError:
+        return False
+    return (
+        parsed.username is None
+        and parsed.password is None
+        and any(same_origin(url, origin) for origin in allowed_origins)
+    )
+
+
+def sso_url_allowed(
+    url: str,
+    allowed_origins: Collection[str] = RWTH_SSO_ORIGINS,
+) -> bool:
+    """Return whether a credential-bearing SSO request may use this URL."""
+    return _url_on_allowed_origin(url, allowed_origins)
+
+
+def _moodle_url_allowed(url: str) -> bool:
+    return _url_on_allowed_origin(url, (MOODLE_URL,))
+
+
+def _login_url_allowed(url: str) -> bool:
+    return _moodle_url_allowed(url) or sso_url_allowed(url)
+
+
+def _saml_response_url_allowed(url: str) -> bool:
+    try:
+        parsed = urllib.parse.urlsplit(url)
+        expected = urllib.parse.urlsplit(SAML_RESPONSE_URL)
+    except ValueError:
+        return False
+    return (
+        _moodle_url_allowed(url)
+        and parsed.path == expected.path
+        and not parsed.query
+        and not parsed.fragment
+    )
+
+
+def _form_destination(
+    soup: Any,
+    field_name: str,
+    base_url: str,
+    default_url: str,
+) -> str:
+    field = soup.find("input", {"name": field_name})
+    form = field.find_parent("form") if field is not None else None
+    action = form.get("action") if form is not None else None
+    return urllib.parse.urljoin(base_url, str(action)) if action else default_url
+
+
 def post_sso_form(
     session: requests.Session,
     url: str,
     data: dict[str, Any],
     context: str,
     log: logging.Logger,
+    url_allowed: Callable[[str], bool],
 ) -> requests.Response:
     try:
-        return session.post(
-            url,
-            data=data,
-            timeout=HTTP_TIMEOUT_SECONDS,
+        return cast(
+            requests.Response,
+            request_following_safe_redirects(
+                session,
+                "POST",
+                url,
+                url_allowed,
+                data=data,
+                timeout=HTTP_TIMEOUT_SECONDS,
+            ),
         )
     except requests.RequestException as error:
         log.critical(
@@ -364,9 +430,15 @@ def _open_sso_login(
 ) -> requests.Response:
     check_moodle_availability(session, log)
     try:
-        return session.get(
-            urllib.parse.urljoin(MOODLE_URL, "auth/shibboleth/index.php"),
-            timeout=HTTP_TIMEOUT_SECONDS,
+        return cast(
+            requests.Response,
+            request_following_safe_redirects(
+                session,
+                "GET",
+                urllib.parse.urljoin(MOODLE_URL, "auth/shibboleth/index.php"),
+                _login_url_allowed,
+                timeout=HTTP_TIMEOUT_SECONDS,
+            ),
         )
     except requests.RequestException as error:
         log.critical(
@@ -413,10 +485,16 @@ def _submit_password(
     }
     response = post_sso_form(
         session,
-        response.url,
+        _form_destination(
+            soup,
+            "csrf_token",
+            response.url,
+            response.url,
+        ),
         login_data,
         "username/password form",
         log,
+        sso_url_allowed,
     )
     soup = parse_html(response.text)
     if soup.find(id="fudis_selected_token_ids_input") is not None:
@@ -448,10 +526,16 @@ def _select_totp_method(
     }
     response = post_sso_form(
         session,
-        response.url,
+        _form_destination(
+            soup,
+            "csrf_token",
+            response.url,
+            response.url,
+        ),
         selection_data,
         "TOTP method selection form",
         log,
+        sso_url_allowed,
     )
     soup = parse_html(response.text)
     if soup.find(id="fudis_otp_input") is not None:
@@ -495,10 +579,16 @@ def _submit_totp(
     }
     response = post_sso_form(
         session,
-        response.url,
+        _form_destination(
+            soup,
+            "csrf_token",
+            response.url,
+            response.url,
+        ),
         login_data,
         "TOTP entry form",
         log,
+        sso_url_allowed,
     )
     time.sleep(1)  # RWTH may close a connection advanced too quickly.
     return parse_html(response.text)
@@ -537,12 +627,22 @@ def _submit_saml_response(
             soup, "SAMLResponse", "SAML response", log
         ),
     }
+    destination = _form_destination(
+        soup,
+        "RelayState",
+        MOODLE_URL,
+        SAML_RESPONSE_URL,
+    )
+    if not _saml_response_url_allowed(destination):
+        log.critical("RWTH sign-in returned an unexpected SAML response destination.")
+        sys.exit(1)
     response = post_sso_form(
         session,
-        f"{MOODLE_URL}Shibboleth.sso/SAML2/POST",
+        destination,
         data,
         "SAML response",
         log,
+        _moodle_url_allowed,
     )
     return _get_session_key(parse_html(response.text), log)
 

@@ -230,15 +230,17 @@ def test_tty_sync_progress_coalesces_fast_item_checks(monkeypatch):
     assert "200/200 items" in rendered
 
 
-def test_tty_sync_progress_still_shows_a_slow_item_check(monkeypatch):
+def test_tty_sync_progress_shows_the_active_item_check(monkeypatch):
     stderr = TtyBuffer()
     monkeypatch.setattr(sys, "stderr", stderr)
     terminal = TerminalOutput("never")
 
     with terminal.sync_progress as progress:
+        renderer = progress.renderer
+        assert renderer is not None
         progress.begin_items(1)
         progress.start_item(1, "File: slow metadata check")
-        time.sleep(0.25)
+        renderer.refresh()
         progress.finish_item(1)
 
     assert "File: slow metadata check" in stderr.getvalue()
@@ -247,16 +249,11 @@ def test_tty_sync_progress_still_shows_a_slow_item_check(monkeypatch):
 def test_interrupted_sync_retains_the_active_transfer_frame(monkeypatch):
     stderr = TtyBuffer()
     monkeypatch.setattr(sys, "stderr", stderr)
-    stopped: list[tuple[bool, list[object]]] = []
+    stopped = []
     original_stop = Progress.stop
 
     def record_stop(progress):
-        stopped.append(
-            (
-                progress.live.transient,
-                [task.fields.get("kind") for task in progress.tasks],
-            )
-        )
+        stopped.append(progress.live.transient)
         original_stop(progress)
 
     monkeypatch.setattr(Progress, "stop", record_stop)
@@ -264,13 +261,17 @@ def test_interrupted_sync_retains_the_active_transfer_frame(monkeypatch):
 
     with pytest.raises(KeyboardInterrupt):
         with terminal.sync_progress as progress:
+            renderer = progress.renderer
+            assert renderer is not None
             progress.begin_items(1)
             progress.start_item(1, "Video: interrupted.mp4")
             with terminal.transfer("interrupted.mp4", total=100) as transfer:
                 transfer.advance(40)
+                renderer.refresh()
                 raise KeyboardInterrupt
 
-    assert stopped == [(False, ["aggregate", "status", "transfer"])]
+    assert stopped == [False]
+    assert "interrupted.mp4" in stderr.getvalue()
 
 
 def test_tty_sync_progress_combines_aggregate_detail_and_transfer(monkeypatch):

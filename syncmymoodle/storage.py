@@ -5,14 +5,69 @@ import json
 import logging
 import os
 import tempfile
+from collections.abc import Iterator
+from contextlib import contextmanager
+from dataclasses import dataclass
+from enum import Enum
 from pathlib import Path
-from typing import Any
+from typing import Any, BinaryIO
 
 import requests
 
 from syncmymoodle import pathing
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class FileSnapshot:
+    """Content identity observed for a target before staging an update."""
+
+    exists: bool
+    digest: str | None = None
+    md5: str | None = None
+    sha1: str | None = None
+    identity: tuple[int, int, int, int, int] | None = None
+
+    def digest_for(self, algorithm: str) -> str | None:
+        """Return a digest captured during the snapshot's single file read."""
+        return {
+            "md5": self.md5,
+            "sha1": self.sha1,
+            "sha256": self.digest,
+        }.get(algorithm)
+
+    def still_matches(self, path: Path) -> bool:
+        """Verify that both metadata and content still match the snapshot."""
+        if not self.metadata_still_matches(path):
+            return False
+        if not self.exists:
+            return True
+        return file_sha256(path) == self.digest and self.metadata_still_matches(path)
+
+    def metadata_still_matches(self, path: Path) -> bool:
+        """Check for changes without reading file content again."""
+        try:
+            current = path.stat()
+        except FileNotFoundError:
+            return not self.exists
+        except OSError:
+            return False
+        return bool(
+            self.exists
+            and self.digest is not None
+            and self.identity == _file_identity(current)
+        )
+
+
+class InstallResult(Enum):
+    INSTALLED = "installed"
+    KEPT_LOCAL = "kept_local"
+    FAILED = "failed"
+
+
+class SyncRunLockedError(RuntimeError):
+    pass
 
 
 def file_sha256(path: Path) -> str | None:
@@ -24,17 +79,80 @@ def file_sha256(path: Path) -> str | None:
         return None
 
 
+def _file_identity(result: os.stat_result) -> tuple[int, int, int, int, int]:
+    return (
+        result.st_dev,
+        result.st_ino,
+        result.st_size,
+        result.st_mtime_ns,
+        result.st_ctime_ns,
+    )
+
+
+def snapshot_file(path: Path) -> FileSnapshot:
+    """Capture stable stat data and common digests in one file read."""
+    try:
+        before = path.stat()
+    except FileNotFoundError:
+        return FileSnapshot(False)
+    except OSError:
+        return FileSnapshot(True)
+
+    digests = (
+        hashlib.md5(usedforsecurity=False),
+        hashlib.sha1(usedforsecurity=False),
+        hashlib.sha256(),
+    )
+    try:
+        with path.open("rb") as handle:
+            while chunk := handle.read(1024 * 1024):
+                for digest in digests:
+                    digest.update(chunk)
+    except OSError:
+        return FileSnapshot(True, identity=_file_identity(before))
+    try:
+        after = path.stat()
+    except OSError:
+        return FileSnapshot(True)
+    identity = _file_identity(before)
+    if identity != _file_identity(after):
+        return FileSnapshot(True)
+    return FileSnapshot(
+        True,
+        digest=digests[2].hexdigest(),
+        md5=digests[0].hexdigest(),
+        sha1=digests[1].hexdigest(),
+        identity=identity,
+    )
+
+
 def install_staged_file(
     staged_path: Path,
     target_path: Path,
     *,
+    baseline: FileSnapshot,
     rename_local: bool,
+    target_change_policy: str,
     description: str,
     log: logging.Logger = logger,
-) -> bool:
+) -> InstallResult:
     """Atomically install a staged file, preserving a conflicting local copy."""
     conflict_path: Path | None = None
     try:
+        if not baseline.still_matches(target_path):
+            if target_change_policy == "keep":
+                log.warning(
+                    "Keeping %s because it changed while %s was being prepared",
+                    target_path,
+                    description,
+                )
+                return InstallResult.KEPT_LOCAL
+            if target_change_policy == "rename":
+                rename_local = True
+            elif target_change_policy != "overwrite":
+                raise ValueError(
+                    f"unsupported target change policy: {target_change_policy}"
+                )
         if target_path.exists() and rename_local:
             conflict_path = pathing.make_conflict_path(target_path)
             target_path.rename(conflict_path)
@@ -45,7 +163,7 @@ def install_staged_file(
                 description,
             )
         os.replace(staged_path, target_path)
-        return True
+        return InstallResult.INSTALLED
     except OSError:
         log.exception("Failed to install %s at %s", description, target_path)
         if conflict_path is not None and not target_path.exists():
@@ -53,7 +171,51 @@ def install_staged_file(
                 conflict_path.rename(target_path)
             except OSError:
                 log.exception("Failed to restore local file %s", target_path)
-        return False
+        return InstallResult.FAILED
+
+
+def _lock_file(handle: BinaryIO) -> None:
+    if pathing.is_windows():
+        msvcrt: Any = importlib.import_module("msvcrt")
+        handle.seek(0)
+        if not handle.read(1):
+            handle.write(b"\0")
+            handle.flush()
+        handle.seek(0)
+        msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+        return
+    fcntl: Any = importlib.import_module("fcntl")
+    fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+
+
+def _unlock_file(handle: BinaryIO) -> None:
+    if pathing.is_windows():
+        msvcrt: Any = importlib.import_module("msvcrt")
+        handle.seek(0)
+        msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+        return
+    fcntl: Any = importlib.import_module("fcntl")
+    fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+
+
+@contextmanager
+def sync_run_lock(sync_directory: Path) -> Iterator[None]:
+    """Prevent concurrent writers from targeting one sync directory."""
+    lock_path = pathing.with_windows_extended_length_prefix(
+        sync_directory.expanduser() / ".syncmymoodle-cache" / "run.lock"
+    )
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    with lock_path.open("a+b") as handle:
+        try:
+            _lock_file(handle)
+        except OSError as error:
+            raise SyncRunLockedError(
+                f"another sync is already using {sync_directory}"
+            ) from error
+        try:
+            yield
+        finally:
+            _unlock_file(handle)
 
 
 def restrict_private_file_windows(path: Path) -> None:

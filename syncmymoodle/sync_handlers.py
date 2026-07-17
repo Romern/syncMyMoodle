@@ -20,11 +20,13 @@ from syncmymoodle.constants import HTTP_TIMEOUT_SECONDS, MOODLE_URL
 from syncmymoodle.context import ModuleInstanceCache, SyncContext
 from syncmymoodle.http_utils import (
     HTML_CONTENT_TYPES,
+    RequestPolicyError,
     content_length,
     content_type_without_parameters,
     copy_capped_body,
     parse_html,
     read_capped_body,
+    request_following_safe_redirects,
     safe_request_error,
 )
 from syncmymoodle.node import DownloadKind, Node, RemoteMarkerKind
@@ -45,8 +47,8 @@ class ModuleContext:
     course_id: Any
     course_node: Node
     section_node: Node
-    assignments_by_cmid: Any
-    folders_by_coursemodule: Any
+    assignments_by_cmid: dict[int, dict[str, Any]]
+    folders_by_coursemodule: dict[int, dict[str, Any]]
     course_updates: moodle_api.CourseUpdates | None = None
     log: logging.Logger = logger
 
@@ -83,16 +85,6 @@ class _OpencastLtiLaunch:
 
 Handler = Callable[[ModuleContext, dict[str, Any]], None]
 
-# Handlers register themselves here via @register_handler and run, per module,
-# in registration (definition) order.
-MODULE_HANDLERS: list[Handler] = []
-
-
-def register_handler(handler: Handler) -> Handler:
-    """Register a sync module handler so ``handle_module`` dispatches to it."""
-    MODULE_HANDLERS.append(handler)
-    return handler
-
 
 def _content_marker(
     metadata: dict[str, Any],
@@ -125,21 +117,17 @@ def _page_response_cacheable(response: Any, requested_url: str) -> bool:
     if content_type and content_type not in HTML_CONTENT_TYPES:
         return False
 
-    requested = urllib.parse.urlsplit(requested_url)
-    final = urllib.parse.urlsplit(response.url or requested_url)
-
-    def moodle_file_path(path: str) -> str:
-        prefix = "/webservice/pluginfile.php/"
-        return (
-            f"/pluginfile.php/{path.removeprefix(prefix)}"
-            if path.startswith(prefix)
-            else path
-        )
+    requested = urllib.parse.urlsplit(
+        moodle_files.canonicalize_moodle_file_url(requested_url)
+    )
+    final = urllib.parse.urlsplit(
+        moodle_files.canonicalize_moodle_file_url(response.url or requested_url)
+    )
 
     return (
         requested.scheme.lower() == final.scheme.lower()
         and requested.netloc.lower() == final.netloc.lower()
-        and moodle_file_path(requested.path) == moodle_file_path(final.path)
+        and requested.path == final.path
     )
 
 
@@ -150,11 +138,18 @@ class _H5PRangeUnavailable(Exception):
 class _H5PRangeReader(io.BufferedIOBase):
     """Seekable, bounded view of an HTTP resource backed by range requests."""
 
-    def __init__(self, session: Any, url: str, size: int) -> None:
+    def __init__(
+        self,
+        session: Any,
+        url: str,
+        size: int,
+        url_allowed: Callable[[str], bool],
+    ) -> None:
         super().__init__()
         self._session = session
         self._url = url
         self._size = size
+        self._url_allowed = url_allowed
         self._position = 0
         self._cache_start = 0
         self._cache = b""
@@ -189,8 +184,11 @@ class _H5PRangeReader(io.BufferedIOBase):
         expected_size = end - start + 1
         try:
             with closing(
-                self._session.get(
+                request_following_safe_redirects(
+                    self._session,
+                    "GET",
                     self._url,
+                    self._url_allowed,
                     headers={
                         "Accept-Encoding": "identity",
                         "Range": f"bytes={start}-{end}",
@@ -214,6 +212,8 @@ class _H5PRangeReader(io.BufferedIOBase):
                 if declared_size is not None and declared_size != expected_size:
                     raise _H5PRangeUnavailable
                 body = read_capped_body(response, expected_size)
+        except RequestPolicyError:
+            raise
         except requests.RequestException as error:
             raise _H5PRangeUnavailable from error
         if body is None or len(body) != expected_size:
@@ -278,8 +278,14 @@ def _read_h5p_content_by_range(
     package_size: int,
     module_id: Any,
     log: logging.Logger,
+    url_allowed: Callable[[str], bool],
 ) -> str | None:
-    with _H5PRangeReader(session, package_url, package_size) as package_file:
+    with _H5PRangeReader(
+        session,
+        package_url,
+        package_size,
+        url_allowed,
+    ) as package_file:
         with zipfile.ZipFile(package_file) as archive:
             return _read_h5p_archive_content(archive, module_id, log)
 
@@ -289,10 +295,14 @@ def _read_full_h5p_content(
     package_url: str,
     module_id: Any,
     log: logging.Logger,
+    url_allowed: Callable[[str], bool],
 ) -> str | None:
     with closing(
-        session.get(
+        request_following_safe_redirects(
+            session,
+            "GET",
             package_url,
+            url_allowed,
             stream=True,
             timeout=HTTP_TIMEOUT_SECONDS,
         )
@@ -326,6 +336,8 @@ def _read_h5p_content(
     module_id: Any,
     log: logging.Logger,
     package_size: Any = None,
+    *,
+    url_allowed: Callable[[str], bool],
 ) -> str | None:
     try:
         known_size = (
@@ -346,10 +358,17 @@ def _read_h5p_content(
                     known_size,
                     module_id,
                     log,
+                    url_allowed,
                 )
             except _H5PRangeUnavailable:
                 pass
-        return _read_full_h5p_content(session, package_url, module_id, log)
+        return _read_full_h5p_content(
+            session,
+            package_url,
+            module_id,
+            log,
+            url_allowed,
+        )
     except (
         KeyError,
         NotImplementedError,
@@ -430,25 +449,48 @@ def _assignment_submission_files(
     if fetched is None:
         module_context.mark_incomplete()
         return None
-    return [item for item in fetched if isinstance(item, dict)]
+    files: list[dict[str, Any]] = []
+    seen_urls: set[str] = set()
+    for item in fetched:
+        file_url = item.get("fileurl") if isinstance(item, dict) else None
+        if not isinstance(file_url, str) or not file_url or file_url in seen_urls:
+            module_context.log.error(
+                "Moodle returned a malformed assignment submission inventory for "
+                "module %s",
+                module_id,
+            )
+            ctx.stats.failed += 1
+            module_context.mark_incomplete()
+            return None
+        seen_urls.add(file_url)
+        files.append(item)
+    return files
 
 
-def _add_assignment_file_nodes(
+def _add_moodle_file_nodes(
     ctx: SyncContext,
-    assignment_node: Node,
+    parent_node: Node,
     files: list[Any],
+    file_type: str,
+    filter_context: str,
+    course_id: Any,
 ) -> None:
     for item in files:
         if not isinstance(item, dict):
             continue
-        if filters.should_skip_url(ctx, item.get("fileurl"), "assignment file"):
+        if filters.should_skip_url(
+            ctx,
+            item.get("fileurl"),
+            filter_context,
+            course_id=course_id,
+        ):
             continue
         moodle_files.add_moodle_file_node(
-            assignment_node,
+            parent_node,
             item.get("filepath", "/"),
             item["filename"],
             item["fileurl"],
-            "Assignment File",
+            file_type,
             item["fileurl"],
             timemodified=item.get("timemodified"),
             remote_size=item.get("filesize"),
@@ -456,7 +498,6 @@ def _add_assignment_file_nodes(
         )
 
 
-@register_handler
 def handle_assignment_module(
     module_context: ModuleContext,
     module: dict[str, Any],
@@ -467,66 +508,69 @@ def handle_assignment_module(
     assignments_by_cmid = module_context.assignments_by_cmid
 
     # Get Assignments
-    if module["modname"] == "assign" and ctx.config.module_assignment:
-        ass = assignments_by_cmid.get(module["id"])
-        if not ass:
-            return
-        assignment_id = ass["id"]
-        module_id = module["id"]
-        if not isinstance(module_id, int) or isinstance(module_id, bool):
-            return
-        assignment_name = module["name"]
-        assignment_node = section_node.add_child(
-            assignment_name, assignment_id, "Assignment"
+    if not ctx.config.module_assignment:
+        return
+    ass = assignments_by_cmid.get(module["id"])
+    if not ass:
+        return
+    assignment_id = ass["id"]
+    module_id = module["id"]
+    if not isinstance(module_id, int) or isinstance(module_id, bool):
+        return
+    assignment_name = module["name"]
+    assignment_node = section_node.add_child(
+        assignment_name, assignment_id, "Assignment"
+    )
+
+    assignment_intro = ass.get("intro")
+    if assignment_intro:
+        module_context.status("scanning assignment links")
+        links_api.scan_for_links(
+            ctx,
+            assignment_intro,
+            assignment_node,
+            course_id,
+            module_title=assignment_name,
         )
-        if assignment_node is None:
-            return
 
-        assignment_intro = ass.get("intro")
-        if assignment_intro:
-            module_context.status("scanning assignment links")
-            links_api.scan_for_links(
-                ctx,
-                assignment_intro,
-                assignment_node,
-                course_id,
-                module_title=assignment_name,
-            )
+    # Moodle's update callback checks the current user's submission row,
+    # while a team submission can be changed through the shared group row.
+    cache_allowed = not bool(ass.get("teamsubmission"))
+    submission_files = _assignment_submission_files(
+        module_context,
+        module_id,
+        assignment_id,
+        allow_cache=cache_allowed,
+    )
+    if submission_files is None:
+        return
 
-        # Moodle's update callback checks the current user's submission row,
-        # while a team submission can be changed through the shared group row.
-        cache_allowed = not bool(ass.get("teamsubmission"))
-        submission_files = _assignment_submission_files(
-            module_context,
+    intro_attachments = ass.get("introattachments") or []
+    _add_moodle_file_nodes(
+        ctx,
+        assignment_node,
+        [*intro_attachments, *submission_files],
+        "Assignment File",
+        "assignment file",
+        course_id,
+    )
+    if cache_allowed:
+        course_cache.store_assignment_cache_entry(
+            ctx,
+            module_context.course_node,
             module_id,
-            assignment_id,
-            allow_cache=cache_allowed,
+            submission_files,
+            module_context.log,
         )
-        if submission_files is None:
-            return
-
-        intro_attachments = ass.get("introattachments") or []
-        _add_assignment_file_nodes(
-            ctx, assignment_node, [*intro_attachments, *submission_files]
+    else:
+        course_cache.discard_assignment_cache_entry(
+            ctx,
+            module_context.course_node,
+            module_id,
+            module_context.log,
         )
-        if cache_allowed:
-            course_cache.store_assignment_cache_entry(
-                ctx,
-                module_context.course_node,
-                module_id,
-                submission_files,
-                module_context.log,
-            )
-        else:
-            course_cache.discard_assignment_cache_entry(
-                ctx,
-                module_context.course_node,
-                module_id,
-                module_context.log,
-            )
 
 
-@register_handler
 def handle_resource_like_module(
     module_context: ModuleContext,
     module: dict[str, Any],
@@ -536,21 +580,18 @@ def handle_resource_like_module(
     course_id = module_context.course_id
 
     # Get Resources or URLs
-    if module["modname"] not in [
-        "resource",
-        "url",
-        "book",
-        "page",
-        "pdfannotator",
-    ]:
-        return
     if module["modname"] == "resource" and not ctx.config.module_resource:
         return
     for c in module.get("contents", []):
         file_url = c.get("fileurl")
         if not file_url:
             continue
-        if filters.should_skip_url(ctx, file_url, "resource link"):
+        if filters.should_skip_url(
+            ctx,
+            file_url,
+            "resource link",
+            course_id=course_id,
+        ):
             continue
         if moodle_files.is_direct_moodle_file_content(module, c):
             moodle_files.add_moodle_content_file_node(section_node, c)
@@ -566,7 +607,6 @@ def handle_resource_like_module(
             )
 
 
-@register_handler
 def handle_folder_module(
     module_context: ModuleContext,
     module: dict[str, Any],
@@ -577,40 +617,29 @@ def handle_folder_module(
     folders_by_coursemodule = module_context.folders_by_coursemodule
 
     # Get Folders
-    if module["modname"] == "folder" and ctx.config.module_folder:
-        folder_node = section_node.add_child(module["name"], module["id"], "Folder")
-        if folder_node is None:
-            return
+    if not ctx.config.module_folder:
+        return
+    folder_node = section_node.add_child(module["name"], module["id"], "Folder")
 
-        # Scan intro for links
-        folder_info = folders_by_coursemodule.get(module["id"])
-        if folder_info and folder_info.get("intro"):
-            module_context.status("scanning folder links")
-            links_api.scan_for_links(ctx, folder_info["intro"], folder_node, course_id)
+    folder_info = folders_by_coursemodule.get(module["id"])
+    if folder_info and folder_info.get("intro"):
+        module_context.status("scanning folder links")
+        links_api.scan_for_links(ctx, folder_info["intro"], folder_node, course_id)
 
-        for c in module.get("contents", []):
-            if filters.should_skip_url(ctx, c.get("fileurl"), "folder file"):
-                continue
-            moodle_files.add_moodle_file_node(
-                folder_node,
-                c.get("filepath", "/"),
-                c["filename"],
-                c["fileurl"],
-                "Folder File",
-                c["fileurl"],
-                timemodified=c.get("timemodified"),
-                remote_size=c.get("filesize"),
-                remote_content_hash=c.get("contenthash"),
-            )
+    _add_moodle_file_nodes(
+        ctx,
+        folder_node,
+        module.get("contents", []),
+        "Folder File",
+        "folder file",
+        course_id,
+    )
 
 
-@register_handler
 def handle_embedded_link_module(
     module_context: ModuleContext,
     module: dict[str, Any],
 ) -> None:
-    if module["modname"] not in {"page", "label", "h5pactivity"}:
-        return
     if not module_context.ctx.config.follow_links:
         return
     if module["modname"] == "page":
@@ -655,7 +684,7 @@ def _page_location(
         if index_content is not None
         else module.get("url") or f"{MOODLE_URL}mod/page/view.php?id={module['id']}"
     )
-    return index_content, html_url
+    return index_content, moodle_files.canonicalize_moodle_file_url(str(html_url))
 
 
 def _cached_text(
@@ -683,8 +712,16 @@ def _fetch_page(
 ) -> requests.Response | None:
     module_context.status("fetching page")
     try:
-        response = module_context.ctx.require_session().get(
+        response = request_following_safe_redirects(
+            module_context.ctx.require_session(),
+            "GET",
             html_url,
+            lambda url: filters.require_url_allowed(
+                module_context.ctx,
+                url,
+                "redirected page link",
+                course_id=module_context.course_id,
+            ),
             timeout=HTTP_TIMEOUT_SECONDS,
         )
     except requests.RequestException as error:
@@ -697,7 +734,7 @@ def _fetch_page(
         module_context.mark_incomplete()
         return None
     if 200 <= response.status_code < 300:
-        return response
+        return cast(requests.Response, response)
     module_context.log.warning(
         "Page module %s returned status %s",
         module_id,
@@ -804,27 +841,28 @@ def _handle_page_links(
     module: dict[str, Any],
 ) -> None:
     index_content, html_url = _page_location(module)
-    opencast_enabled = module_context.ctx.config.link_source_enabled("opencast")
-    scan_page_links = not filters.should_skip_url(
-        module_context.ctx, html_url, "page link"
-    )
-    if not opencast_enabled and not scan_page_links:
+    if filters.should_skip_url(
+        module_context.ctx,
+        html_url,
+        "page link",
+        course_id=module_context.course_id,
+    ):
         return
+    opencast_enabled = module_context.ctx.config.link_source_enabled("opencast")
     content = _page_scan_content(module_context, module, index_content, html_url)
     if content is None:
         return
     if opencast_enabled:
         _scan_page_opencast(module_context, module, content)
-    if scan_page_links:
-        module_context.status("scanning page links")
-        links_api.scan_html_text_for_links(
-            module_context.ctx,
-            content.text,
-            content.base_url,
-            module_context.section_node,
-            module_context.course_id,
-            module_title=module["name"],
-        )
+    module_context.status("scanning page links")
+    links_api.scan_html_text_for_links(
+        module_context.ctx,
+        content.text,
+        content.base_url,
+        module_context.section_node,
+        module_context.course_id,
+        module_title=module["name"],
+    )
     _store_page_content(module_context, content)
 
 
@@ -871,6 +909,13 @@ def _handle_h5p_links(
     )
     content = cached.content if cached is not None else None
     if content is None:
+        if filters.should_skip_url(
+            ctx,
+            package_url,
+            "H5P package",
+            course_id=module_context.course_id,
+        ):
+            return
         module_context.status("downloading H5P package")
         content = _read_h5p_content(
             ctx.require_session(),
@@ -878,6 +923,12 @@ def _handle_h5p_links(
             module["id"],
             module_context.log,
             package_file.get("filesize"),
+            url_allowed=lambda url: filters.require_url_allowed(
+                ctx,
+                url,
+                "redirected H5P package",
+                course_id=module_context.course_id,
+            ),
         )
         if content is None:
             module_context.mark_incomplete()
@@ -937,6 +988,12 @@ def _opencast_lti_launch(
             "Opencast: LTI module %s has no launch endpoint", module["id"]
         )
         return None
+    if not opencast_api.lti_endpoint_allowed(endpoint):
+        module_context.log.warning(
+            "Opencast: LTI module %s has an unexpected launch endpoint",
+            module["id"],
+        )
+        return None
     engage_data = {
         str(item["name"]): item.get("value", "")
         for item in launch_data.get("parameters") or []
@@ -981,9 +1038,10 @@ def _handle_opencast_series(
     if episodes is None:
         module_context.mark_incomplete()
         return
-    series_node = cast(
-        Node,
-        module_context.course_node.add_child(launch.title, launch.series_id, "Section"),
+    series_node = module_context.course_node.add_child(
+        launch.title,
+        launch.series_id,
+        "Section",
     )
     for index, (episode_id, episode_title) in enumerate(episodes, start=1):
         module_context.status(f"resolving Opencast episode {index}/{len(episodes)}")
@@ -1033,13 +1091,12 @@ def _handle_opencast_episode(
     )
 
 
-@register_handler
 def handle_opencast_lti_module(
     module_context: ModuleContext,
     module: dict[str, Any],
 ) -> None:
     ctx = module_context.ctx
-    if module["modname"] != "lti" or not ctx.config.link_source_enabled("opencast"):
+    if not ctx.config.link_source_enabled("opencast"):
         return
     launch = _opencast_lti_launch(module_context, module)
     if launch is None:
@@ -1204,7 +1261,7 @@ def _add_quiz_nodes(
         review_url = f"{MOODLE_URL}mod/quiz/review.php?attempt={attempt_id}"
         review_html = _quiz_review_html(name, review)
         ctx.quiz_review_cache[review_url] = review_html
-        section_node.add_child(
+        section_node.add_download_child(
             name,
             attempt_id,
             "Quiz",
@@ -1215,7 +1272,6 @@ def _add_quiz_nodes(
         )
 
 
-@register_handler
 def handle_quiz_module(
     module_context: ModuleContext,
     module: dict[str, Any],
@@ -1224,7 +1280,7 @@ def handle_quiz_module(
     section_node = module_context.section_node
 
     # Integration for Quizzes
-    if module["modname"] != "quiz" or ctx.config.quiz_mode == "off":
+    if ctx.config.quiz_mode == "off":
         return
 
     module_id = module.get("id")
@@ -1282,6 +1338,24 @@ def handle_quiz_module(
         )
 
 
+MODULE_HANDLERS: dict[str, tuple[Handler, ...]] = {
+    "assign": (handle_assignment_module,),
+    "book": (handle_resource_like_module,),
+    "folder": (handle_folder_module,),
+    "h5pactivity": (handle_embedded_link_module,),
+    "label": (handle_embedded_link_module,),
+    "lti": (handle_opencast_lti_module,),
+    "page": (handle_resource_like_module, handle_embedded_link_module),
+    "pdfannotator": (handle_resource_like_module,),
+    "quiz": (handle_quiz_module,),
+    "resource": (handle_resource_like_module,),
+    "url": (handle_resource_like_module,),
+}
+
+
 def handle_module(module_context: ModuleContext, module: dict[str, Any]) -> None:
-    for handler in MODULE_HANDLERS:
+    modname = module.get("modname")
+    if not isinstance(modname, str):
+        return
+    for handler in MODULE_HANDLERS.get(modname, ()):
         handler(module_context, module)

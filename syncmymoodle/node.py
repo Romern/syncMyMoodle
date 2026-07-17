@@ -27,6 +27,15 @@ class DownloadKind(StrEnum):
     OPENCAST = "opencast"
 
 
+class NodeKind(StrEnum):
+    """Structural roles in the synchronized Moodle tree."""
+
+    ROOT = "Root"
+    SEMESTER = "Semester"
+    COURSE = "Course"
+    SECTION = "Section"
+
+
 def _remote_marker_kind(
     value: RemoteMarkerKind | str | None,
 ) -> RemoteMarkerKind | None:
@@ -120,10 +129,11 @@ class Node:
             _download_status(download_status) or DownloadStatus.PENDING
         )
         self.download_kind = _download_kind(download_kind)
+        self._conflicting_download_metadata: set[str] = set()
 
     def __repr__(self) -> str:
         return (
-            f"Node(name={self.name}, id={self.id}, url={self.url}, type={self.type}, "
+            f"Node(has_url={self.url is not None}, type={self.type}, "
             f"download_kind={self.download_kind})"
         )
 
@@ -134,6 +144,10 @@ class Node:
     @property
     def is_verified(self) -> bool:
         return self.download_status == DownloadStatus.HANDLED
+
+    @property
+    def has_remote_marker_conflict(self) -> bool:
+        return "remote_marker" in self._conflicting_download_metadata
 
     def mark_handled(self) -> None:
         self.download_status = DownloadStatus.HANDLED
@@ -154,11 +168,7 @@ class Node:
         remote_size: Any = None,
         name_clash_id: Any = NAME_CLASH_ID_UNSET,
         download_kind: DownloadKind | str | None = None,
-    ) -> Node | None:
-        # Check for duplicate urls and just ignore those nodes:
-        if url and any(child.url == url for child in self.children):
-            return None
-
+    ) -> Node:
         temp = Node(
             name,
             id,
@@ -175,6 +185,104 @@ class Node:
         )
         self.children.append(temp)
         return temp
+
+    @staticmethod
+    def _reconcile_download_metadata(existing: Node, candidate: Node) -> None:
+        for attr in ("download_headers", "timemodified", "remote_size"):
+            if attr in existing._conflicting_download_metadata:
+                continue
+            old = getattr(existing, attr)
+            new = getattr(candidate, attr)
+            if old is None:
+                setattr(existing, attr, new)
+            elif new is not None and old != new:
+                setattr(existing, attr, None)
+                existing._conflicting_download_metadata.add(attr)
+
+        if "remote_marker" in existing._conflicting_download_metadata:
+            return
+        if existing.etag is None and candidate.etag is not None:
+            existing.etag = candidate.etag
+            existing.etag_kind = candidate.etag_kind
+        elif candidate.etag is not None and (
+            existing.etag != candidate.etag
+            or (
+                existing.etag_kind is not None
+                and candidate.etag_kind is not None
+                and existing.etag_kind != candidate.etag_kind
+            )
+        ):
+            existing.etag = None
+            existing.etag_kind = None
+            existing._conflicting_download_metadata.add("remote_marker")
+        elif candidate.etag is not None and existing.etag_kind is None:
+            existing.etag_kind = candidate.etag_kind
+
+    def add_download_child(
+        self,
+        name: str,
+        id: Any,
+        type: str,  # noqa: A003 - keep original name for compatibility
+        *,
+        url: str,
+        download_headers: dict[str, str] | None = None,
+        timemodified: Any = None,
+        etag: str | None = None,
+        etag_kind: RemoteMarkerKind | str | None = None,
+        remote_size: Any = None,
+        name_clash_id: Any = NAME_CLASH_ID_UNSET,
+        download_kind: DownloadKind | str | None = None,
+    ) -> Node:
+        """Add one discovered download, reconciling a compatible URL duplicate.
+
+        Structural insertion remains unconditional in :meth:`add_child`. This
+        operation makes provider-level materialization deduplication explicit:
+        a repeated name and URL strengthens missing metadata instead of
+        creating two downloads for the same target path.
+        """
+        candidate = Node(
+            name,
+            id,
+            type,
+            self,
+            url=url,
+            download_headers=download_headers,
+            timemodified=timemodified,
+            etag=etag,
+            etag_kind=etag_kind,
+            remote_size=remote_size,
+            name_clash_id=name_clash_id,
+            download_kind=download_kind,
+        )
+        existing = next(
+            (
+                child
+                for child in self.children
+                if child.url == url and child.name == candidate.name
+            ),
+            None,
+        )
+        if existing is None:
+            self.children.append(candidate)
+            return candidate
+        if (
+            existing.type != candidate.type
+            or existing.download_kind is not candidate.download_kind
+        ):
+            raise ValueError(
+                "conflicting download semantics for the same target name and URL"
+            )
+        self._reconcile_download_metadata(existing, candidate)
+        return existing
+
+    def ancestor(self, kind: NodeKind) -> Node | None:
+        """Return this node or its nearest ancestor with the structural kind."""
+        current: Node | None = self
+        while current is not None:
+            if current.type == kind:
+                return current
+            current = current.parent
+        return None
 
     def clone(self, parent: Node | None = None) -> Node:
         clone = Node(
@@ -195,6 +303,7 @@ class Node:
             download_kind=self.download_kind,
         )
         clone.children = [child.clone(clone) for child in self.children]
+        clone._conflicting_download_metadata = set(self._conflicting_download_metadata)
         return clone
 
     def get_path(self) -> list[str]:

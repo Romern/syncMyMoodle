@@ -682,9 +682,7 @@ def get_quiz_attempts(
         "mod_quiz_get_user_attempts",
         {"quizid": quiz_id, "status": "finished", "includepreviews": 0},
     )
-    if not isinstance(payload, dict) or not isinstance(payload.get("attempts"), list):
-        return None
-    return [item for item in payload["attempts"] if isinstance(item, dict)]
+    return _dict_list_field(payload, "attempts")
 
 
 def get_quiz_attempt_review(
@@ -903,7 +901,7 @@ def get_assignment(
     wstoken: str,
     course_id: Any,
     log: logging.Logger = logger,
-) -> Any:
+) -> dict[str, Any] | None:
     payload = call_webservice(
         session,
         wstoken,
@@ -916,9 +914,9 @@ def get_assignment(
         },
         log,
     )
-    if not isinstance(payload, dict):
+    courses = _dict_list_field(payload, "courses")
+    if courses is None:
         return None
-    courses = payload.get("courses") or []
     return courses[0] if courses else None
 
 

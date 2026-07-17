@@ -4,6 +4,7 @@ import urllib.parse
 import zipfile
 from typing import Any
 
+import pytest
 import requests
 
 from syncmymoodle import (
@@ -72,10 +73,11 @@ def opencast_episode_entry(
     return {"mediapackage": mediapackage}
 
 
-def run_page_handler(response):
-    ctx = make_context({"links.opencast": False})
+def run_page_handler(response, config=None):
+    ctx = make_context({"links.opencast": False, **(config or {})})
     session = FakeSession()
-    session.add("GET", PAGE_URL, response)
+    if response is not None:
+        session.add("GET", PAGE_URL, response)
     ctx.session = session
     course_node = Node("Course", 1, "Course", None)
     section_node = course_node.add_child("Section", 2, "Section")
@@ -112,6 +114,32 @@ def test_page_http_failure_is_counted(caplog):
 
     assert ctx.stats.failed == 1
     assert "Page module 123 returned status 503" in caplog.text
+
+
+def test_excluded_page_is_not_fetched_for_opencast_scanning():
+    ctx = run_page_handler(
+        None,
+        {
+            "links.opencast": True,
+            "filters.exclude_links": {"1": [PAGE_URL]},
+        },
+    )
+
+    assert ctx.session.calls == []
+    assert {item.config_key for item in ctx.filtered_items} == {"filters.exclude_links"}
+
+
+def test_page_redirect_cannot_bypass_course_domain_filter():
+    external_url = "https://files.example.test/private.html"
+    ctx = run_page_handler(
+        FakeResponse(status_code=302, headers={"Location": external_url}),
+        {"filters.allowed_domains": {"1": ["moodle.rwth-aachen.de"]}},
+    )
+
+    assert ctx.session.calls == [("GET", PAGE_URL)]
+    assert {item.config_key for item in ctx.filtered_items} == {
+        "filters.allowed_domains"
+    }
 
 
 def h5p_package(content: str) -> bytes:
@@ -152,10 +180,11 @@ def sciebo_share_context(page_fixture: str):
     return syncer, session
 
 
-def run_h5p_handler(monkeypatch, response, package_metadata=None):
-    ctx = make_context()
+def run_h5p_handler(monkeypatch, response, package_metadata=None, config=None):
+    ctx = make_context(config)
     session = FakeSession()
-    session.add("GET", H5P_PACKAGE_URL, response)
+    if response is not None:
+        session.add("GET", H5P_PACKAGE_URL, response)
     ctx.session = session
     package_file = {"fileurl": H5P_PACKAGE_URL, **(package_metadata or {})}
     monkeypatch.setattr(
@@ -180,7 +209,7 @@ def run_h5p_handler(monkeypatch, response, package_metadata=None):
         {"id": 317, "modname": "h5pactivity", "name": "Interactive video"},
     )
 
-    return section_node
+    return ctx, section_node, session
 
 
 def range_package_response(package, requested_ranges, bytes_served):
@@ -305,13 +334,57 @@ def test_h5p_package_download_is_streamed_and_capped(monkeypatch, caplog):
     monkeypatch.setattr(sync_handlers, "H5P_PACKAGE_MAX_BYTES", 8)
 
     def package_response(url, kwargs):
-        assert kwargs == {"stream": True, "timeout": HTTP_TIMEOUT_SECONDS}
+        assert kwargs == {
+            "allow_redirects": False,
+            "stream": True,
+            "timeout": HTTP_TIMEOUT_SECONDS,
+        }
         return FakeResponse(chunks=[b"1234", b"56789"])
 
-    section_node = run_h5p_handler(monkeypatch, package_response)
+    _, section_node, _ = run_h5p_handler(monkeypatch, package_response)
 
     assert section_node.children == []
     assert "H5P package for module 317 is too large" in caplog.text
+
+
+def test_h5p_package_initial_url_obeys_course_domain_filter(monkeypatch):
+    ctx, section_node, session = run_h5p_handler(
+        monkeypatch,
+        None,
+        config={"filters.allowed_domains": {"1": ["files.example.test"]}},
+    )
+
+    assert session.calls == []
+    assert section_node.children == []
+    assert {item.config_key for item in ctx.filtered_items} == {
+        "filters.allowed_domains"
+    }
+
+
+@pytest.mark.parametrize("package_metadata", [None, {"filesize": 128}])
+def test_h5p_package_redirect_obeys_course_domain_filter(
+    monkeypatch,
+    package_metadata,
+):
+    external_url = "https://files.example.test/private.h5p"
+
+    def redirect(url, kwargs):
+        del url
+        assert kwargs["allow_redirects"] is False
+        return FakeResponse(status_code=302, headers={"Location": external_url})
+
+    ctx, section_node, session = run_h5p_handler(
+        monkeypatch,
+        redirect,
+        package_metadata,
+        {"filters.allowed_domains": {"1": ["moodle.rwth-aachen.de"]}},
+    )
+
+    assert session.calls == [("GET", H5P_PACKAGE_URL)]
+    assert section_node.children == []
+    assert {item.config_key for item in ctx.filtered_items} == {
+        "filters.allowed_domains"
+    }
 
 
 def test_h5p_content_is_bounded_after_decompression(monkeypatch, caplog):
@@ -326,7 +399,7 @@ def test_h5p_content_is_bounded_after_decompression(monkeypatch, caplog):
     requested_ranges = []
     bytes_served = []
 
-    section_node = run_h5p_handler(
+    _, section_node, _ = run_h5p_handler(
         monkeypatch,
         range_package_response(package_bytes, requested_ranges, bytes_served),
         {"filesize": len(package_bytes)},
@@ -347,7 +420,7 @@ def test_h5p_content_is_extracted_with_bounded_range_requests(monkeypatch):
     requested_ranges = []
     bytes_served = []
 
-    section_node = run_h5p_handler(
+    _, section_node, _ = run_h5p_handler(
         monkeypatch,
         range_package_response(package_bytes, requested_ranges, bytes_served),
         {"filesize": len(package_bytes)},
@@ -371,7 +444,7 @@ def test_h5p_range_requests_fall_back_when_the_server_ignores_them(monkeypatch):
             headers={"Content-Length": str(len(package))},
         )
 
-    section_node = run_h5p_handler(
+    _, section_node, _ = run_h5p_handler(
         monkeypatch,
         ignore_range,
         {"filesize": len(package)},
@@ -393,7 +466,7 @@ def test_large_h5p_package_is_spooled_and_inspected(monkeypatch):
         )
         archive.writestr("content/video.mp4", b"x" * 1024)
 
-    section_node = run_h5p_handler(
+    _, section_node, _ = run_h5p_handler(
         monkeypatch,
         FakeResponse(
             content=package.getvalue(),
@@ -712,6 +785,64 @@ def test_update_feed_reuses_and_refreshes_assignment_and_quiz_data(
     )
 
 
+def test_malformed_assignment_submission_inventory_is_not_cached(monkeypatch):
+    courses = [{"id": 901, "shortname": "Course", "idnumber": "26ss-course"}]
+    course = [
+        {
+            "id": 902,
+            "name": "General",
+            "modules": [
+                {"id": 42, "instance": 7, "modname": "assign", "name": "Assignment"}
+            ],
+        }
+    ]
+    assignments = {
+        "assignments": [
+            {
+                "id": 7,
+                "cmid": 42,
+                "intro": "",
+                "introattachments": [],
+                "teamsubmission": 0,
+            }
+        ]
+    }
+    install_moodle_fixtures(
+        monkeypatch,
+        courses,
+        {901: course},
+        {901: assignments},
+    )
+    monkeypatch.setattr(
+        moodle,
+        "get_assignment_submission_files",
+        lambda *args: [
+            {
+                "filename": "valid.pdf",
+                "fileurl": "https://moodle.rwth-aachen.de/pluginfile.php/valid.pdf",
+            },
+            "private-malformed-submission",
+        ],
+    )
+    monkeypatch.setattr(
+        course_cache,
+        "store_assignment_cache_entry",
+        lambda *args: pytest.fail("a partial submission inventory must not be cached"),
+    )
+    syncer = make_context({"modules.assignment": True})
+    syncer.session = FakeSession()
+
+    sync.sync(syncer)
+
+    assert syncer.incomplete_course_ids == {901}
+    assert syncer.stats.failed == 1
+    assignment = node_at_path(
+        syncer.root_node,
+        ["26ss", "Course", "General", "Assignment"],
+    )
+    assert assignment.children == []
+
+
 def test_quiz_cache_refreshes_at_review_phase_boundary(monkeypatch, tmp_path):
     calls = {"attempts": 0, "review": 0}
     quiz_state = {"timeclose": 0}
@@ -853,7 +984,7 @@ def test_failed_course_update_check_does_not_disable_later_courses(monkeypatch, 
     )
 
 
-def test_nested_moodle_folder_paths_are_preserved(monkeypatch):
+def test_nested_moodle_folder_paths_are_preserved(monkeypatch, update_snapshots):
     courses = [load_json_fixture("moodle", "courses.json")[0]]
     syncer = make_context()
     install_moodle_fixtures(
@@ -865,12 +996,17 @@ def test_nested_moodle_folder_paths_are_preserved(monkeypatch):
 
     sync.sync(syncer)
 
-    assert_snapshot("nested_folder_tree.txt", node_rows(syncer.root_node))
+    assert_snapshot(
+        "nested_folder_tree.txt",
+        node_rows(syncer.root_node),
+        update=update_snapshots,
+    )
 
 
 def test_assignment_opencast_metadata_is_refreshed_between_runs(
     monkeypatch,
     tmp_path,
+    update_snapshots,
 ):
     courses = [load_json_fixture("moodle", "courses.json")[1]]
     config = {
@@ -931,7 +1067,11 @@ def test_assignment_opencast_metadata_is_refreshed_between_runs(
         f"{opencast.OPENCAST_SEARCH_URL}?id={episode_id}",
         f"{opencast.OPENCAST_SEARCH_URL}?limit=100&offset=0&sid={series_id}",
     ]
-    assert_snapshot("assignment_opencast_tree.txt", node_rows(first.root_node))
+    assert_snapshot(
+        "assignment_opencast_tree.txt",
+        node_rows(first.root_node),
+        update=update_snapshots,
+    )
     assert node_rows(second.root_node) != node_rows(first.root_node)
     assert any(
         "?signature=refreshed" in row and "2" * 32 in row
@@ -939,7 +1079,9 @@ def test_assignment_opencast_metadata_is_refreshed_between_runs(
     )
 
 
-def test_skip_rules_apply_to_sections_modules_links_and_domains(monkeypatch):
+def test_skip_rules_apply_to_sections_modules_links_and_domains(
+    monkeypatch, update_snapshots
+):
     courses = [load_json_fixture("moodle", "courses.json")[2]]
     syncer = make_context(
         {
@@ -964,7 +1106,11 @@ def test_skip_rules_apply_to_sections_modules_links_and_domains(monkeypatch):
 
     sync.sync(syncer)
 
-    assert_snapshot("skip_rules_tree.txt", node_rows(syncer.root_node))
+    assert_snapshot(
+        "skip_rules_tree.txt",
+        node_rows(syncer.root_node),
+        update=update_snapshots,
+    )
 
 
 def test_sciebo_public_share_is_cached_per_sync_run(caplog):
@@ -1000,6 +1146,75 @@ def test_sciebo_public_share_is_cached_per_sync_run(caplog):
     ]
     assert "fake-request-token" not in caplog.text
     assert "Sciebo sharingToken:" not in caplog.text
+
+
+def test_sciebo_webdav_refuses_cross_origin_redirect_with_credentials(caplog):
+    syncer = make_context({"links.sciebo": True})
+    session = FakeSession()
+    session.add(
+        "GET",
+        SCIEBO_SHARE_LINK,
+        FakeResponse(text=load_fixture("sciebo", "public_share.html")),
+    )
+
+    def redirect(url, kwargs):
+        del url
+        assert kwargs["allow_redirects"] is False
+        assert kwargs["headers"]["Authorization"].startswith("Basic ")
+        assert kwargs["headers"]["requesttoken"] == "fake-request-token"
+        return FakeResponse(
+            status_code=302,
+            headers={"Location": "https://evil.test/collect"},
+        )
+
+    session.add("PROPFIND", SCIEBO_PUBLIC_ROOT, redirect)
+    syncer.session = session
+    parent = Node("Section", 1, "Section", None)
+    caplog.set_level(logging.WARNING, logger="syncmymoodle.sciebo")
+
+    sciebo.scan_public_shares(syncer, SCIEBO_SHARE_LINK, parent)
+
+    assert session.calls == [
+        ("GET", SCIEBO_SHARE_LINK),
+        ("PROPFIND", SCIEBO_PUBLIC_ROOT),
+    ]
+    assert parent.children == []
+    assert "refusing redirect" in caplog.text
+    assert "private" not in caplog.text
+    assert "fake-request-token" not in caplog.text
+
+
+def test_sciebo_webdav_rejects_partial_listing_before_adding_files(caplog):
+    syncer = make_context({"links.sciebo": True})
+    session = FakeSession()
+    session.add(
+        "GET",
+        SCIEBO_SHARE_LINK,
+        FakeResponse(text=load_fixture("sciebo", "public_share.html")),
+    )
+    session.add(
+        "PROPFIND",
+        SCIEBO_PUBLIC_ROOT,
+        FakeResponse(
+            text="""<?xml version="1.0" encoding="UTF-8"?>
+            <d:multistatus xmlns:d="DAV:">
+              <d:response><d:href>/public.php/webdav/</d:href></d:response>
+              <d:response>
+                <d:href>/public.php/webdav/valid.pdf</d:href>
+              </d:response>
+              <d:response><d:propstat /></d:response>
+            </d:multistatus>"""
+        ),
+    )
+    syncer.session = session
+    parent = Node("Section", 1, "Section", None)
+    caplog.set_level(logging.WARNING, logger="syncmymoodle.sciebo")
+
+    sciebo.scan_public_shares(syncer, SCIEBO_SHARE_LINK, parent)
+
+    assert parent.children == []
+    assert syncer.sciebo_link_cache[SCIEBO_SHARE_LINK] is None
+    assert "malformed href" in caplog.text
 
 
 def test_opencast_error_response_body_is_not_logged(caplog):
@@ -1052,6 +1267,118 @@ def test_opencast_lti_authorization_is_reused_for_the_course():
 
     assert syncer.browser_session.count("GET") == 2
     assert syncer.session.count("POST", opencast.OPENCAST_LTI_URL) == 2
+
+
+@pytest.mark.parametrize(
+    "endpoint",
+    [
+        "http://engage.streaming.rwth-aachen.de/lti",
+        "https://engage.streaming.rwth-aachen.de.evil.test/lti",
+        "https://attacker@engage.streaming.rwth-aachen.de/lti",
+        "https://engage.streaming.rwth-aachen.de/lti/elsewhere",
+        "https://engage.streaming.rwth-aachen.de/lti?destination=elsewhere",
+    ],
+)
+def test_opencast_lti_endpoint_requires_expected_https_origin_and_path(endpoint):
+    assert not opencast.lti_endpoint_allowed(endpoint)
+
+
+def test_opencast_lti_endpoint_accepts_expected_endpoint():
+    assert opencast.lti_endpoint_allowed(opencast.OPENCAST_LTI_URL)
+    assert opencast.lti_endpoint_allowed(f"{opencast.OPENCAST_LTI_URL}/")
+
+
+def test_opencast_lti_submission_does_not_follow_redirect_with_parameters():
+    syncer = make_context()
+    session = FakeSession()
+
+    def redirect(url, kwargs):
+        del url
+        assert kwargs["allow_redirects"] is False
+        assert kwargs["data"] == {"oauth_signature": "private-signature"}
+        return FakeResponse(
+            status_code=307,
+            headers={"Location": "https://evil.test/lti"},
+        )
+
+    session.add("POST", opencast.OPENCAST_LTI_URL, redirect)
+    syncer.session = session
+
+    for _ in range(3):
+        assert not opencast.submit_lti_form(
+            syncer,
+            {"oauth_signature": "private-signature"},
+            "test module",
+        )
+    assert session.calls == [("POST", opencast.OPENCAST_LTI_URL)] * 3
+    assert not syncer.service_outages.should_skip(opencast.OPENCAST_URL)
+
+
+def test_opencast_lti_submission_follows_same_origin_redirect_without_body():
+    syncer = make_context()
+    session = FakeSession()
+    destination = f"{opencast.OPENCAST_URL}/lti/launch/complete"
+    session.add(
+        "POST",
+        opencast.OPENCAST_LTI_URL,
+        FakeResponse(status_code=302, headers={"Location": destination}),
+    )
+
+    def launched(url, kwargs):
+        del url
+        assert kwargs["allow_redirects"] is False
+        assert "data" not in kwargs
+        return FakeResponse()
+
+    session.add("GET", destination, launched)
+    syncer.session = session
+
+    assert opencast.submit_lti_form(
+        syncer,
+        {"oauth_signature": "private-signature"},
+        "test module",
+    )
+    assert session.calls == [
+        ("POST", opencast.OPENCAST_LTI_URL),
+        ("GET", destination),
+    ]
+
+
+def test_opencast_lti_launch_rejects_unexpected_endpoint(monkeypatch):
+    syncer = make_context({"links.opencast": True})
+    syncer.session = FakeSession()
+    monkeypatch.setattr(
+        sync_handlers.moodle_api,
+        "get_ltis_by_course",
+        lambda session, wstoken, course_id: [],
+    )
+    monkeypatch.setattr(
+        sync_handlers.moodle_api,
+        "get_lti_launch_data",
+        lambda session, wstoken, tool_id: {
+            "endpoint": "https://evil.test/lti",
+            "parameters": [{"name": "oauth_signature", "value": "secret"}],
+        },
+    )
+    course_node = Node("Course", 1, "Course", None)
+    section_node = course_node.add_child("Section", 2, "Section")
+    assert section_node is not None
+    module_context = sync_handlers.ModuleContext(
+        syncer,
+        1,
+        course_node,
+        section_node,
+        {},
+        {},
+    )
+
+    launch = sync_handlers._opencast_lti_launch(
+        module_context,
+        {"id": 501, "instance": 9001, "name": "Recording"},
+    )
+
+    assert launch is None
+    assert syncer.session.calls == []
 
 
 def test_opencast_repeated_503_opens_shared_service_circuit(caplog):
@@ -1117,10 +1444,10 @@ def test_opencast_track_name_does_not_depend_on_sibling_count(monkeypatch):
     )
 
     single_parent = Node("Single", 1, "Section", None)
-    opencast.add_episode_nodes(syncer, single_parent, "Lecture.mp4", "episode")
+    opencast.add_episode_nodes(syncer, single_parent, "Lecture", "episode")
     resolved_tracks = (presentation, presenter)
     multi_parent = Node("Multiple", 2, "Section", None)
-    opencast.add_episode_nodes(syncer, multi_parent, "Lecture.mp4", "episode")
+    opencast.add_episode_nodes(syncer, multi_parent, "Lecture", "episode")
 
     single_name = single_parent.children[0].name
     multi_name = next(
@@ -1488,7 +1815,7 @@ def test_opencast_series_fetches_every_page(monkeypatch):
     ]
 
 
-def test_opencast_uses_refreshed_episode_from_partial_series(monkeypatch):
+def test_opencast_falls_back_to_episode_refresh_after_partial_series(monkeypatch):
     syncer = make_context()
     course_id = 101
     series_id = "series-123"
@@ -1514,10 +1841,13 @@ def test_opencast_uses_refreshed_episode_from_partial_series(monkeypatch):
     def fetch_result_list(ctx, url, context, log):
         requested_urls.append(url)
         if "?id=" in url:
+            requested_episode_id = urllib.parse.parse_qs(
+                urllib.parse.urlsplit(url).query
+            )["id"][0]
             return [
                 opencast_episode_entry(
-                    fallback_episode_id,
-                    "https://video.example.test/fallback.mp4",
+                    requested_episode_id,
+                    f"https://video.example.test/refreshed-{requested_episode_id}.mp4",
                     series_id=series_id,
                 )
             ]
@@ -1552,12 +1882,17 @@ def test_opencast_uses_refreshed_episode_from_partial_series(monkeypatch):
     )
 
     assert series_tracks is not None
-    assert series_tracks[0].url == "https://video.example.test/fresh-0.mp4"
+    assert series_tracks[0].url == (
+        f"https://video.example.test/refreshed-{episode_id}.mp4"
+    )
     assert fallback_tracks is not None
-    assert fallback_tracks[0].url == "https://video.example.test/fallback.mp4"
+    assert fallback_tracks[0].url == (
+        f"https://video.example.test/refreshed-{fallback_episode_id}.mp4"
+    )
     assert requested_urls == [
         f"{opencast.OPENCAST_SEARCH_URL}?limit=100&offset=0&sid={series_id}",
         f"{opencast.OPENCAST_SEARCH_URL}?limit=100&offset=100&sid={series_id}",
+        f"{opencast.OPENCAST_SEARCH_URL}?id={episode_id}",
         f"{opencast.OPENCAST_SEARCH_URL}?id={fallback_episode_id}",
     ]
 
@@ -1589,14 +1924,47 @@ def test_opencast_series_stops_when_backend_repeats_page(monkeypatch, caplog):
         logging.getLogger("test"),
     )
 
-    assert episodes == tuple(
-        (f"episode-{index}", f"Episode {index}") for index in range(100)
-    )
+    assert episodes is None
     assert requested_urls == [
         f"{opencast.OPENCAST_SEARCH_URL}?limit=100&offset=0&sid=series-123",
         f"{opencast.OPENCAST_SEARCH_URL}?limit=100&offset=100&sid=series-123",
     ]
     assert "made no pagination progress at offset 100" in caplog.text
+
+
+def test_opencast_null_media_preserves_cached_tracks_as_stale(monkeypatch):
+    syncer = make_context()
+    course_id = 101
+    episode_id = "cached-episode"
+    cached = opencast.OpencastEpisode(
+        (opencast.OpencastTrack("https://video.example.test/cached.mp4"),)
+    )
+    opencast.store_episode(
+        syncer,
+        course_id,
+        episode_id,
+        cached,
+        state=None,
+    )
+    monkeypatch.setattr(
+        opencast,
+        "authorize_course_for_episode",
+        lambda *args, **kwargs: True,
+    )
+    monkeypatch.setattr(
+        opencast,
+        "fetch_result_list",
+        lambda *args, **kwargs: [{"mediapackage": {"id": episode_id, "media": None}}],
+    )
+
+    tracks = opencast.resolve_tracks_from_episode(
+        syncer,
+        episode_id,
+        course_id=course_id,
+    )
+
+    assert tracks == cached.tracks
+    assert opencast.episode_metadata_is_stale(syncer, course_id, episode_id)
 
 
 def test_opencast_malformed_series_page_falls_back_to_episode_refresh(monkeypatch):
@@ -1658,7 +2026,9 @@ def test_opencast_malformed_series_page_falls_back_to_episode_refresh(monkeypatc
     ]
 
 
-def test_mixed_course_sync_tree_covers_common_module_surfaces(monkeypatch):
+def test_mixed_course_sync_tree_covers_common_module_surfaces(
+    monkeypatch, update_snapshots
+):
     courses = load_json_fixture("moodle", "mixed_courses.json")
     course = load_json_fixture("moodle", "mixed_course.json")
     assignments = load_json_fixture("moodle", "mixed_assignments.json")
@@ -1770,7 +2140,12 @@ def test_mixed_course_sync_tree_covers_common_module_surfaces(monkeypatch):
     )
     opencast_node = node_at_path(
         syncer.root_node,
-        ["26ss", "Comprehensive Sync", "Materials", "Page module (presentation)"],
+        [
+            "26ss",
+            "Comprehensive Sync",
+            "Materials",
+            "Page module (presentation).mp4",
+        ],
     )
     assert direct_node.remote_size == 1234
     assert opencast_node.remote_size == 5678
@@ -1783,10 +2158,16 @@ def test_mixed_course_sync_tree_covers_common_module_surfaces(monkeypatch):
     for suffix, expected_size in expected_sizes.items():
         node = node_at_path(syncer.root_node, [*base_path, *suffix])
         assert node.remote_size == expected_size
-    assert_snapshot("mixed_course_tree.txt", node_rows(syncer.root_node))
+    assert_snapshot(
+        "mixed_course_tree.txt",
+        node_rows(syncer.root_node),
+        update=update_snapshots,
+    )
 
 
-def test_opencast_lti_single_and_series_use_lti_and_api_routes(monkeypatch):
+def test_opencast_lti_single_and_series_use_lti_and_api_routes(
+    monkeypatch, update_snapshots
+):
     courses = [load_json_fixture("moodle", "courses.json")[0]]
     lti_submit_url = "https://engage.streaming.rwth-aachen.de/lti"
     single_episode = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee"
@@ -1867,4 +2248,8 @@ def test_opencast_lti_single_and_series_use_lti_and_api_routes(monkeypatch):
     assert launch_calls == [9001, 9002]
     assert session.count("POST", lti_submit_url) == 1
     assert session.count("GET") == 2
-    assert_snapshot("opencast_lti_tree.txt", node_rows(syncer.root_node))
+    assert_snapshot(
+        "opencast_lti_tree.txt",
+        node_rows(syncer.root_node),
+        update=update_snapshots,
+    )

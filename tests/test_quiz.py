@@ -1,5 +1,6 @@
 import hashlib
 import subprocess
+from dataclasses import replace
 from types import SimpleNamespace
 
 from syncmymoodle import course_cache, quiz, sync_handlers
@@ -99,6 +100,23 @@ def quiz_node():
     )
     assert node is not None
     return node
+
+
+def versioned_quiz_tree(review_html):
+    root = Node("", -1, "Root", None)
+    semester = root.add_child("26ss", None, "Semester")
+    course = semester.add_child("Course", 301, "Course")
+    section = course.add_child("General", 401, "Section")
+    attempt = section.add_child(
+        "My Quiz, Versuch 1",
+        5,
+        "Quiz",
+        url=QUIZ_URL,
+        etag=hashlib.sha256(review_html.encode("utf-8")).hexdigest(),
+        etag_kind=RemoteMarkerKind.OPAQUE,
+        download_kind=DownloadKind.QUIZ,
+    )
+    return root, attempt
 
 
 def install_quiz_activity(monkeypatch):
@@ -309,39 +327,56 @@ def test_html_mode_is_idempotent(tmp_path, capsys):
 
 
 def test_changed_quiz_review_replaces_an_unmodified_snapshot(tmp_path):
-    def quiz_tree(review_html):
-        root = Node("", -1, "Root", None)
-        semester = root.add_child("26ss", None, "Semester")
-        course = semester.add_child("Course", 301, "Course")
-        section = course.add_child("General", 401, "Section")
-        attempt = section.add_child(
-            "My Quiz, Versuch 1",
-            5,
-            "Quiz",
-            url=QUIZ_URL,
-            etag=hashlib.sha256(review_html.encode("utf-8")).hexdigest(),
-            etag_kind=RemoteMarkerKind.OPAQUE,
-            download_kind=DownloadKind.QUIZ,
-        )
-        return root, attempt
-
     first = quiz_context(tmp_path, "html")
-    first.root_node, first_node = quiz_tree(QUIZ_HTML)
+    first.root_node, first_node = versioned_quiz_tree(QUIZ_HTML)
     assert quiz.download_quiz(first, first_node).downloaded == 1
     first_node.mark_handled()
     course_cache.cache_root_node(first)
 
     updated_review = QUIZ_HTML.replace("My answer", "Updated answer")
     current = quiz_context(tmp_path, "html")
-    current.config.update_files = True
+    current.config = replace(current.config, update_files=True)
     current.quiz_review_cache[QUIZ_URL] = updated_review
-    current.root_node, current_node = quiz_tree(updated_review)
+    current.root_node, current_node = versioned_quiz_tree(updated_review)
 
     outcome = quiz.download_quiz(current, current_node)
 
     html_path = tmp_path / "26ss" / "Course" / "General" / "My Quiz, Versuch 1.html"
     assert outcome.updated == 1
     assert "Updated answer" in html_path.read_text(encoding="utf-8")
+    assert list(html_path.parent.glob("*.syncconflict.*")) == []
+
+
+def test_quiz_edit_during_snapshot_creation_obeys_keep_policy(tmp_path, monkeypatch):
+    first = quiz_context(tmp_path, "html")
+    first.root_node, first_node = versioned_quiz_tree(QUIZ_HTML)
+    assert quiz.download_quiz(first, first_node).downloaded == 1
+    first_node.mark_handled()
+    course_cache.cache_root_node(first)
+
+    updated_review = QUIZ_HTML.replace("My answer", "Updated answer")
+    current = quiz_context(tmp_path, "html")
+    current.config = replace(
+        current.config,
+        update_files=True,
+        conflict_handling="keep",
+    )
+    current.quiz_review_cache[QUIZ_URL] = updated_review
+    current.root_node, current_node = versioned_quiz_tree(updated_review)
+    html_path = tmp_path / "26ss" / "Course" / "General" / "My Quiz, Versuch 1.html"
+    original_builder = quiz.build_quiz_snapshot
+
+    def build_after_local_edit(*args, **kwargs):
+        html_path.write_text("user edit during rendering", encoding="utf-8")
+        return original_builder(*args, **kwargs)
+
+    monkeypatch.setattr(quiz, "build_quiz_snapshot", build_after_local_edit)
+
+    outcome = quiz.download_quiz(current, current_node)
+
+    assert outcome.is_handled
+    assert outcome.cache_verified is False
+    assert html_path.read_text(encoding="utf-8") == "user edit during rendering"
     assert list(html_path.parent.glob("*.syncconflict.*")) == []
 
 
@@ -454,7 +489,7 @@ def test_both_mode_writes_html_and_pdf(tmp_path, monkeypatch):
 
 def test_both_mode_dry_run_reports_each_missing_artifact(tmp_path, capsys):
     ctx = quiz_context(tmp_path, "both")
-    ctx.config.dry_run = True
+    ctx.config = replace(ctx.config, dry_run=True)
     node = quiz_node()
     html_path = tmp_path / "root" / "My Quiz, Versuch 1.html"
     pdf_path = tmp_path / "root" / "My Quiz, Versuch 1.pdf"
@@ -472,7 +507,7 @@ def test_both_mode_dry_run_reports_each_missing_artifact(tmp_path, capsys):
 
 def test_both_mode_dry_run_reports_only_missing_pdf(tmp_path, capsys):
     ctx = quiz_context(tmp_path, "both")
-    ctx.config.dry_run = True
+    ctx.config = replace(ctx.config, dry_run=True)
     node = quiz_node()
     html_path = tmp_path / "root" / "My Quiz, Versuch 1.html"
     html_path.parent.mkdir()
@@ -499,7 +534,7 @@ def test_find_chromium_prefers_configured_path(tmp_path):
     browser = tmp_path / "my-chromium"
     browser.write_text("#!/bin/sh\n")
     ctx = quiz_context(tmp_path, "pdf")
-    ctx.config.browser = str(browser)
+    ctx.config = replace(ctx.config, browser=str(browser))
     assert quiz.find_chromium(ctx.config) == str(browser)
 
 

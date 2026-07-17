@@ -245,7 +245,8 @@ def _revision_marker(
     ctx: SyncContext,
     playlist_url: str,
     log: logging.Logger,
-) -> str:
+    course_id: Any = None,
+) -> str | None:
     if playlist_url in ctx.emedia_revision_cache:
         return ctx.emedia_revision_cache[playlist_url]
 
@@ -262,7 +263,12 @@ def _revision_marker(
             manifest_url,
             lambda url: (
                 same_origin(url, playlist_url)
-                and filters.require_url_allowed(ctx, url, "emedia revision manifest")
+                and filters.require_url_allowed(
+                    ctx,
+                    url,
+                    "emedia revision manifest",
+                    course_id=course_id,
+                )
             ),
             headers=REQUEST_HEADERS,
             stream=True,
@@ -286,7 +292,6 @@ def _revision_marker(
             "same URL cannot be detected",
             redact_url_secrets(playlist_url),
         )
-        marker = playlist_url
     ctx.emedia_revision_cache[playlist_url] = marker
     return marker
 
@@ -308,29 +313,34 @@ def add_video_node(
     link: str,
     module_title: Any = None,
     log: logging.Logger = logger,
+    *,
+    course_id: Any = None,
 ) -> None:
     video_id = extract_video_id(link)
     if video_id is None:
         return
     video = resolve_video(ctx, video_id, log)
     if video is None or filters.should_skip_url(
-        ctx, video.playlist_url, "emedia video URL"
+        ctx,
+        video.playlist_url,
+        "emedia video URL",
+        course_id=course_id,
     ):
         return
-    marker = _revision_marker(ctx, video.playlist_url, log)
+    marker = _revision_marker(ctx, video.playlist_url, log, course_id)
     output_suffix = _output_suffix(ctx, log)
     title = str(module_title or video.title)
     current_suffix = Path(title).suffix
     if current_suffix.casefold() in {".mp4", ".ts"}:
         title = title[: -len(current_suffix)]
     title += output_suffix
-    parent_node.add_child(
+    parent_node.add_download_child(
         title,
         video.id,
         "Emedia",
         url=video.playlist_url,
         download_headers=REQUEST_HEADERS,
         etag=marker,
-        etag_kind=RemoteMarkerKind.OPAQUE,
+        etag_kind=RemoteMarkerKind.OPAQUE if marker is not None else None,
         download_kind=DownloadKind.EMEDIA,
     )

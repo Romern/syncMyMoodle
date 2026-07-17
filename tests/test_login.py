@@ -10,13 +10,15 @@ from syncmymoodle.moodle_tokens import MoodleTokens
 
 from .helpers import FakeResponse, FakeSession, make_context
 
+SSO_ORIGIN = "https://sso.rwth-aachen.de"
+
 
 def fresh_login_session():
     session = FakeSession()
     session.cookies = []
-    login_url = "https://sso.example/login"
-    select_url = "https://sso.example/select-token"
-    otp_url = "https://sso.example/otp"
+    login_url = f"{SSO_ORIGIN}/login"
+    select_url = f"{SSO_ORIGIN}/select-token"
+    otp_url = f"{SSO_ORIGIN}/otp"
     posted_login = []
     posted_totp_serial = []
     posted_otp = []
@@ -24,9 +26,17 @@ def fresh_login_session():
     session.add(
         "GET",
         f"{MOODLE_URL}auth/shibboleth/index.php",
+        FakeResponse(status_code=302, headers={"Location": login_url}),
+    )
+    session.add(
+        "GET",
+        login_url,
         FakeResponse(
-            text='<input name="csrf_token" value="csrf-login">',
-            url=login_url,
+            text="""
+<form action="/login">
+<input name="csrf_token" value="csrf-login">
+</form>
+"""
         ),
     )
 
@@ -34,43 +44,64 @@ def fresh_login_session():
         del url
         posted_login.append(kwargs["data"])
         return FakeResponse(
-            text="""
-<input id="fudis_selected_token_ids_input">
-<input name="csrf_token" value="csrf-select">
-""",
-            url=select_url,
+            status_code=303,
+            headers={"Location": select_url},
         )
 
     session.add("POST", login_url, login_response)
+    session.add(
+        "GET",
+        select_url,
+        FakeResponse(
+            text="""
+<form action="/select-token">
+<input id="fudis_selected_token_ids_input">
+<input name="csrf_token" value="csrf-select">
+</form>
+"""
+        ),
+    )
 
     def select_response(url, kwargs):
         del url
         posted_totp_serial.append(kwargs["data"]["fudis_selected_token_ids_input"])
-        return FakeResponse(
-            text="""
-<input id="fudis_otp_input">
-<input name="csrf_token" value="csrf-otp">
-""",
-            url=otp_url,
-        )
+        return FakeResponse(status_code=303, headers={"Location": otp_url})
 
     session.add("POST", select_url, select_response)
+    session.add(
+        "GET",
+        otp_url,
+        FakeResponse(
+            text="""
+<form action="/otp">
+<input id="fudis_otp_input">
+<input name="csrf_token" value="csrf-otp">
+</form>
+"""
+        ),
+    )
 
     def otp_response(url, kwargs):
         del url
         posted_otp.append(kwargs["data"]["fudis_otp_input"])
         return FakeResponse(
             text="""
+<form action="https://moodle.rwth-aachen.de/Shibboleth.sso/SAML2/POST">
 <input name="RelayState" value="relay">
 <input name="SAMLResponse" value="saml">
-""",
-            url=otp_url,
+</form>
+"""
         )
 
     session.add("POST", otp_url, otp_response)
     session.add(
         "POST",
-        f"{MOODLE_URL}Shibboleth.sso/SAML2/POST",
+        rwth.SAML_RESPONSE_URL,
+        FakeResponse(status_code=302, headers={"Location": f"{MOODLE_URL}my/"}),
+    )
+    session.add(
+        "GET",
+        f"{MOODLE_URL}my/",
         FakeResponse(text='<script>{"sesskey":"abc123"}</script>'),
     )
     return session, posted_login, posted_totp_serial, posted_otp
@@ -112,10 +143,12 @@ def test_login_only_saves_session_cookies_outside_dry_run(
     session.add(
         "GET",
         f"{MOODLE_URL}auth/shibboleth/index.php",
-        FakeResponse(
-            text='<script>{"sesskey":"abc123"}</script>',
-            url=f"{MOODLE_URL}my/",
-        ),
+        FakeResponse(status_code=302, headers={"Location": f"{MOODLE_URL}my/"}),
+    )
+    session.add(
+        "GET",
+        f"{MOODLE_URL}my/",
+        FakeResponse(text='<script>{"sesskey":"abc123"}</script>'),
     )
     saved_sessions = []
     ctx = make_context(
@@ -161,6 +194,129 @@ def test_login_maintenance_notice_exits_with_failure(monkeypatch):
         rwth.login(ctx, reuse_cached_session=False)
 
     assert exc_info.value.code == 1
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "http://sso.rwth-aachen.de/login",
+        "https://sso.rwth-aachen.de.evil.test/login",
+        "https://attacker@sso.rwth-aachen.de/login",
+        "https://evil.test/login",
+    ],
+)
+def test_sso_url_allowlist_rejects_non_official_destinations(url):
+    assert not rwth.sso_url_allowed(url)
+
+
+def test_sso_url_allowlist_accepts_official_and_injected_test_origins():
+    assert rwth.sso_url_allowed(f"{SSO_ORIGIN}/idp/login")
+    assert rwth.sso_url_allowed(
+        "https://test-idp.example/login",
+        {"https://test-idp.example"},
+    )
+
+
+def test_login_refuses_non_sso_redirect_before_requesting_it(monkeypatch):
+    session = FakeSession()
+    login_url = f"{MOODLE_URL}auth/shibboleth/index.php"
+    session.add(
+        "GET",
+        login_url,
+        FakeResponse(
+            status_code=302,
+            headers={"Location": "https://evil.test/credential-capture"},
+        ),
+    )
+    ctx = make_context()
+    monkeypatch.setattr(rwth.requests, "Session", lambda: session)
+    monkeypatch.setattr(rwth, "check_moodle_availability", lambda session, log: None)
+    monkeypatch.setattr(rwth, "check_general_connectivity", lambda log: None)
+    monkeypatch.setattr(rwth, "check_rwth_status_page", lambda log: None)
+
+    with pytest.raises(SystemExit):
+        rwth.login(ctx, reuse_cached_session=False)
+
+    assert session.calls == [("GET", login_url)]
+
+
+def test_login_refuses_cross_origin_form_action_before_posting(monkeypatch):
+    session = FakeSession()
+    login_url = f"{SSO_ORIGIN}/login"
+    entry_url = f"{MOODLE_URL}auth/shibboleth/index.php"
+    session.add(
+        "GET",
+        entry_url,
+        FakeResponse(status_code=302, headers={"Location": login_url}),
+    )
+    session.add(
+        "GET",
+        login_url,
+        FakeResponse(
+            text="""
+<form action="https://evil.test/credential-capture">
+<input name="csrf_token" value="csrf-login">
+</form>
+"""
+        ),
+    )
+    ctx = make_context({"auth.user": "user"})
+    ctx.auth.password = "password"
+    monkeypatch.setattr(rwth.requests, "Session", lambda: session)
+    monkeypatch.setattr(rwth, "check_moodle_availability", lambda session, log: None)
+    monkeypatch.setattr(rwth, "check_general_connectivity", lambda log: None)
+    monkeypatch.setattr(rwth, "check_rwth_status_page", lambda log: None)
+
+    with pytest.raises(SystemExit):
+        rwth.login(ctx, reuse_cached_session=False)
+
+    assert session.calls == [("GET", entry_url), ("GET", login_url)]
+
+
+def test_sso_post_does_not_resend_credentials_on_cross_origin_redirect(
+    monkeypatch,
+):
+    session = FakeSession()
+    login_url = f"{SSO_ORIGIN}/login"
+    session.add(
+        "POST",
+        login_url,
+        FakeResponse(
+            status_code=307,
+            headers={"Location": "https://evil.test/credential-capture"},
+        ),
+    )
+    monkeypatch.setattr(rwth, "check_general_connectivity", lambda log: None)
+    monkeypatch.setattr(rwth, "check_rwth_status_page", lambda log: None)
+
+    with pytest.raises(SystemExit):
+        rwth.post_sso_form(
+            session,
+            login_url,
+            {"j_password": "password"},
+            "username/password form",
+            logging.getLogger("test.rwth"),
+            rwth.sso_url_allowed,
+        )
+
+    assert session.calls == [("POST", login_url)]
+
+
+def test_saml_response_refuses_an_unexpected_form_action():
+    session = FakeSession()
+    soup = rwth.parse_html(
+        """
+<form action="https://evil.test/capture">
+<input name="RelayState" value="relay">
+<input name="SAMLResponse" value="saml">
+</form>
+"""
+    )
+
+    with pytest.raises(SystemExit):
+        rwth._submit_saml_response(session, soup, logging.getLogger("test.rwth"))
+
+    assert session.calls == []
 
 
 def test_login_fetches_provider_otp_only_at_otp_form(
@@ -276,9 +432,9 @@ def test_login_failure_identifies_the_rejected_sign_in_step(
 ):
     session, _, _, _ = fresh_login_session()
     rejected_url = {
-        "password": "https://sso.example/login",
-        "serial": "https://sso.example/select-token",
-        "totp": "https://sso.example/otp",
+        "password": f"{SSO_ORIGIN}/login",
+        "serial": f"{SSO_ORIGIN}/select-token",
+        "totp": f"{SSO_ORIGIN}/otp",
     }[rejected_step]
     session.add(
         "POST",
@@ -318,9 +474,13 @@ def test_login_failure_does_not_log_response_html(
     session.add(
         "GET",
         f"{MOODLE_URL}auth/shibboleth/index.php",
+        FakeResponse(status_code=302, headers={"Location": f"{SSO_ORIGIN}/login"}),
+    )
+    session.add(
+        "GET",
+        f"{SSO_ORIGIN}/login",
         FakeResponse(
             text='<input name="diagnostic" value="raw-login-secret">',
-            url="https://sso.example/login",
         ),
     )
     ctx = make_context(
@@ -349,14 +509,16 @@ def test_login_reports_sso_form_timeout_without_traceback(
 ):
     session = FakeSession()
     session.cookies = []
-    login_url = "https://sso.example/login"
+    login_url = f"{SSO_ORIGIN}/login"
     session.add(
         "GET",
         f"{MOODLE_URL}auth/shibboleth/index.php",
-        FakeResponse(
-            text='<input name="csrf_token" value="csrf-login">',
-            url=login_url,
-        ),
+        FakeResponse(status_code=302, headers={"Location": login_url}),
+    )
+    session.add(
+        "GET",
+        login_url,
+        FakeResponse(text='<input name="csrf_token" value="csrf-login">'),
     )
 
     def timeout(url, kwargs):

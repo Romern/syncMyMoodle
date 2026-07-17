@@ -1,6 +1,7 @@
 import pytest
 
 from syncmymoodle import course_cache, links
+from syncmymoodle.constants import LINKED_PAGE_MAX_BYTES
 from syncmymoodle.context import MoodleAccount
 from syncmymoodle.moodle_tokens import MoodleTokens
 from syncmymoodle.node import Node
@@ -189,6 +190,106 @@ def test_identical_links_are_requested_once_per_run(tmp_path):
     assert session.calls == [("HEAD", LINK_URL), ("GET", LINK_URL)]
     assert _youtube_ids(first_section) == ["abcdefghijk"]
     assert _youtube_ids(second_section) == ["abcdefghijk"]
+
+
+def test_reused_link_result_obeys_per_course_domain_filter(tmp_path):
+    final_url = "https://files.example.test/document.pdf"
+    ctx, course, first_section = _context(
+        tmp_path,
+        extra_config={
+            "filters.allowed_domains": {
+                "101": ["links.example.test", "files.example.test"],
+                "202": ["links.example.test"],
+            }
+        },
+    )
+    second_section = course.add_child("Other course policy", 202, "Section")
+    session = FakeSession()
+    session.add(
+        "HEAD",
+        LINK_URL,
+        FakeResponse(status_code=302, headers={"Location": final_url}),
+    )
+    session.add(
+        "HEAD",
+        final_url,
+        FakeResponse(headers={"Content-Type": "application/pdf"}),
+    )
+    ctx.session = session
+
+    links.scan_for_links(ctx, LINK_URL, first_section, 101, single=True)
+    links.scan_for_links(ctx, LINK_URL, second_section, 202, single=True)
+
+    assert session.calls == [("HEAD", LINK_URL), ("HEAD", final_url)]
+    assert len(first_section.children) == 1
+    assert second_section.children == []
+    assert {item.config_key for item in ctx.filtered_items} == {
+        "filters.allowed_domains"
+    }
+
+
+def test_policy_rejection_does_not_poison_later_permissive_course(tmp_path):
+    final_url = "https://files.example.test/document.pdf"
+    ctx, course, restrictive_section = _context(
+        tmp_path,
+        extra_config={
+            "filters.allowed_domains": {
+                "101": ["links.example.test"],
+                "202": ["links.example.test", "files.example.test"],
+            }
+        },
+    )
+    permissive_section = course.add_child("Permissive course", 202, "Section")
+    session = FakeSession()
+    session.add(
+        "HEAD",
+        LINK_URL,
+        FakeResponse(status_code=302, headers={"Location": final_url}),
+    )
+    session.add(
+        "HEAD",
+        final_url,
+        FakeResponse(headers={"Content-Type": "application/pdf"}),
+    )
+    ctx.session = session
+
+    links.scan_for_links(ctx, LINK_URL, restrictive_section, 101, single=True)
+    links.scan_for_links(ctx, LINK_URL, permissive_section, 202, single=True)
+
+    assert session.calls == [
+        ("HEAD", LINK_URL),
+        ("HEAD", LINK_URL),
+        ("HEAD", final_url),
+    ]
+    assert restrictive_section.children == []
+    assert len(permissive_section.children) == 1
+
+
+@pytest.mark.parametrize("declared", [True, False])
+def test_oversized_linked_html_is_not_read_or_cached(tmp_path, declared):
+    ctx, _, section = _context(tmp_path)
+    session = FakeSession()
+    session.add(
+        "HEAD",
+        LINK_URL,
+        FakeResponse(headers={"Content-Type": "text/html"}),
+    )
+    body = b"<html>" + b"x" * LINKED_PAGE_MAX_BYTES
+    response = FakeResponse(
+        headers={
+            "Content-Type": "text/html",
+            **({"Content-Length": str(len(body))} if declared else {}),
+        },
+        chunks=[body],
+    )
+    session.add("GET", LINK_URL, response)
+    ctx.session = session
+
+    links.scan_for_links(ctx, LINK_URL, section, 101, single=True)
+
+    assert section.children == []
+    assert LINK_URL not in ctx.linked_resource_results
+    assert LINK_URL not in ctx.linked_resources_by_course["101"]
 
 
 def test_no_store_responses_are_not_persisted(tmp_path):

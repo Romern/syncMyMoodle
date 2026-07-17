@@ -5,6 +5,7 @@ import pytest
 import syncmymoodle.cli as cli
 from syncmymoodle import cleanup, pathing
 from syncmymoodle.constants import COURSE_CACHE_FILENAME
+from syncmymoodle.storage import sync_run_lock
 
 
 def write(path: Path, content: bytes) -> Path:
@@ -183,6 +184,23 @@ def test_clean_caches_apply_deletes_course_caches(tmp_path, capsys):
     output = capsys.readouterr().out
     assert "metadata caches" in output
     assert "1 cache file deleted" in output
+
+
+@pytest.mark.parametrize("command", ["conflicts", "caches"])
+def test_clean_apply_refuses_to_race_active_sync(command, tmp_path, capsys):
+    if command == "conflicts":
+        current = write(tmp_path / "course" / "file.pdf", b"content")
+        target = write(current.with_name("file.syncconflict.aaaaaaaa.pdf"), b"content")
+    else:
+        target = write(tmp_path / "course" / COURSE_CACHE_FILENAME, b"{}")
+
+    with sync_run_lock(tmp_path):
+        with pytest.raises(SystemExit) as exc_info:
+            cli.main(["clean", command, "--path", str(tmp_path), "--apply"])
+
+    assert exc_info.value.code == 2
+    assert "another sync is already using" in capsys.readouterr().err
+    assert target.exists()
 
 
 def test_clean_rejects_missing_path(tmp_path):

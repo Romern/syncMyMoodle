@@ -28,7 +28,7 @@ def course_tree():
 def tagged_v1_payload(*, site=MOODLE_URL):
     file_url = f"{site.rstrip('/')}/pluginfile.php/301/slides.pdf"
     return {
-        "format": course_cache.COURSE_CACHE_FORMAT,
+        "format": course_cache.LEGACY_COURSE_CACHE_FORMAT,
         "course": {
             "name": "Download Course",
             "id": 301,
@@ -151,7 +151,7 @@ def test_tagged_v1_course_cache_is_moved_from_renamed_course_directory(tmp_path)
     cache_path = course_cache.course_cache_path(context, renamed_course)
     migrated = read_private_gzip_json(cache_path, "course cache")
     assert isinstance(migrated, dict)
-    assert migrated["format"] == "syncmymoodle.course-cache.v1"
+    assert migrated["format"] == course_cache.COURSE_CACHE_FORMAT
     assert migrated["identity"] == {
         "site": MOODLE_URL,
         "user_id": 10001,
@@ -175,7 +175,7 @@ def test_legacy_course_cache_from_another_site_is_not_moved(tmp_path):
     assert not course_cache.course_cache_path(context, course).exists()
 
 
-def test_legacy_cache_drops_personal_data_without_matching_owner(tmp_path):
+def test_legacy_cache_drops_personal_nodes(tmp_path):
     config = {"paths.sync_directory": str(tmp_path)}
     context = make_context(config)
     _, course = course_tree()
@@ -201,15 +201,6 @@ def test_legacy_cache_drops_personal_data_without_matching_owner(tmp_path):
             },
         ]
     )
-    payload[course_cache.MODULE_CACHE_KEY] = {
-        "owner_user_id": 20002,
-        "assignments": {"501": {"since": 1, "files": []}},
-        course_cache.CACHED_TEXT_CACHE_KEY: {
-            course_cache.H5P_CONTENT_KIND: {
-                "11": {"marker": "marker", "content": "shared"}
-            }
-        },
-    }
     legacy_path = node_path(context, course) / COURSE_CACHE_FILENAME
     write_private_gzip_json(legacy_path, payload)
 
@@ -221,9 +212,57 @@ def test_legacy_cache_drops_personal_data_without_matching_owner(tmp_path):
         course_cache.course_cache_path(context, course), "course cache"
     )
     assert isinstance(migrated, dict)
-    assert set(migrated[course_cache.MODULE_CACHE_KEY]) == {
-        course_cache.CACHED_TEXT_CACHE_KEY
-    }
+    assert course_cache.MODULE_CACHE_KEY not in migrated
+
+
+def test_unshipped_legacy_cache_extensions_are_not_migrated(tmp_path):
+    context = make_context({"paths.sync_directory": str(tmp_path)})
+    _, course = course_tree()
+    payload = tagged_v1_payload()
+    payload[course_cache.MODULE_CACHE_KEY] = {}
+    legacy_path = node_path(context, course) / COURSE_CACHE_FILENAME
+    write_private_gzip_json(legacy_path, payload)
+
+    assert course_cache.get_course_cache_root(context, course) is None
+    assert legacy_path.exists()
+    assert not course_cache.course_cache_path(context, course).exists()
+
+
+def test_legacy_cache_tree_is_scanned_once_per_run(tmp_path, monkeypatch):
+    context = make_context({"paths.sync_directory": str(tmp_path)})
+    _, old_course = course_tree()
+    legacy_path = node_path(context, old_course) / COURSE_CACHE_FILENAME
+    write_private_gzip_json(legacy_path, tagged_v1_payload())
+
+    rglob = type(tmp_path).rglob
+    calls = 0
+
+    def counting_rglob(path, pattern):
+        nonlocal calls
+        calls += 1
+        return rglob(path, pattern)
+
+    monkeypatch.setattr(type(tmp_path), "rglob", counting_rglob)
+    _, renamed_course = course_tree()
+    renamed_course.name = "Renamed Course"
+    assert course_cache.get_course_cache_root(context, renamed_course) is not None
+
+    semester = renamed_course.parent
+    assert semester is not None
+    other_course = semester.add_child("Other Course", 302, "Course")
+    assert course_cache.get_course_cache_root(context, other_course) is None
+    assert calls == 1
+
+
+def test_course_cache_path_applies_long_windows_path_support(tmp_path, monkeypatch):
+    context = make_context({"paths.sync_directory": str(tmp_path)})
+    _, course = course_tree()
+    monkeypatch.setattr(pathing, "is_windows", lambda: True)
+    monkeypatch.setattr(pathing, "WINDOWS_EXTENDED_PATH_THRESHOLD", 0)
+
+    cache_path = course_cache.course_cache_path(context, course)
+
+    assert str(cache_path).startswith("\\\\?\\")
 
 
 def test_course_cache_is_isolated_by_moodle_account(tmp_path):
@@ -554,3 +593,36 @@ def test_malformed_module_inventory_does_not_prune_cache(tmp_path, monkeypatch):
     )
     assert entry is not None
     assert entry.content == "h5p content"
+
+
+def test_malformed_sections_do_not_stop_later_courses(tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        moodle,
+        "get_all_courses",
+        lambda session, wstoken, user_id: [
+            {"id": 301, "shortname": "Malformed", "idnumber": "26ss"},
+            {"id": 302, "shortname": "Healthy", "idnumber": "26ss"},
+        ],
+    )
+
+    def course_contents(session, wstoken, course_id):
+        if course_id == 301:
+            return [{"id": 401, "name": "General", "modules": None}]
+        return [{"id": 402, "name": "General", "modules": []}]
+
+    monkeypatch.setattr(moodle, "get_course", course_contents)
+    context = make_context({"paths.sync_directory": str(tmp_path)})
+    context.session = FakeSession()
+
+    sync.sync(context)
+
+    assert context.stats.failed == 1
+    assert context.incomplete_course_ids == {301}
+    assert context.root_node is not None
+    courses = {
+        course.id: course
+        for semester in context.root_node.children
+        for course in semester.children
+    }
+    assert set(courses) == {301, 302}
+    assert [section.name for section in courses[302].children] == ["General"]
