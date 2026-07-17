@@ -1,6 +1,6 @@
 from syncmymoodle.config import Config
 from syncmymoodle.filters import format_course_name as format_course_name_impl
-from syncmymoodle.node import Node
+from syncmymoodle.node import DownloadKind, Node
 from syncmymoodle.pathing import sanitize_path_part
 
 
@@ -300,12 +300,14 @@ def test_opencast_name_clashes_use_uploaded_filename_suffix():
         "episode-a",
         "Opencast",
         url="https://video.example.test/opencast/high.mp4",
+        download_kind=DownloadKind.OPENCAST,
     )
     section.add_child(
         "Recording",
         "episode-b",
         "Opencast",
         url="https://video.example.test/opencast/low.mp4",
+        download_kind=DownloadKind.OPENCAST,
     )
 
     root.remove_children_nameclashes()
@@ -324,12 +326,14 @@ def test_case_only_opencast_name_clashes_use_uploaded_filename_suffix():
         "episode-a",
         "Opencast",
         url="https://video.example.test/opencast/high.mp4",
+        download_kind=DownloadKind.OPENCAST,
     )
     section.add_child(
         "recording",
         "episode-b",
         "Opencast",
         url="https://video.example.test/opencast/low.mp4",
+        download_kind=DownloadKind.OPENCAST,
     )
 
     root.remove_children_nameclashes()

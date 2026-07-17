@@ -611,17 +611,29 @@ def check_course_updates(
     return CourseUpdates(dict(module_since), changed, unknown)
 
 
-def get_ltis_by_course(
-    session: requests.Session, wstoken: str, course_id: int
+def _get_course_module_instances(
+    session: requests.Session,
+    wstoken: str,
+    course_id: int,
+    function: str,
+    response_key: str,
 ) -> list[dict[str, Any]]:
     payload = call_webservice(
         session,
         wstoken,
-        "mod_lti_get_ltis_by_courses",
+        function,
         {"courseids[0]": course_id},
     )
-    ltis = payload.get("ltis") if isinstance(payload, dict) else None
-    return [item for item in ltis or [] if isinstance(item, dict)]
+    instances = payload.get(response_key) if isinstance(payload, dict) else None
+    return [item for item in instances or [] if isinstance(item, dict)]
+
+
+def get_ltis_by_course(
+    session: requests.Session, wstoken: str, course_id: int
+) -> list[dict[str, Any]]:
+    return _get_course_module_instances(
+        session, wstoken, course_id, "mod_lti_get_ltis_by_courses", "ltis"
+    )
 
 
 def get_lti_launch_data(
@@ -636,27 +648,21 @@ def get_lti_launch_data(
 def get_h5pactivities_by_course(
     session: requests.Session, wstoken: str, course_id: int
 ) -> list[dict[str, Any]]:
-    payload = call_webservice(
+    return _get_course_module_instances(
         session,
         wstoken,
+        course_id,
         "mod_h5pactivity_get_h5pactivities_by_courses",
-        {"courseids[0]": course_id},
+        "h5pactivities",
     )
-    activities = payload.get("h5pactivities") if isinstance(payload, dict) else None
-    return [item for item in activities or [] if isinstance(item, dict)]
 
 
 def get_quizzes_by_course(
     session: requests.Session, wstoken: str, course_id: int
 ) -> list[dict[str, Any]]:
-    payload = call_webservice(
-        session,
-        wstoken,
-        "mod_quiz_get_quizzes_by_courses",
-        {"courseids[0]": course_id},
+    return _get_course_module_instances(
+        session, wstoken, course_id, "mod_quiz_get_quizzes_by_courses", "quizzes"
     )
-    quizzes = payload.get("quizzes") if isinstance(payload, dict) else None
-    return [item for item in quizzes or [] if isinstance(item, dict)]
 
 
 def get_quiz_attempts(

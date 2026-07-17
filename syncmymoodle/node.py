@@ -21,6 +21,16 @@ class DownloadStatus(StrEnum):
     HANDLED = "handled"
 
 
+class DownloadKind(StrEnum):
+    """Download behavior recorded separately from the display-only node type."""
+
+    DIRECT = "direct"
+    YOUTUBE = "youtube"
+    EMEDIA = "emedia"
+    QUIZ = "quiz"
+    OPENCAST = "opencast"
+
+
 def _remote_marker_kind(
     value: RemoteMarkerKind | str | None,
 ) -> RemoteMarkerKind | None:
@@ -39,6 +49,13 @@ def _download_status(value: DownloadStatus | str | None) -> DownloadStatus | Non
         return DownloadStatus(value)
     except ValueError:
         return None
+
+
+def _download_kind(value: DownloadKind | str | None) -> DownloadKind:
+    try:
+        return DownloadKind(value or DownloadKind.DIRECT)
+    except ValueError:
+        return DownloadKind.DIRECT
 
 
 def _optional_int(value: Any) -> int | None:
@@ -67,6 +84,7 @@ class Node:
         remote_size: Any = None,
         name_clash_id: Any = NAME_CLASH_ID_UNSET,
         download_status: DownloadStatus | str | None = None,
+        download_kind: DownloadKind | str | None = None,
     ) -> None:
         self.name = name
         self.id = id
@@ -89,9 +107,13 @@ class Node:
         self.download_status = (
             _download_status(download_status) or DownloadStatus.PENDING
         )
+        self.download_kind = _download_kind(download_kind)
 
     def __repr__(self) -> str:
-        return f"Node(name={self.name}, id={self.id}, url={self.url}, type={self.type})"
+        return (
+            f"Node(name={self.name}, id={self.id}, url={self.url}, type={self.type}, "
+            f"download_kind={self.download_kind})"
+        )
 
     @property
     def is_handled(self) -> bool:
@@ -112,6 +134,7 @@ class Node:
         etag_kind: RemoteMarkerKind | str | None = None,
         remote_size: Any = None,
         name_clash_id: Any = NAME_CLASH_ID_UNSET,
+        download_kind: DownloadKind | str | None = None,
     ) -> Node | None:
         if url:
             url = url.replace("?forcedownload=1", "").replace(
@@ -135,6 +158,7 @@ class Node:
             etag_kind=etag_kind,
             remote_size=remote_size,
             name_clash_id=name_clash_id,
+            download_kind=download_kind,
         )
         self.children.append(temp)
         return temp
@@ -154,6 +178,7 @@ class Node:
             remote_size=self.remote_size,
             name_clash_id=self.name_clash_id,
             download_status=self.download_status,
+            download_kind=self.download_kind,
         )
         clone.children = [child.clone(clone) for child in self.children]
         return clone
@@ -210,7 +235,7 @@ class Node:
         while remaining:
             child = remaining.pop(0)
             renamed.append(child)
-            if child.type != "Opencast":
+            if child.download_kind is not DownloadKind.OPENCAST:
                 continue
 
             siblings = [

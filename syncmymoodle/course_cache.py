@@ -10,6 +10,7 @@ from syncmymoodle.context import LinkedResourceCacheEntry, SyncContext
 from syncmymoodle.http_utils import HTML_CONTENT_TYPES, normalized_http_origin
 from syncmymoodle.node import (
     NAME_CLASH_ID_UNSET,
+    DownloadKind,
     DownloadStatus,
     Node,
 )
@@ -27,6 +28,12 @@ LINKED_RESOURCES_CACHE_FORMAT = "syncmymoodle.linked-resources.v1"
 H5P_CONTENT_KIND = "h5p"
 PAGE_CONTENT_KIND = "page"
 CACHED_TEXT_KINDS = (H5P_CONTENT_KIND, PAGE_CONTENT_KIND)
+LEGACY_DOWNLOAD_KINDS = {
+    "Youtube": DownloadKind.YOUTUBE,
+    "Emedia": DownloadKind.EMEDIA,
+    "Quiz": DownloadKind.QUIZ,
+    "Opencast": DownloadKind.OPENCAST,
+}
 
 
 @dataclass(frozen=True)
@@ -699,6 +706,7 @@ def node_to_cache_data(
         "name": node.name,
         "id": node.id,
         "type": node.type,
+        "download_kind": str(node.download_kind),
         "url": node.url,
         "timemodified": timemodified,
         "etag": etag,
@@ -743,6 +751,8 @@ def node_from_cache_data(data: dict[str, Any], parent: Node | None = None) -> No
         remote_size=data.get("remote_size"),
         name_clash_id=data.get("name_clash_id", NAME_CLASH_ID_UNSET),
         download_status=download_status,
+        download_kind=data.get("download_kind")
+        or LEGACY_DOWNLOAD_KINDS.get(node_type, DownloadKind.DIRECT),
     )
     node.children = [node_from_cache_data(child, node) for child in children]
     return node

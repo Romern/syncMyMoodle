@@ -62,6 +62,7 @@ from syncmymoodle.secret_providers import (
     SecretProvider,
     build_external_secret_provider,
     detect_password_manager_clis,
+    get_external_secret_provider_spec,
 )
 from syncmymoodle.storage import save_session, write_private_text
 
@@ -876,13 +877,6 @@ def prompt_setup_token_store(
     config["auth.tokens.env_file"] = str(pathing.absolute_path(Path(env_file)))
 
 
-def password_manager_display_name(provider_name: str) -> str:
-    return {
-        "1password": "1Password",
-        "bitwarden": "Bitwarden",
-    }.get(provider_name, provider_name)
-
-
 def normalize_secret_reference(reference: str) -> str:
     if len(reference) >= 2 and reference[0] == reference[-1] == '"':
         return reference[1:-1]
@@ -894,24 +888,21 @@ def prompt_setup_password_manager(
     parser: ArgumentParser,
 ) -> None:
     for provider_name in detect_password_manager_clis():
-        display_name = password_manager_display_name(provider_name)
+        spec = get_external_secret_provider_spec(provider_name)
+        display_name = spec.display_name
         if not output.confirm(f"Use {display_name} for RWTH sign-ins"):
             continue
-        if provider_name == "1password":
-            password_example = "op://Private/RWTH/password"
-            otp_example = "op://Private/RWTH/one-time password?attribute=otp"
-        else:
-            password_example = otp_example = "rwth/sso"
         password_ref = normalize_secret_reference(
             output.prompt(
-                f"{display_name} password reference (for example, {password_example})"
+                f"{display_name} password reference "
+                f"(for example, {spec.password_example})"
             )
         )
         if not password_ref:
             parser.error(f"{display_name} password reference is required")
         otp_ref = normalize_secret_reference(
             output.prompt(
-                f"{display_name} TOTP reference (for example, {otp_example}; "
+                f"{display_name} TOTP reference (for example, {spec.otp_example}; "
                 "optional, blank means prompt for codes)"
             )
         )
@@ -1106,14 +1097,16 @@ def sign_in_method_status(config: Config, keyring_backend: Any) -> tuple[str, bo
         return f"protected environment file {source.path} ({state})", available
     if isinstance(source, ExternalAuthSource):
         try:
-            availability = build_external_secret_provider(
+            provider = build_external_secret_provider(source.provider)
+            availability = provider.check_available()
+            display_name = get_external_secret_provider_spec(
                 source.provider
-            ).check_available()
+            ).display_name
         except (ProviderSecretError, ValueError) as error:
             availability = ProviderAvailability(False, str(error))
+            display_name = source.provider
         return (
-            f"{password_manager_display_name(source.provider)} CLI "
-            f"({provider_availability_text(availability)})",
+            f"{display_name} CLI ({provider_availability_text(availability)})",
             availability.available,
         )
     if isinstance(source, CommandAuthSource):

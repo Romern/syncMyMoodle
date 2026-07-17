@@ -37,6 +37,12 @@ PAGE_URL = "https://moodle.rwth-aachen.de/mod/page/view.php?id=123"
 PAGE_CONTENT_URL = (
     "https://moodle.rwth-aachen.de/pluginfile.php/1/mod_page/content/315/index.html"
 )
+SCIEBO_SHARE_LINK = "https://rwth-aachen.sciebo.de/s/share-token-123"
+SCIEBO_PUBLIC_ROOT = "https://rwth-aachen.sciebo.de/public.php/webdav/"
+SCIEBO_PUBLIC_SLIDES = f"{SCIEBO_PUBLIC_ROOT}slides/"
+SCIEBO_OUTAGE_LINKS = tuple(
+    f"https://rwth-aachen.sciebo.de/s/share-{index}" for index in range(4)
+)
 
 
 def opencast_episode_entry(
@@ -113,6 +119,37 @@ def h5p_package(content: str) -> bytes:
     with zipfile.ZipFile(package, "w", compression=zipfile.ZIP_DEFLATED) as archive:
         archive.writestr("content/content.json", content)
     return package.getvalue()
+
+
+def sciebo_share_context(page_fixture: str):
+    syncer = make_context(
+        {
+            "modules.assignment": False,
+            "modules.resource": False,
+            "modules.folder": False,
+            "links.youtube": False,
+            "links.opencast": False,
+            "links.sciebo": True,
+        }
+    )
+    session = FakeSession()
+    session.add(
+        "GET",
+        SCIEBO_SHARE_LINK,
+        FakeResponse(text=load_fixture("sciebo", page_fixture)),
+    )
+    session.add(
+        "PROPFIND",
+        SCIEBO_PUBLIC_ROOT,
+        FakeResponse(text=load_fixture("sciebo", "propfind_root.xml")),
+    )
+    session.add(
+        "PROPFIND",
+        SCIEBO_PUBLIC_SLIDES,
+        FakeResponse(text=load_fixture("sciebo", "propfind_slides.xml")),
+    )
+    syncer.session = session
+    return syncer, session
 
 
 def run_h5p_handler(monkeypatch, response, package_metadata=None):
@@ -931,46 +968,19 @@ def test_skip_rules_apply_to_sections_modules_links_and_domains(monkeypatch):
 
 
 def test_sciebo_public_share_is_cached_per_sync_run(caplog):
-    link = "https://rwth-aachen.sciebo.de/s/share-token-123"
-    public_root = "https://rwth-aachen.sciebo.de/public.php/webdav/"
-    public_slides = "https://rwth-aachen.sciebo.de/public.php/webdav/slides/"
-    syncer = make_context(
-        {
-            "modules.assignment": False,
-            "modules.resource": False,
-            "modules.folder": False,
-            "links.youtube": False,
-            "links.opencast": False,
-            "links.sciebo": True,
-        }
-    )
-    session = FakeSession()
-    session.add(
-        "GET", link, FakeResponse(text=load_fixture("sciebo", "public_share.html"))
-    )
-    session.add(
-        "PROPFIND",
-        public_root,
-        FakeResponse(text=load_fixture("sciebo", "propfind_root.xml")),
-    )
-    session.add(
-        "PROPFIND",
-        public_slides,
-        FakeResponse(text=load_fixture("sciebo", "propfind_slides.xml")),
-    )
-    syncer.session = session
+    syncer, session = sciebo_share_context("public_share.html")
     caplog.set_level(logging.INFO, logger="syncmymoodle.sciebo")
 
     root = Node("", -1, "Root", None)
     first_parent = root.add_child("First occurrence", 1, "Section")
     second_parent = root.add_child("Second occurrence", 2, "Section")
 
-    links.scan_for_links(syncer, link, first_parent, 101)
-    links.scan_for_links(syncer, link, second_parent, 101)
+    links.scan_for_links(syncer, SCIEBO_SHARE_LINK, first_parent, 101)
+    links.scan_for_links(syncer, SCIEBO_SHARE_LINK, second_parent, 101)
 
-    assert session.count("GET", link) == 1
-    assert session.count("PROPFIND", public_root) == 1
-    assert session.count("PROPFIND", public_slides) == 1
+    assert session.count("GET", SCIEBO_SHARE_LINK) == 1
+    assert session.count("PROPFIND", SCIEBO_PUBLIC_ROOT) == 1
+    assert session.count("PROPFIND", SCIEBO_PUBLIC_SLIDES) == 1
     sciebo_root = first_parent.children[0]
     assert sciebo_root.children[0].remote_size == 123
     assert sciebo_root.children[1].children[0].remote_size == 456
@@ -1176,42 +1186,13 @@ def test_sharing_token_from_link_extracts_url_segment():
 def test_sciebo_share_without_token_input_uses_url_token():
     # Newer share pages drop the <input name="sharingToken">; the token is then
     # derived from the /s/<token> URL segment so the share still resolves.
-    link = "https://rwth-aachen.sciebo.de/s/share-token-123"
-    public_root = "https://rwth-aachen.sciebo.de/public.php/webdav/"
-    public_slides = "https://rwth-aachen.sciebo.de/public.php/webdav/slides/"
-    syncer = make_context(
-        {
-            "modules.assignment": False,
-            "modules.resource": False,
-            "modules.folder": False,
-            "links.youtube": False,
-            "links.opencast": False,
-            "links.sciebo": True,
-        }
-    )
-    session = FakeSession()
-    session.add(
-        "GET",
-        link,
-        FakeResponse(text=load_fixture("sciebo", "public_share_no_token.html")),
-    )
-    session.add(
-        "PROPFIND",
-        public_root,
-        FakeResponse(text=load_fixture("sciebo", "propfind_root.xml")),
-    )
-    session.add(
-        "PROPFIND",
-        public_slides,
-        FakeResponse(text=load_fixture("sciebo", "propfind_slides.xml")),
-    )
-    syncer.session = session
+    syncer, session = sciebo_share_context("public_share_no_token.html")
 
     root = Node("", -1, "Root", None)
     parent = root.add_child("Section", 1, "Section")
-    links.scan_for_links(syncer, link, parent, 101)
+    links.scan_for_links(syncer, SCIEBO_SHARE_LINK, parent, 101)
 
-    assert session.count("PROPFIND", public_root) == 1
+    assert session.count("PROPFIND", SCIEBO_PUBLIC_ROOT) == 1
     assert node_rows(parent) == [
         "Sciebo Folder | Section/sciebo-share-token-123 |  |  |",
         "Sciebo File | Section/sciebo-share-token-123/readme.pdf | "
@@ -1227,21 +1208,18 @@ def test_sciebo_share_without_token_input_uses_url_token():
 def _assert_sciebo_share_outage(
     caplog, response_factory, scan_share, logger_name, reason
 ):
-    share_links = [
-        f"https://rwth-aachen.sciebo.de/s/share-{index}" for index in range(4)
-    ]
     syncer = make_context({"links.sciebo": True})
     session = FakeSession()
-    for link in share_links[:3]:
+    for link in SCIEBO_OUTAGE_LINKS[:3]:
         session.add("GET", link, response_factory())
     syncer.session = session
     parent = Node("Section", 1, "Section", None)
     caplog.set_level(logging.WARNING, logger=logger_name)
 
-    for link in share_links:
+    for link in SCIEBO_OUTAGE_LINKS:
         scan_share(syncer, link, parent)
 
-    assert session.calls == [("GET", link) for link in share_links[:3]]
+    assert session.calls == [("GET", link) for link in SCIEBO_OUTAGE_LINKS[:3]]
     assert caplog.messages == [
         f"Sciebo transient failure: {reason}",
         f"Sciebo transient failure: {reason}",
@@ -1251,6 +1229,39 @@ def _assert_sciebo_share_outage(
     ]
     assert parent.children == []
     assert syncer.service_outages.should_skip(sciebo.SCIEBO_URL)
+
+
+def _assert_sciebo_webdav_outage(caplog, response, reason):
+    syncer = make_context({"links.sciebo": True})
+    session = FakeSession()
+    for link in SCIEBO_OUTAGE_LINKS[:3]:
+        session.add(
+            "GET",
+            link,
+            FakeResponse(text=load_fixture("sciebo", "public_share.html")),
+        )
+    session.add("PROPFIND", SCIEBO_PUBLIC_ROOT, response)
+    syncer.session = session
+    parent = Node("Section", 1, "Section", None)
+    caplog.set_level(logging.WARNING, logger="syncmymoodle.sciebo")
+
+    for link in SCIEBO_OUTAGE_LINKS:
+        sciebo.scan_public_shares(syncer, link, parent)
+
+    assert session.calls == [
+        call
+        for link in SCIEBO_OUTAGE_LINKS[:3]
+        for call in (("GET", link), ("PROPFIND", SCIEBO_PUBLIC_ROOT))
+    ]
+    assert caplog.messages == [
+        f"Sciebo transient failure: {reason}",
+        f"Sciebo transient failure: {reason}",
+        f"Sciebo unavailable after 3 consecutive transient failures: {reason}; "
+        "skipping remaining requests for this sync. Check the RWTH ITC status page: "
+        f"{sciebo.RWTH_SCIEBO_STATUS_URL}",
+    ]
+    assert parent.children == []
+    assert not any(syncer.sciebo_link_cache.values())
 
 
 def test_sciebo_503_opens_shared_service_circuit(caplog):
@@ -1276,114 +1287,32 @@ def test_sciebo_200_maintenance_pages_open_shared_service_circuit(caplog):
 
 
 def test_sciebo_200_html_webdav_responses_do_not_cache_empty_shares(caplog):
-    share_links = [
-        f"https://rwth-aachen.sciebo.de/s/share-{index}" for index in range(4)
-    ]
-    public_root = "https://rwth-aachen.sciebo.de/public.php/webdav/"
-    syncer = make_context({"links.sciebo": True})
-    session = FakeSession()
-    for link in share_links[:3]:
-        session.add(
-            "GET",
-            link,
-            FakeResponse(text=load_fixture("sciebo", "public_share.html")),
-        )
-    session.add(
-        "PROPFIND",
-        public_root,
+    _assert_sciebo_webdav_outage(
+        caplog,
         FakeResponse(text="<html><body>maintenance</body></html>"),
+        "WebDAV returned an unexpected response instead of a DAV listing",
     )
-    syncer.session = session
-    parent = Node("Section", 1, "Section", None)
-    caplog.set_level(logging.WARNING, logger="syncmymoodle.sciebo")
-
-    for link in share_links:
-        sciebo.scan_public_shares(syncer, link, parent)
-
-    assert session.calls == [
-        call
-        for link in share_links[:3]
-        for call in (("GET", link), ("PROPFIND", public_root))
-    ]
-    assert caplog.messages == [
-        "Sciebo transient failure: WebDAV returned an unexpected response instead "
-        "of a DAV listing",
-        "Sciebo transient failure: WebDAV returned an unexpected response instead "
-        "of a DAV listing",
-        "Sciebo unavailable after 3 consecutive transient failures: WebDAV returned "
-        "an unexpected response instead of a DAV listing; skipping remaining "
-        "requests for this sync. Check the RWTH ITC status page: "
-        f"{sciebo.RWTH_SCIEBO_STATUS_URL}",
-    ]
-    assert parent.children == []
-    assert not any(syncer.sciebo_link_cache.values())
 
 
 def test_sciebo_webdav_503_does_not_cache_an_empty_share(caplog):
-    share_links = [
-        f"https://rwth-aachen.sciebo.de/s/share-{index}" for index in range(4)
-    ]
-    public_root = "https://rwth-aachen.sciebo.de/public.php/webdav/"
-    syncer = make_context({"links.sciebo": True})
-    session = FakeSession()
-    for link in share_links[:3]:
-        session.add(
-            "GET",
-            link,
-            FakeResponse(text=load_fixture("sciebo", "public_share.html")),
-        )
-    session.add("PROPFIND", public_root, FakeResponse(status_code=503))
-    syncer.session = session
-    parent = Node("Section", 1, "Section", None)
-    caplog.set_level(logging.WARNING, logger="syncmymoodle.sciebo")
-
-    for link in share_links:
-        sciebo.scan_public_shares(syncer, link, parent)
-
-    assert session.calls == [
-        call
-        for link in share_links[:3]
-        for call in (("GET", link), ("PROPFIND", public_root))
-    ]
-    assert caplog.messages == [
-        "Sciebo transient failure: WebDAV returned HTTP 503",
-        "Sciebo transient failure: WebDAV returned HTTP 503",
-        "Sciebo unavailable after 3 consecutive transient failures: WebDAV returned "
-        "HTTP 503; skipping remaining requests for this sync. Check the RWTH ITC "
-        f"status page: {sciebo.RWTH_SCIEBO_STATUS_URL}",
-    ]
-    assert parent.children == []
-    assert not any(syncer.sciebo_link_cache.values())
+    _assert_sciebo_webdav_outage(
+        caplog,
+        FakeResponse(status_code=503),
+        "WebDAV returned HTTP 503",
+    )
 
 
 def test_sciebo_timeouts_open_shared_service_circuit_without_tracebacks(caplog):
-    share_links = [
-        f"https://rwth-aachen.sciebo.de/s/share-{index}" for index in range(4)
-    ]
-    syncer = make_context({"links.sciebo": True})
-    session = FakeSession()
-
     def time_out(url, kwargs):
         raise requests.ReadTimeout("read timed out")
 
-    for link in share_links[:3]:
-        session.add("GET", link, time_out)
-    syncer.session = session
-    parent = Node("Section", 1, "Section", None)
-    caplog.set_level(logging.WARNING, logger="syncmymoodle.sciebo")
-
-    for link in share_links:
-        sciebo.scan_public_shares(syncer, link, parent)
-
-    assert session.calls == [("GET", link) for link in share_links[:3]]
-    assert caplog.messages == [
-        "Sciebo transient failure: share page request failed: read timed out",
-        "Sciebo transient failure: share page request failed: read timed out",
-        "Sciebo unavailable after 3 consecutive transient failures: share page request "
-        "failed: read timed out; skipping remaining requests for this sync. Check the "
-        f"RWTH ITC status page: {sciebo.RWTH_SCIEBO_STATUS_URL}",
-    ]
-    assert parent.children == []
+    _assert_sciebo_share_outage(
+        caplog,
+        lambda: time_out,
+        sciebo.scan_public_shares,
+        "syncmymoodle.sciebo",
+        "share page request failed: read timed out",
+    )
 
 
 def test_youtube_links_use_canonical_video_identity():

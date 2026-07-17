@@ -37,7 +37,7 @@ from syncmymoodle.http_utils import (
     safe_error_message,
     same_origin,
 )
-from syncmymoodle.node import Node, RemoteMarkerKind
+from syncmymoodle.node import DownloadKind, Node, RemoteMarkerKind
 
 logger = logging.getLogger(__name__)
 INTERMEDIATE_CERTIFICATE = "certs/HARICA-GEANT-TLS-R1.pem"
@@ -332,4 +332,5 @@ def add_video_node(
         download_headers=REQUEST_HEADERS,
         etag=marker,
         etag_kind=RemoteMarkerKind.OPAQUE,
+        download_kind=DownloadKind.EMEDIA,
     )

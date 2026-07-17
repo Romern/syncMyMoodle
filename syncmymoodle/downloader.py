@@ -34,7 +34,7 @@ from syncmymoodle.http_utils import (
     request_following_safe_redirects,
     safe_request_error,
 )
-from syncmymoodle.node import Node, RemoteMarkerKind
+from syncmymoodle.node import DownloadKind, Node, RemoteMarkerKind
 from syncmymoodle.outcomes import (
     FAILED_DOWNLOAD,
     HANDLED_DOWNLOAD,
@@ -88,6 +88,14 @@ class ConflictAction(Enum):
     DOWNLOAD = "download"
     RENAME_LOCAL = "rename_local"
     SKIP = "skip"
+
+
+class DownloadDecision(Enum):
+    """Outcome of change detection before conflict policy is applied."""
+
+    DOWNLOAD = "download"
+    SKIP = "skip"
+    CONFLICT = "conflict"
 
 
 @dataclass
@@ -334,14 +342,6 @@ def conditional_get_confirms_unchanged(
     return False
 
 
-@dataclass
-class DownloadDecision:
-    """Outcome of the change-detection step for a single file."""
-
-    skip: bool
-    conflict: bool = False
-
-
 def remote_unchanged(
     ctx: SyncContext,
     node: Node,
@@ -435,9 +435,9 @@ def decide_download(
     is user-modified.
     """
     if not downloadpath.exists():
-        return DownloadDecision(skip=False)
+        return DownloadDecision.DOWNLOAD
     if not ctx.config.update_files:
-        return DownloadDecision(skip=True)
+        return DownloadDecision.SKIP
 
     old_node = course_cache.get_old_node_for(ctx, node, log)
     if old_node is not None and not old_node.is_handled:
@@ -449,12 +449,14 @@ def decide_download(
     if old_node is not None and remote_unchanged(
         ctx, node, old_node, cached_timemodified, log
     ):
-        return DownloadDecision(skip=True)
+        return DownloadDecision.SKIP
 
     verdict = assess_local_copy(node, downloadpath, old_node, cached_timemodified)
     if verdict is LocalCopyState.UP_TO_DATE:
-        return DownloadDecision(skip=True)
-    return DownloadDecision(skip=False, conflict=verdict is LocalCopyState.MODIFIED)
+        return DownloadDecision.SKIP
+    if verdict is LocalCopyState.MODIFIED:
+        return DownloadDecision.CONFLICT
+    return DownloadDecision.DOWNLOAD
 
 
 def should_skip_before_decision(
@@ -494,13 +496,9 @@ def should_skip_before_decision(
 
 def conflict_action(
     ctx: SyncContext,
-    decision: DownloadDecision,
     downloadpath: Path,
     log: logging.Logger = logger,
 ) -> ConflictAction:
-    if not decision.conflict:
-        return ConflictAction.DOWNLOAD
-
     conflict_mode = ctx.config.conflict_handling
     if conflict_mode == "keep":
         log.info(
@@ -627,9 +625,13 @@ def planned_download_action(
         return HANDLED_DOWNLOAD
 
     decision = decide_download(ctx, node, downloadpath, log)
-    if decision.skip:
+    if decision is DownloadDecision.SKIP:
         return UNCHANGED_DOWNLOAD
-    action = conflict_action(ctx, decision, downloadpath, log)
+    action = (
+        conflict_action(ctx, downloadpath, log)
+        if decision is DownloadDecision.CONFLICT
+        else ConflictAction.DOWNLOAD
+    )
     if action == ConflictAction.SKIP:
         return UNCHANGED_DOWNLOAD
     return action
@@ -1025,18 +1027,18 @@ def download_leaf(
 ) -> DownloadOutcome:
     try:
         assert node.url is not None
-        if node.type == "Youtube":
+        if node.download_kind is DownloadKind.YOUTUBE:
             return scan_and_download_youtube(ctx, node, log)
-        if node.type == "Emedia":
+        if node.download_kind is DownloadKind.EMEDIA:
             return download_emedia_video(ctx, node, log)
-        if node.type == "Quiz":
+        if node.download_kind is DownloadKind.QUIZ:
             return quiz.download_quiz(ctx, node, log)
-        if node.type == "Opencast" and ".mp4" not in node.name:
+        if node.download_kind is DownloadKind.OPENCAST and ".mp4" not in node.name:
             node.name = f"{node.name}.mp4" if node.name else node.url.rsplit("/", 1)[-1]
         return download_file(ctx, node, log)
     except Exception:
         log.exception("Failed to download the module %s", node)
-        if node.type in {"Youtube", "Emedia"}:
+        if node.download_kind in {DownloadKind.YOUTUBE, DownloadKind.EMEDIA}:
             log.error(
                 "This could be caused by an out-of-date yt-dlp version. Try "
                 "upgrading yt-dlp through pip or your package manager."

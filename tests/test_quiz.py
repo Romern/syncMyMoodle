@@ -2,7 +2,7 @@ import subprocess
 from types import SimpleNamespace
 
 from syncmymoodle import quiz, sync_handlers
-from syncmymoodle.node import Node
+from syncmymoodle.node import DownloadKind, Node
 
 from .helpers import FakeResponse, FakeSession, make_context
 
@@ -89,7 +89,13 @@ def quiz_context(tmp_path, mode):
 
 def quiz_node():
     root = Node("root", None, "Root", None)
-    node = root.add_child("My Quiz, Versuch 1", 1, "Quiz", url=QUIZ_URL)
+    node = root.add_child(
+        "My Quiz, Versuch 1",
+        1,
+        "Quiz",
+        url=QUIZ_URL,
+        download_kind=DownloadKind.QUIZ,
+    )
     assert node is not None
     return node
 
@@ -104,19 +110,16 @@ def install_quiz_activity(monkeypatch):
     )
 
 
-def test_quiz_api_review_preserves_grade_and_feedback_titles(monkeypatch, tmp_path):
-    install_quiz_activity(monkeypatch)
-    ctx = make_context(
-        {
-            "paths.sync_directory": str(tmp_path),
-            "modules.quiz": "html",
-        }
-    )
+def quiz_module_context(tmp_path=None):
+    config = {"modules.quiz": "html"}
+    if tmp_path is not None:
+        config["paths.sync_directory"] = str(tmp_path)
+    ctx = make_context(config)
     ctx.session = FakeSession()
     course_node = Node("Course", 1, "Course", None)
     section_node = course_node.add_child("Section", 2, "Section")
     assert section_node is not None
-    module_context = sync_handlers.ModuleContext(
+    return ctx, sync_handlers.ModuleContext(
         ctx,
         1,
         course_node,
@@ -124,6 +127,11 @@ def test_quiz_api_review_preserves_grade_and_feedback_titles(monkeypatch, tmp_pa
         {},
         {},
     )
+
+
+def test_quiz_api_review_preserves_grade_and_feedback_titles(monkeypatch, tmp_path):
+    install_quiz_activity(monkeypatch)
+    ctx, module_context = quiz_module_context(tmp_path)
     monkeypatch.setattr(
         sync_handlers.moodle_api,
         "get_quiz_attempts",
@@ -154,19 +162,7 @@ def test_quiz_api_review_preserves_grade_and_feedback_titles(monkeypatch, tmp_pa
 
 def test_quiz_node_keeps_remote_name_until_path_materialization(monkeypatch):
     install_quiz_activity(monkeypatch)
-    ctx = make_context({"modules.quiz": "html"})
-    ctx.session = FakeSession()
-    course_node = Node("Course", 1, "Course", None)
-    section_node = course_node.add_child("Section", 2, "Section")
-    assert section_node is not None
-    module_context = sync_handlers.ModuleContext(
-        ctx,
-        1,
-        course_node,
-        section_node,
-        {},
-        {},
-    )
+    ctx, module_context = quiz_module_context()
     monkeypatch.setattr(
         sync_handlers.moodle_api,
         "get_quiz_attempts",
@@ -183,7 +179,7 @@ def test_quiz_node_keeps_remote_name_until_path_materialization(monkeypatch):
         {"id": 42, "instance": 7, "modname": "quiz", "name": "R&amp;D"},
     )
 
-    assert section_node.children[0].name == "R&amp;D, Versuch 1"
+    assert module_context.section_node.children[0].name == "R&amp;D, Versuch 1"
 
 
 def test_build_quiz_snapshot_is_self_contained_and_network_silent(tmp_path):

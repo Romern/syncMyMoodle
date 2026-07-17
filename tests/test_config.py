@@ -1697,10 +1697,7 @@ env_file = {str(env_path)!r}
     assert ctx.auth.totp_secret is None
 
 
-def test_cli_reads_credentials_from_external_secret_provider(tmp_path, monkeypatch):
-    config_path = tmp_path / "config.toml"
-    config_path.write_text(
-        """
+EXTERNAL_PROVIDER_CONFIG = """
 [auth]
 user = "user"
 
@@ -1709,14 +1706,29 @@ provider = "1password"
 totp_serial = "totp"
 password = "op://Private/RWTH/password"
 otp = "op://Private/RWTH/otp?attribute=otp"
-""",
-        encoding="utf-8",
-    )
+"""
+COMMAND_PROVIDER_CONFIG = """
+[auth]
+user = "user"
+
+[auth.login]
+provider = "command"
+totp_serial = "totp"
+password_command = ["secret-tool", "lookup", "rwth"]
+otp_command = ["otp-tool", "code", "rwth"]
+"""
+
+
+def _write_external_provider_config(tmp_path):
+    config_path = tmp_path / "config.toml"
+    config_path.write_text(EXTERNAL_PROVIDER_CONFIG, encoding="utf-8")
+    return config_path
+
+
+def _install_external_provider(monkeypatch):
+    otp_calls = []
 
     class FakeProvider:
-        def __init__(self):
-            self.otp_calls = []
-
         def check_available(self):
             return SimpleNamespace(available=True, reason=None)
 
@@ -1726,7 +1738,7 @@ otp = "op://Private/RWTH/otp?attribute=otp"
 
         def get_otp_code(self, reference):
             assert reference == "op://Private/RWTH/otp?attribute=otp"
-            self.otp_calls.append(reference)
+            otp_calls.append(reference)
             return "123456"
 
     provider = FakeProvider()
@@ -1735,6 +1747,44 @@ otp = "op://Private/RWTH/otp?attribute=otp"
         "build_external_secret_provider",
         lambda provider_name: provider,
     )
+    return otp_calls
+
+
+def _install_command_provider(tmp_path, monkeypatch):
+    config_dir = tmp_path / "xdg" / "syncmymoodle"
+    config_dir.mkdir(parents=True)
+    (config_dir / "config.toml").write_text(COMMAND_PROVIDER_CONFIG, encoding="utf-8")
+    otp_events = []
+
+    class FakeProvider:
+        def __init__(self, password_command, otp_command):
+            assert password_command == ("secret-tool", "lookup", "rwth")
+            assert otp_command == ("otp-tool", "code", "rwth")
+
+        def check_available(self):
+            return SimpleNamespace(available=True, reason=None)
+
+        def check_otp_available(self):
+            otp_events.append("availability")
+            return SimpleNamespace(available=True, reason=None)
+
+        def get_password(self, reference):
+            assert reference == ""
+            return "command-password"
+
+        def get_otp_code(self, reference):
+            assert reference == ""
+            otp_events.append("lookup")
+            return "987654"
+
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "xdg"))
+    monkeypatch.setattr(cli, "CommandSecretProvider", FakeProvider)
+    return otp_events
+
+
+def test_cli_reads_credentials_from_external_secret_provider(tmp_path, monkeypatch):
+    config_path = _write_external_provider_config(tmp_path)
+    otp_calls = _install_external_provider(monkeypatch)
     parser = cli.build_parser()
     args = parser.parse_args(["--config", str(config_path)])
 
@@ -1745,46 +1795,18 @@ otp = "op://Private/RWTH/otp?attribute=otp"
     assert config.secret_password_ref == "op://Private/RWTH/password"
     assert config.secret_otp_ref == "op://Private/RWTH/otp?attribute=otp"
     assert ctx.auth.otp_code is None
-    assert provider.otp_calls == []
+    assert otp_calls == []
     assert ctx.auth.credential_resolver is not None
     ctx.auth.credential_resolver()
     assert ctx.auth.password == "provider-password"
     assert ctx.auth.otp_code_resolver is not None
     assert ctx.auth.otp_code_resolver() == "123456"
+    assert otp_calls == ["op://Private/RWTH/otp?attribute=otp"]
 
 
 def test_auth_login_totp_manual_skips_external_provider_otp(tmp_path, monkeypatch):
-    config_path = tmp_path / "config.toml"
-    config_path.write_text(
-        """
-[auth]
-user = "user"
-
-[auth.login]
-provider = "1password"
-totp_serial = "totp"
-password = "op://Private/RWTH/password"
-otp = "op://Private/RWTH/otp?attribute=otp"
-""",
-        encoding="utf-8",
-    )
-
-    class FakeProvider:
-        def check_available(self):
-            return SimpleNamespace(available=True, reason=None)
-
-        def get_password(self, reference):
-            assert reference == "op://Private/RWTH/password"
-            return "provider-password"
-
-        def get_otp_code(self, reference):
-            pytest.fail(f"unexpected OTP lookup: {reference}")
-
-    monkeypatch.setattr(
-        cli,
-        "build_external_secret_provider",
-        lambda provider_name: FakeProvider(),
-    )
+    config_path = _write_external_provider_config(tmp_path)
+    otp_calls = _install_external_provider(monkeypatch)
     parser = cli.build_parser()
     args = parser.parse_args(
         ["--config", str(config_path), "auth", "login", "--totp-manual"]
@@ -1797,6 +1819,7 @@ otp = "op://Private/RWTH/otp?attribute=otp"
     assert ctx.auth.password == "provider-password"
     assert ctx.auth.otp_code is None
     assert ctx.auth.otp_code_resolver is None
+    assert otp_calls == []
 
 
 def test_external_secret_provider_requires_password_ref(tmp_path, capsys):
@@ -1910,43 +1933,7 @@ def test_command_secret_provider_reads_from_global_config(
     tmp_path,
     monkeypatch,
 ):
-    config_dir = tmp_path / "xdg" / "syncmymoodle"
-    config_dir.mkdir(parents=True)
-    (config_dir / "config.toml").write_text(
-        """
-[auth]
-user = "user"
-
-[auth.login]
-provider = "command"
-totp_serial = "totp"
-password_command = ["secret-tool", "lookup", "rwth"]
-otp_command = ["otp-tool", "code", "rwth"]
-""",
-        encoding="utf-8",
-    )
-
-    class FakeProvider:
-        def __init__(self, password_command, otp_command):
-            assert password_command == ("secret-tool", "lookup", "rwth")
-            assert otp_command == ("otp-tool", "code", "rwth")
-
-        def check_available(self):
-            return SimpleNamespace(available=True, reason=None)
-
-        def check_otp_available(self):
-            return SimpleNamespace(available=True, reason=None)
-
-        def get_password(self, reference):
-            assert reference == ""
-            return "command-password"
-
-        def get_otp_code(self, reference):
-            assert reference == ""
-            return "987654"
-
-    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "xdg"))
-    monkeypatch.setattr(cli, "CommandSecretProvider", FakeProvider)
+    otp_events = _install_command_provider(tmp_path, monkeypatch)
     parser = cli.build_parser()
     args = parser.parse_args([])
 
@@ -1959,45 +1946,11 @@ otp_command = ["otp-tool", "code", "rwth"]
     assert ctx.auth.password == "command-password"
     assert ctx.auth.otp_code_resolver is not None
     assert ctx.auth.otp_code_resolver() == "987654"
+    assert otp_events == ["availability", "lookup"]
 
 
 def test_auth_login_totp_manual_skips_command_provider_otp(tmp_path, monkeypatch):
-    config_dir = tmp_path / "xdg" / "syncmymoodle"
-    config_dir.mkdir(parents=True)
-    (config_dir / "config.toml").write_text(
-        """
-[auth]
-user = "user"
-
-[auth.login]
-provider = "command"
-totp_serial = "totp"
-password_command = ["secret-tool", "lookup", "rwth"]
-otp_command = ["otp-tool", "code", "rwth"]
-""",
-        encoding="utf-8",
-    )
-
-    class FakeProvider:
-        def __init__(self, password_command, otp_command):
-            assert password_command == ("secret-tool", "lookup", "rwth")
-            assert otp_command == ("otp-tool", "code", "rwth")
-
-        def check_available(self):
-            return SimpleNamespace(available=True, reason=None)
-
-        def check_otp_available(self):
-            pytest.fail("unused OTP command availability was checked")
-
-        def get_password(self, reference):
-            assert reference == ""
-            return "command-password"
-
-        def get_otp_code(self, reference):
-            pytest.fail("unexpected OTP command")
-
-    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "xdg"))
-    monkeypatch.setattr(cli, "CommandSecretProvider", FakeProvider)
+    otp_events = _install_command_provider(tmp_path, monkeypatch)
     parser = cli.build_parser()
     args = parser.parse_args(["auth", "login", "--totp-manual"])
 
@@ -2008,6 +1961,7 @@ otp_command = ["otp-tool", "code", "rwth"]
     assert ctx.auth.password == "command-password"
     assert ctx.auth.otp_code is None
     assert ctx.auth.otp_code_resolver is None
+    assert otp_events == []
 
 
 def test_env_file_without_password_fails_clearly(tmp_path, caplog):

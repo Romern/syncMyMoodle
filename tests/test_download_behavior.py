@@ -8,7 +8,7 @@ import requests
 from syncmymoodle import course_cache, downloader, links, moodle, opencast, pathing
 from syncmymoodle.constants import COURSE_CACHE_FILENAME, YOUTUBE_WATCH_URL
 from syncmymoodle.downloader import download_file
-from syncmymoodle.node import Node, RemoteMarkerKind
+from syncmymoodle.node import DownloadKind, Node, RemoteMarkerKind
 from syncmymoodle.outcomes import HANDLED_DOWNLOAD
 from syncmymoodle.output import format_size
 from syncmymoodle.storage import write_private_gzip_json
@@ -108,6 +108,7 @@ def test_youtube_outtmpl_applies_windows_prefix_after_template_suffix(
         "video-id",
         "Youtube",
         url="https://youtu.be/abcdefghijk",
+        download_kind=DownloadKind.YOUTUBE,
     )
     assert node is not None
     download_directory = node_path(ctx, section)
@@ -264,14 +265,27 @@ def build_duplicate_section_file_tree():
 
 def build_youtube_tree(link):
     video_id = links.youtube_video_id_from_node(
-        Node("Video", link, "Youtube", None, url=link)
+        Node(
+            "Video",
+            link,
+            "Youtube",
+            None,
+            url=link,
+            download_kind=DownloadKind.YOUTUBE,
+        )
     )
     url = YOUTUBE_WATCH_URL.format(video_id=video_id) if video_id is not None else link
     root = Node("", -1, "Root", None)
     semester = root.add_child("26ss", None, "Semester")
     course = semester.add_child("Video Course", 301, "Course")
     section = course.add_child("General", 401, "Section")
-    video = section.add_child("Video", video_id or link, "Youtube", url=url)
+    video = section.add_child(
+        "Video",
+        video_id or link,
+        "Youtube",
+        url=url,
+        download_kind=DownloadKind.YOUTUBE,
+    )
     return root, section, video
 
 
@@ -286,6 +300,29 @@ def test_existing_youtube_download_is_marked_handled(tmp_path):
 
     assert video.is_handled
     assert ctx.stats.unchanged == 1
+
+
+def test_download_dispatch_uses_semantic_kind_not_display_type(monkeypatch):
+    node = Node(
+        "Video",
+        "abcdefghijk",
+        "External video",
+        None,
+        url="https://youtu.be/abcdefghijk",
+        download_kind=DownloadKind.YOUTUBE,
+    )
+    dispatched = []
+
+    def download_youtube(ctx, candidate, log):
+        dispatched.append(candidate)
+        return HANDLED_DOWNLOAD
+
+    monkeypatch.setattr(downloader, "scan_and_download_youtube", download_youtube)
+
+    assert downloader.download_leaf(
+        make_context(), node, logging.getLogger()
+    ).is_handled
+    assert dispatched == [node]
 
 
 # --------------------------------------------------------------------------
@@ -1838,6 +1875,24 @@ def test_legacy_is_downloaded_cache_key_is_read_as_handled(tmp_path):
     assert syncer.session.calls == []
     assert download_path.read_bytes() == content
     assert course_cache.get_old_node_for(syncer, current_file).is_handled is True
+
+
+@pytest.mark.parametrize(
+    ("node_type", "expected_kind"),
+    [
+        ("Youtube", DownloadKind.YOUTUBE),
+        ("Emedia", DownloadKind.EMEDIA),
+        ("Quiz", DownloadKind.QUIZ),
+        ("Opencast", DownloadKind.OPENCAST),
+        ("Linked file [application/pdf]", DownloadKind.DIRECT),
+    ],
+)
+def test_legacy_cache_derives_download_kind_from_node_type(node_type, expected_kind):
+    node = course_cache.node_from_cache_data(
+        {"name": "cached", "type": node_type, "children": []}
+    )
+
+    assert node.download_kind is expected_kind
 
 
 def test_course_cache_round_trips_remote_size(tmp_path):

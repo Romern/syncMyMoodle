@@ -7,7 +7,7 @@ import pytest
 
 from syncmymoodle import downloader, emedia, links
 from syncmymoodle.constants import EMEDIA_API_URL, EMEDIA_URL
-from syncmymoodle.node import Node, RemoteMarkerKind
+from syncmymoodle.node import DownloadKind, Node, RemoteMarkerKind
 
 from .helpers import FakeResponse, FakeSession, make_context, node_path
 
@@ -125,6 +125,7 @@ def test_single_emedia_link_resolves_public_api_without_login(monkeypatch):
     }
     assert video.etag == emedia.manifest_revision_marker(PLAYLIST_URL, dash_manifest())
     assert video.etag_kind is RemoteMarkerKind.OPAQUE
+    assert video.download_kind is DownloadKind.EMEDIA
 
 
 def test_manifest_revision_ignores_generated_session_values():
@@ -243,6 +244,7 @@ def test_emedia_download_uses_best_stream_and_exact_node_name(
         "Emedia",
         url=PLAYLIST_URL,
         download_headers={"Referer": EMEDIA_URL},
+        download_kind=DownloadKind.EMEDIA,
     )
     assert video is not None
 
@@ -294,6 +296,7 @@ def test_emedia_size_limit_uses_hls_duration_and_bitrate(tmp_path, monkeypatch):
         540,
         "Emedia",
         url=PLAYLIST_URL,
+        download_kind=DownloadKind.EMEDIA,
     )
     assert video is not None
 

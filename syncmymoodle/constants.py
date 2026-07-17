@@ -50,8 +50,6 @@ RWTH_DISRUPTIVE_STATUS_CLASSES = {
 }
 COURSE_PREFIX_RE = re.compile(r"^\((?P<prefix>[^()]{2})\) +(?P<course_name>.+)$")
 COURSE_PREFIX_HANDLING_OPTIONS = ("keep", "remove", "suffix")
-SECRET_PROVIDER_OPTIONS = ("1password", "bitwarden", "pass", "rbw", "gopass", "command")
-
 # Quiz review pages can be saved as a self-contained HTML snapshot ("html"),
 # rendered to PDF via a headless Chromium-family browser ("pdf"), both, or not
 # at all ("off"). Legacy boolean config values map to "both"/"off".

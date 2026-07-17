@@ -27,7 +27,7 @@ from syncmymoodle.http_utils import (
     redact_url_secrets,
     safe_request_error,
 )
-from syncmymoodle.node import Node, RemoteMarkerKind
+from syncmymoodle.node import DownloadKind, Node, RemoteMarkerKind
 
 logger = logging.getLogger(__name__)
 
@@ -120,6 +120,7 @@ def add_episode_nodes(
             etag=track.remote_marker,
             etag_kind=track.remote_marker_kind,
             remote_size=track.size,
+            download_kind=DownloadKind.OPENCAST,
         )
 
 

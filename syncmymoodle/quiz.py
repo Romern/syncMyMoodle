@@ -13,7 +13,9 @@ import shutil
 import subprocess
 import tempfile
 import urllib.parse
+from collections.abc import Callable
 from contextlib import closing
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -134,169 +136,139 @@ def _content_length_too_large(response: Any) -> bool:
         return False
 
 
-def _fetch_quiz_body(
-    session: Any,
-    url: str,
-    remaining_bytes: list[int],
-    accept_content_type: Any,
-    description: str,
-    default_content_type: str,
-    log: logging.Logger = logger,
-) -> tuple[bytes, str, str | None] | None:
-    """Shared, size-capped transport for quiz snapshot resources.
+@dataclass
+class _QuizAssetContext:
+    session: Any | None
+    base_url: str
+    log: logging.Logger
+    remaining_bytes: int = QUIZ_SNAPSHOT_MAX_ASSET_BYTES
+    cache: dict[str, str | None] = field(default_factory=dict)
 
-    Performs the streamed same-origin GET with the status, Content-Length,
-    content-type and byte-budget checks in one place. Returns ``(body, content_type,
-    response_encoding)`` or ``None`` when the resource must be skipped.
-    """
-    try:
-        with closing(
-            request_following_safe_redirects(
-                session,
-                "GET",
+    def fetch_body(
+        self,
+        url: str,
+        accept_content_type: Callable[[str], bool],
+        description: str,
+        default_content_type: str,
+    ) -> tuple[bytes, str, str | None] | None:
+        """Fetch one same-origin resource within the per-file and total budgets."""
+        if self.session is None:
+            return None
+        try:
+            with closing(
+                request_following_safe_redirects(
+                    self.session,
+                    "GET",
+                    url,
+                    _is_moodle_asset_url,
+                    timeout=HTTP_TIMEOUT_SECONDS,
+                    stream=True,
+                )
+            ) as response:
+                if not (200 <= response.status_code < 300):
+                    self.log.info(
+                        "Skipping quiz snapshot %s %s because Moodle returned HTTP %s",
+                        description,
+                        url,
+                        response.status_code,
+                    )
+                    return None
+                if _content_length_too_large(response):
+                    self.log.info(
+                        "Skipping oversized quiz snapshot %s %s", description, url
+                    )
+                    return None
+
+                content_type = _response_content_type(
+                    response, url, default_content_type
+                )
+                if not accept_content_type(content_type):
+                    self.log.info(
+                        "Skipping quiz snapshot %s %s with content type %s",
+                        description,
+                        url,
+                        content_type,
+                    )
+                    return None
+
+                encoding = getattr(response, "encoding", None)
+                body = read_capped_body(
+                    response, min(QUIZ_ASSET_MAX_BYTES, self.remaining_bytes)
+                )
+        except (OSError, ValueError, requests.RequestException):
+            self.log.info(
+                "Skipping quiz snapshot %s %s because it could not be fetched",
+                description,
                 url,
-                _is_moodle_asset_url,
-                timeout=HTTP_TIMEOUT_SECONDS,
-                stream=True,
             )
-        ) as response:
-            if not (200 <= response.status_code < 300):
-                log.info(
-                    "Skipping quiz snapshot %s %s because Moodle returned HTTP %s",
-                    description,
-                    url,
-                    response.status_code,
-                )
-                return None
-            if _content_length_too_large(response):
-                log.info("Skipping oversized quiz snapshot %s %s", description, url)
-                return None
+            return None
 
-            content_type = _response_content_type(response, url, default_content_type)
-            if not accept_content_type(content_type):
-                log.info(
-                    "Skipping quiz snapshot %s %s with content type %s",
-                    description,
-                    url,
-                    content_type,
-                )
-                return None
+        if body is None:
+            self.log.info("Skipping oversized quiz snapshot %s %s", description, url)
+            return None
 
-            encoding = getattr(response, "encoding", None)
-            body = read_capped_body(
-                response, min(QUIZ_ASSET_MAX_BYTES, remaining_bytes[0])
-            )
-    except (OSError, ValueError, requests.RequestException):
-        log.info(
-            "Skipping quiz snapshot %s %s because it could not be fetched",
-            description,
+        self.remaining_bytes -= len(body)
+        return body, content_type, encoding
+
+    def fetch_data_uri(self, raw_url: Any) -> str | None:
+        url = _quiz_asset_url(raw_url, self.base_url)
+        if url is None:
+            return None
+        if url.lower().startswith("data:"):
+            return url
+        if url in self.cache:
+            return self.cache[url]
+
+        fetched = self.fetch_body(
             url,
+            # Never embed HTML (login/error pages) as an asset.
+            lambda content_type: content_type not in HTML_CONTENT_TYPES,
+            "asset",
+            "application/octet-stream",
         )
-        return None
+        if fetched is None or not fetched[0]:
+            self.cache[url] = None
+            return None
 
-    if body is None:
-        log.info("Skipping oversized quiz snapshot %s %s", description, url)
-        return None
+        body, content_type, _ = fetched
+        encoded = base64.b64encode(body).decode("ascii")
+        data_uri = f"data:{content_type};base64,{encoded}"
+        self.cache[url] = data_uri
+        return data_uri
 
-    remaining_bytes[0] -= len(body)
-    return body, content_type, encoding
+    def fetch_stylesheet(self, raw_url: Any) -> str | None:
+        url = _quiz_asset_url(raw_url, self.base_url)
+        if url is None or url.lower().startswith("data:"):
+            return None
 
+        def accepts(content_type: str) -> bool:
+            if content_type in {"text/css", "text/plain", "application/x-css"}:
+                return True
+            return Path(urllib.parse.urlparse(url).path).suffix.lower() == ".css"
 
-def _fetch_quiz_asset_data_uri(
-    session: Any,
-    raw_url: Any,
-    base_url: str,
-    asset_cache: dict[str, str | None],
-    remaining_bytes: list[int],
-    log: logging.Logger = logger,
-) -> str | None:
-    url = _quiz_asset_url(raw_url, base_url)
-    if url is None:
-        return None
-    if url.lower().startswith("data:"):
-        return url
-    if url in asset_cache:
-        return asset_cache[url]
+        fetched = self.fetch_body(url, accepts, "stylesheet", "text/css")
+        if fetched is None:
+            return None
 
-    fetched = _fetch_quiz_body(
-        session,
-        url,
-        remaining_bytes,
-        # Never embed HTML (login/error pages) as an asset.
-        lambda ct: ct not in HTML_CONTENT_TYPES,
-        "asset",
-        "application/octet-stream",
-        log,
-    )
-    if fetched is None or not fetched[0]:
-        asset_cache[url] = None
-        return None
+        body, _, encoding = fetched
+        css = body.decode(encoding or "utf-8", errors="replace")
+        return _resolve_quiz_css_urls(CSS_IMPORT_RE.sub("", css), url)
 
-    body, content_type, _ = fetched
-    encoded = base64.b64encode(body).decode("ascii")
-    data_uri = f"data:{content_type};base64,{encoded}"
-    asset_cache[url] = data_uri
-    return data_uri
+    def inline_css_urls(self, css: str, *, fetch_assets: bool = True) -> str:
+        css = CSS_IMPORT_RE.sub("", css)
 
+        def replace(match: re.Match[str]) -> str:
+            raw_url = match.group(2).strip()
+            if not raw_url or raw_url.startswith("#"):
+                return match.group(0)
+            if raw_url.lower().startswith("data:"):
+                return match.group(0)
+            if not fetch_assets:
+                return 'url("data:,")'
+            data_uri = self.fetch_data_uri(raw_url)
+            return 'url("data:,")' if data_uri is None else f'url("{data_uri}")'
 
-def _fetch_quiz_stylesheet(
-    session: Any,
-    raw_url: Any,
-    base_url: str,
-    remaining_bytes: list[int],
-    log: logging.Logger = logger,
-) -> str | None:
-    url = _quiz_asset_url(raw_url, base_url)
-    if url is None or url.lower().startswith("data:"):
-        return None
-
-    def accepts(content_type: str) -> bool:
-        if content_type in {"text/css", "text/plain", "application/x-css"}:
-            return True
-        return Path(urllib.parse.urlparse(url).path).suffix.lower() == ".css"
-
-    fetched = _fetch_quiz_body(
-        session, url, remaining_bytes, accepts, "stylesheet", "text/css", log
-    )
-    if fetched is None:
-        return None
-
-    body, _, encoding = fetched
-    css = body.decode(encoding or "utf-8", errors="replace")
-    return _resolve_quiz_css_urls(CSS_IMPORT_RE.sub("", css), url)
-
-
-def _inline_quiz_css_urls(
-    css: str,
-    session: Any | None,
-    base_url: str,
-    asset_cache: dict[str, str | None],
-    remaining_bytes: list[int],
-    log: logging.Logger = logger,
-) -> str:
-    css = CSS_IMPORT_RE.sub("", css)
-
-    def replace(match: re.Match[str]) -> str:
-        raw_url = match.group(2).strip()
-        if not raw_url or raw_url.startswith("#"):
-            return match.group(0)
-        if raw_url.lower().startswith("data:"):
-            return match.group(0)
-        if session is None:
-            return 'url("data:,")'
-        data_uri = _fetch_quiz_asset_data_uri(
-            session,
-            raw_url,
-            base_url,
-            asset_cache,
-            remaining_bytes,
-            log,
-        )
-        if data_uri is None:
-            return 'url("data:,")'
-        return f'url("{data_uri}")'
-
-    return CSS_URL_RE.sub(replace, css)
+        return CSS_URL_RE.sub(replace, css)
 
 
 def _resolve_quiz_css_urls(css: str, base_url: str) -> str:
@@ -420,11 +392,7 @@ def _needed_quiz_icon_font_families(css: str, soup: Any) -> set[str]:
 def _inline_needed_quiz_stylesheet_assets(
     css: str,
     soup: Any,
-    session: Any | None,
-    base_url: str,
-    asset_cache: dict[str, str | None],
-    remaining_bytes: list[int],
-    log: logging.Logger = logger,
+    assets: _QuizAssetContext,
 ) -> str:
     needed_icon_families = _needed_quiz_icon_font_families(css, soup)
 
@@ -432,12 +400,10 @@ def _inline_needed_quiz_stylesheet_assets(
         families = _css_font_face_families(match.group("body"))
         if not families.intersection(needed_icon_families):
             return ""
-        return _inline_quiz_css_urls(
-            match.group(0), session, base_url, asset_cache, remaining_bytes, log
-        )
+        return assets.inline_css_urls(match.group(0))
 
     css = CSS_FONT_FACE_RE.sub(replace_font_face, css)
-    return _inline_quiz_css_urls(css, None, base_url, {}, remaining_bytes, log)
+    return assets.inline_css_urls(css, fetch_assets=False)
 
 
 def _ensure_quiz_snapshot_head(soup: Any) -> Any:
@@ -517,23 +483,14 @@ def _strip_quiz_snapshot_active_content(soup: Any) -> None:
 
 def _inline_quiz_snapshot_stylesheets(
     soup: Any,
-    session: Any | None,
-    base_url: str,
-    remaining_bytes: list[int],
-    log: logging.Logger = logger,
+    assets: _QuizAssetContext,
 ) -> None:
     for link in list(soup.find_all("link")):
         rel = link.get("rel") or []
         rel_values = {str(value).lower() for value in rel}
         href = link.get("href")
-        if "stylesheet" in rel_values and href and session is not None:
-            css = _fetch_quiz_stylesheet(
-                session,
-                href,
-                base_url,
-                remaining_bytes,
-                log,
-            )
+        if "stylesheet" in rel_values and href:
+            css = assets.fetch_stylesheet(href)
             if css is not None:
                 style = soup.new_tag("style")
                 style.string = css
@@ -544,11 +501,7 @@ def _inline_quiz_snapshot_stylesheets(
 
 def _inline_quiz_snapshot_element_assets(
     soup: Any,
-    session: Any | None,
-    base_url: str,
-    asset_cache: dict[str, str | None],
-    remaining_bytes: list[int],
-    log: logging.Logger = logger,
+    assets: _QuizAssetContext,
 ) -> None:
     for style in soup.find_all("style"):
         if style.string:
@@ -556,39 +509,17 @@ def _inline_quiz_snapshot_element_assets(
                 _inline_needed_quiz_stylesheet_assets(
                     str(style.string),
                     soup,
-                    session,
-                    base_url,
-                    asset_cache,
-                    remaining_bytes,
-                    log,
+                    assets,
                 )
             )
 
     for tag in soup.find_all(True):
         style_value = tag.get("style")
         if style_value:
-            tag["style"] = _inline_quiz_css_urls(
-                str(style_value),
-                session,
-                base_url,
-                asset_cache,
-                remaining_bytes,
-                log,
-            )
+            tag["style"] = assets.inline_css_urls(str(style_value))
 
         if tag.name == "img":
-            data_uri = (
-                _fetch_quiz_asset_data_uri(
-                    session,
-                    tag.get("src"),
-                    base_url,
-                    asset_cache,
-                    remaining_bytes,
-                    log,
-                )
-                if session is not None
-                else None
-            )
+            data_uri = assets.fetch_data_uri(tag.get("src"))
             if data_uri is not None:
                 tag["src"] = data_uri
             else:
@@ -677,30 +608,16 @@ def build_quiz_snapshot(
 
     The output contains a restrictive CSP, no active script/frame content, and
     no network-bearing URL attributes. Stylesheets are kept for layout but their
-    referenced assets are stripped, direct quiz images and inline-style assets
-    are embedded as data URIs with size budgets.
+    unused assets are stripped; direct quiz images and referenced inline-style
+    assets are embedded as data URIs with size budgets.
     """
     soup = parse_html(html)
     head = _ensure_quiz_snapshot_head(soup)
-    asset_cache: dict[str, str | None] = {}
-    remaining_bytes = [QUIZ_SNAPSHOT_MAX_ASSET_BYTES]
+    assets = _QuizAssetContext(session, base_url, log)
 
     _strip_quiz_snapshot_active_content(soup)
-    _inline_quiz_snapshot_stylesheets(
-        soup,
-        session,
-        base_url,
-        remaining_bytes,
-        log,
-    )
-    _inline_quiz_snapshot_element_assets(
-        soup,
-        session,
-        base_url,
-        asset_cache,
-        remaining_bytes,
-        log,
-    )
+    _inline_quiz_snapshot_stylesheets(soup, assets)
+    _inline_quiz_snapshot_element_assets(soup, assets)
     _convert_quiz_latex_to_mathml(soup, log)
     _remove_quiz_snapshot_network_attributes(soup)
     _add_quiz_snapshot_meta(soup, head)

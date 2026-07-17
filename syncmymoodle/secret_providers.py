@@ -7,7 +7,6 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Protocol
 
-from syncmymoodle.constants import SECRET_PROVIDER_OPTIONS
 from syncmymoodle.storage import harden_private_file
 
 KEYRING_SERVICE = "syncmymoodle"
@@ -231,6 +230,21 @@ class ExternalCliProvider:
         )
 
 
+@dataclass(frozen=True)
+class ExternalProviderSpec:
+    name: str
+    display_name: str
+    binary: str
+    password_command: tuple[str, ...]
+    otp_command: tuple[str, ...]
+    password_example: str
+    otp_example: str
+    password_first_line: bool = False
+    availability_check: Callable[[ExternalCliProvider], ProviderAvailability] | None = (
+        None
+    )
+
+
 def run_cli_command(argv: tuple[str, ...]) -> CommandResult:
     try:
         result = subprocess.run(
@@ -270,56 +284,17 @@ def build_external_secret_provider(
     executable_finder: ExecutableFinder = shutil.which,
 ) -> ExternalCliProvider:
     runner = run_cli_command if runner is None else runner
-    if provider_name == "1password":
-        return ExternalCliProvider(
-            provider_name,
-            "op",
-            lambda ref: ("op", "read", ref),
-            lambda ref: ("op", "read", ref),
-            runner=runner,
-            executable_finder=executable_finder,
-        )
-    if provider_name == "bitwarden":
-        return ExternalCliProvider(
-            provider_name,
-            "bw",
-            lambda ref: ("bw", "get", "password", ref),
-            lambda ref: ("bw", "get", "totp", ref),
-            runner=runner,
-            executable_finder=executable_finder,
-            availability_check=check_bitwarden_available,
-        )
-    if provider_name == "pass":
-        return ExternalCliProvider(
-            provider_name,
-            "pass",
-            lambda ref: ("pass", "show", ref),
-            lambda ref: ("pass", "otp", ref),
-            runner=runner,
-            executable_finder=executable_finder,
-            password_first_line=True,
-        )
-    if provider_name == "rbw":
-        return ExternalCliProvider(
-            provider_name,
-            "rbw",
-            lambda ref: ("rbw", "get", ref),
-            lambda ref: ("rbw", "code", ref),
-            runner=runner,
-            executable_finder=executable_finder,
-        )
-    if provider_name == "gopass":
-        return ExternalCliProvider(
-            provider_name,
-            "gopass",
-            lambda ref: ("gopass", "show", "--password", ref),
-            lambda ref: ("gopass", "otp", "--password", ref),
-            runner=runner,
-            executable_finder=executable_finder,
-        )
-    if provider_name in SECRET_PROVIDER_OPTIONS:
-        raise ValueError(f"secret provider {provider_name!r} is not implemented")
-    raise ValueError(f"unknown secret provider {provider_name!r}")
+    spec = get_external_secret_provider_spec(provider_name)
+    return ExternalCliProvider(
+        spec.name,
+        spec.binary,
+        lambda reference: (*spec.password_command, reference),
+        lambda reference: (*spec.otp_command, reference),
+        runner=runner,
+        executable_finder=executable_finder,
+        password_first_line=spec.password_first_line,
+        availability_check=spec.availability_check,
+    )
 
 
 def detect_password_manager_clis(
@@ -327,9 +302,8 @@ def detect_password_manager_clis(
 ) -> tuple[str, ...]:
     return tuple(
         provider_name
-        for provider_name in SECRET_PROVIDER_OPTIONS
-        if provider_name != "command"
-        and build_external_secret_provider(
+        for provider_name in EXTERNAL_SECRET_PROVIDER_OPTIONS
+        if build_external_secret_provider(
             provider_name,
             executable_finder=executable_finder,
         ).is_installed()
@@ -416,3 +390,68 @@ def check_bitwarden_available(provider: ExternalCliProvider) -> ProviderAvailabi
     if status == "unauthenticated":
         return ProviderAvailability(False, "Bitwarden CLI is not logged in")
     return ProviderAvailability(False, f"Bitwarden status is {status!r}")
+
+
+EXTERNAL_SECRET_PROVIDER_SPECS = {
+    spec.name: spec
+    for spec in (
+        ExternalProviderSpec(
+            "1password",
+            "1Password",
+            "op",
+            ("op", "read"),
+            ("op", "read"),
+            "op://Private/RWTH/password",
+            "op://Private/RWTH/one-time password?attribute=otp",
+        ),
+        ExternalProviderSpec(
+            "bitwarden",
+            "Bitwarden",
+            "bw",
+            ("bw", "get", "password"),
+            ("bw", "get", "totp"),
+            "rwth/sso",
+            "rwth/sso",
+            availability_check=check_bitwarden_available,
+        ),
+        ExternalProviderSpec(
+            "pass",
+            "pass",
+            "pass",
+            ("pass", "show"),
+            ("pass", "otp"),
+            "rwth/sso",
+            "rwth/sso",
+            password_first_line=True,
+        ),
+        ExternalProviderSpec(
+            "rbw",
+            "rbw",
+            "rbw",
+            ("rbw", "get"),
+            ("rbw", "code"),
+            "rwth/sso",
+            "rwth/sso",
+        ),
+        ExternalProviderSpec(
+            "gopass",
+            "gopass",
+            "gopass",
+            ("gopass", "show", "--password"),
+            ("gopass", "otp", "--password"),
+            "rwth/sso",
+            "rwth/sso",
+        ),
+    )
+}
+EXTERNAL_SECRET_PROVIDER_OPTIONS = tuple(EXTERNAL_SECRET_PROVIDER_SPECS)
+SECRET_PROVIDER_OPTIONS = (*EXTERNAL_SECRET_PROVIDER_OPTIONS, "command")
+
+
+def get_external_secret_provider_spec(provider_name: str) -> ExternalProviderSpec:
+    try:
+        return EXTERNAL_SECRET_PROVIDER_SPECS[provider_name]
+    except KeyError:
+        raise ValueError(
+            f"unknown external secret provider {provider_name!r}"
+        ) from None

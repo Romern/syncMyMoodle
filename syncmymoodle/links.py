@@ -36,7 +36,7 @@ from syncmymoodle.http_utils import (
     request_following_safe_redirects,
     safe_request_error,
 )
-from syncmymoodle.node import Node, RemoteMarkerKind
+from syncmymoodle.node import DownloadKind, Node, RemoteMarkerKind
 
 logger = logging.getLogger(__name__)
 
@@ -408,7 +408,7 @@ def canonical_youtube_url(video_id: str) -> str:
 
 
 def youtube_video_id_from_node(node: Node) -> str | None:
-    if node.type != "Youtube":
+    if node.download_kind is not DownloadKind.YOUTUBE:
         return None
     node_id = str(node.id or "")
     node_url = str(node.url or "")
@@ -457,7 +457,76 @@ def scan_html_text_for_links(
     )
 
 
-def scan_for_links(  # noqa: C901 - legacy parser awaiting decomposition
+def _scan_youtube_links(
+    ctx: SyncContext,
+    text: str,
+    parent_node: Node,
+    module_title: Any,
+) -> None:
+    if not ctx.config.link_source_enabled("youtube"):
+        return
+    for match in YOUTUBE_LINK_RE.finditer(text):
+        link = match.group(1)
+        if filters.should_skip_url(ctx, link, "YouTube link"):
+            continue
+        video_id = youtube_video_id(link)
+        if video_id is None:
+            continue
+        canonical_url = canonical_youtube_url(video_id)
+        parent_node.add_child(
+            f"Youtube: {module_title or canonical_url}",
+            video_id,
+            "Youtube",
+            url=canonical_url,
+            download_kind=DownloadKind.YOUTUBE,
+        )
+
+
+def _scan_opencast_links(
+    ctx: SyncContext,
+    text: str,
+    parent_node: Node,
+    course_id: Any,
+    module_title: Any,
+    log: logging.Logger,
+) -> None:
+    if not ctx.config.link_source_enabled("opencast"):
+        return
+    for video_url in OPENCAST_LINK_RE.findall(text):
+        if filters.should_skip_url(ctx, video_url, "Opencast link"):
+            continue
+        video_id = opencast_api.extract_episode_id(video_url)
+        if not video_id:
+            log.warning("Opencast: could not extract episode id from url %s", video_url)
+            continue
+        opencast_api.add_episode_nodes(
+            ctx,
+            parent_node,
+            module_title,
+            video_id,
+            log,
+            course_id=course_id,
+        )
+
+
+def _scan_emedia_links(
+    ctx: SyncContext,
+    text: str,
+    parent_node: Node,
+    module_title: Any,
+    log: logging.Logger,
+) -> None:
+    if not ctx.config.link_source_enabled("emedia"):
+        return
+    for match in EMEDIA_LINK_RE.finditer(text):
+        link = match.group(0)
+        if filters.should_skip_url(ctx, link, "emedia link"):
+            continue
+        ctx.output.sync_progress.module_status("resolving emedia video")
+        emedia_api.add_video_node(ctx, parent_node, link, module_title, log)
+
+
+def scan_for_links(
     ctx: SyncContext,
     text: str,
     parent_node: Node,
@@ -466,7 +535,6 @@ def scan_for_links(  # noqa: C901 - legacy parser awaiting decomposition
     single: bool = False,
     log: logging.Logger = logger,
 ) -> None:
-    # A single link is supplied and the contents of it are checked
     if single:
         text = text.replace("webservice/pluginfile.php", "pluginfile.php")
         if not _known_provider_link(text) and _scan_single_link(
@@ -481,55 +549,8 @@ def scan_for_links(  # noqa: C901 - legacy parser awaiting decomposition
     if not ctx.config.follow_links:
         return
 
-    # Youtube videos
-    if ctx.config.link_source_enabled("youtube"):
-        youtube_links = [
-            match.group(1)
-            # finds youtube.com, youtu.be and embed links
-            for match in YOUTUBE_LINK_RE.finditer(text)
-        ]
-        for link in youtube_links:
-            if filters.should_skip_url(ctx, link, "YouTube link"):
-                continue
-            video_id = youtube_video_id(link)
-            if video_id is None:
-                continue
-            canonical_url = canonical_youtube_url(video_id)
-            parent_node.add_child(
-                f"Youtube: {module_title or canonical_url}",
-                video_id,
-                "Youtube",
-                url=canonical_url,
-            )
-
-    # OpenCast videos
-    if ctx.config.link_source_enabled("opencast"):
-        opencast_links = OPENCAST_LINK_RE.findall(text)
-        for vid in opencast_links:
-            if filters.should_skip_url(ctx, vid, "Opencast link"):
-                continue
-            vid_id = opencast_api.extract_episode_id(vid)
-            if not vid_id:
-                log.warning(f"Opencast: could not extract episode id from url {vid}")
-                continue
-            opencast_api.add_episode_nodes(
-                ctx,
-                parent_node,
-                module_title,
-                vid_id,
-                log,
-                course_id=course_id,
-            )
-
-    # VEIRA videos on the separate emedia Medizin Moodle service
-    if ctx.config.link_source_enabled("emedia"):
-        for match in EMEDIA_LINK_RE.finditer(text):
-            link = match.group(0)
-            if filters.should_skip_url(ctx, link, "emedia link"):
-                continue
-            ctx.output.sync_progress.module_status("resolving emedia video")
-            emedia_api.add_video_node(ctx, parent_node, link, module_title, log)
-
-    # https://rwth-aachen.sciebo.de/s/XXX
+    _scan_youtube_links(ctx, text, parent_node, module_title)
+    _scan_opencast_links(ctx, text, parent_node, course_id, module_title, log)
+    _scan_emedia_links(ctx, text, parent_node, module_title, log)
     if ctx.config.link_source_enabled("sciebo"):
         sciebo_api.scan_public_shares(ctx, text, parent_node, log)

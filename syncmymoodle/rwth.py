@@ -358,160 +358,171 @@ def post_sso_form(
         sys.exit(1)
 
 
-def login(  # noqa: C901 - legacy login flow awaiting decomposition
-    ctx: SyncContext,
-    log: logging.Logger = logger,
-    *,
-    reuse_cached_session: bool = True,
-    persist_session: bool = True,
-) -> None:
-    session = requests.Session()
-    ctx.session = session
-    cookie_file = Path(ctx.config.cookie_file).expanduser()
-    if reuse_cached_session:
-        cookie_payload = read_private_gzip_json(cookie_file, "cached browser session")
-        if cookie_payload is not None:
-            load_session_from_data(session.cookies, cookie_payload)
+def _open_sso_login(
+    session: requests.Session,
+    log: logging.Logger,
+) -> requests.Response:
     check_moodle_availability(session, log)
     try:
-        resp = session.get(
+        return session.get(
             urllib.parse.urljoin(MOODLE_URL, "auth/shibboleth/index.php"),
             timeout=HTTP_TIMEOUT_SECONDS,
         )
-    except requests.RequestException as exc:
+    except requests.RequestException as error:
         log.critical(
             "Could not reach RWTH SSO login endpoint: %s",
-            safe_error_message(exc),
+            safe_error_message(error),
         )
         check_general_connectivity(log)
         check_rwth_status_page(log)
         sys.exit(1)
-    if resp.url.startswith(f"{MOODLE_URL}my/"):
-        soup = parse_html(resp.text)
-        ctx.session_key = _get_session_key(soup, log)
-        if persist_session and not ctx.config.dry_run:
-            save_session(cookie_file, session.cookies, ctx.session_key)
-        return
 
-    # Create a separate soup for maintenance detection
-    soup_check = parse_html(resp.text)
 
-    # Remove known info banners by class
-    for banner in soup_check.select(".themeboostunioninfobanner"):
+def _check_for_maintenance(response: requests.Response, log: logging.Logger) -> None:
+    soup = parse_html(response.text)
+    for banner in soup.select(".themeboostunioninfobanner"):
         banner.decompose()
-
-    # Also remove Bootstrap-style alert boxes marked as informational alerts
-    for alert in soup_check.select('div.alert[role="alert"]'):
+    for alert in soup.select('div.alert[role="alert"]'):
         alert.decompose()
-
-    # Extract body text after cleanup
-    body = soup_check.find("body")
+    body = soup.find("body")
     body_text = body.get_text(separator=" ", strip=True) if body else ""
+    if "Wartungsarbeiten" not in body_text:
+        return
+    log.critical(
+        "Detected Maintenance mode! If this is an error, please report it on GitHub."
+    )
+    log.info("Cleaned page body:\n%s", body_text)
+    sys.exit(1)
 
-    # Check for maintenance notice
-    if "Wartungsarbeiten" in body_text:
-        log.critical(
-            "Detected Maintenance mode! If this is an error, please report it on GitHub."
-        )
-        log.info(f"Cleaned page body:\n{body_text}")
-        sys.exit(1)
 
-    soup = parse_html(resp.text)
-    if soup.find("input", {"name": "RelayState"}) is None:
-        ensure_login_credentials(ctx, log)
-        csrf_token = _require_input_value(
+def _submit_password(
+    ctx: SyncContext,
+    session: requests.Session,
+    response: requests.Response,
+    soup: Any,
+    log: logging.Logger,
+) -> tuple[requests.Response, Any]:
+    ensure_login_credentials(ctx, log)
+    login_data = {
+        "j_username": ctx.auth.user,
+        "j_password": ctx.auth.password,
+        "_eventId_proceed": "",
+        "csrf_token": _require_input_value(
             soup, "csrf_token", "username/password form", log
-        )
-        login_data = {
-            "j_username": ctx.auth.user,
-            "j_password": ctx.auth.password,
-            "_eventId_proceed": "",
-            "csrf_token": csrf_token,
-        }
-        resp2 = post_sso_form(
-            session,
-            resp.url,
-            login_data,
-            "username/password form",
-            log,
-        )
+        ),
+    }
+    response = post_sso_form(
+        session,
+        response.url,
+        login_data,
+        "username/password form",
+        log,
+    )
+    soup = parse_html(response.text)
+    if soup.find(id="fudis_selected_token_ids_input") is not None:
+        return response, soup
+    log.critical(
+        "RWTH rejected the username or password. Check them and try again. "
+        "If they are correct, RWTH Single Sign-On may be unavailable; use "
+        "--verbose for diagnostics."
+    )
+    check_rwth_status_page(log)
+    sys.exit(1)
 
-        soup = parse_html(resp2.text)
 
-        if soup.find(id="fudis_selected_token_ids_input") is None:
-            log.critical(
-                "RWTH rejected the username or password. Check them and try "
-                "again. If they are correct, RWTH Single Sign-On may be "
-                "unavailable; use --verbose for diagnostics."
-            )
-            check_rwth_status_page(log)
-            sys.exit(1)
-
-        csrf_token = _require_input_value(
+def _select_totp_method(
+    ctx: SyncContext,
+    session: requests.Session,
+    response: requests.Response,
+    soup: Any,
+    log: logging.Logger,
+) -> tuple[requests.Response, Any]:
+    totp_serial = ensure_totp_serial(ctx, log)
+    ctx.output.phase(f"Selecting TOTP method {totp_serial}...")
+    selection_data = {
+        "fudis_selected_token_ids_input": totp_serial,
+        "_eventId_proceed": "",
+        "csrf_token": _require_input_value(
             soup, "csrf_token", "TOTP method selection form", log
+        ),
+    }
+    response = post_sso_form(
+        session,
+        response.url,
+        selection_data,
+        "TOTP method selection form",
+        log,
+    )
+    soup = parse_html(response.text)
+    if soup.find(id="fudis_otp_input") is not None:
+        return response, soup
+    log.critical(
+        "RWTH did not recognize TOTP serial %s. Check it in the RWTH IDM "
+        "Token Manager at %s. If it is correct, RWTH Single Sign-On may be "
+        "unavailable; use --verbose for diagnostics.",
+        totp_serial,
+        RWTH_TOTP_MANAGER_URL,
+    )
+    check_rwth_status_page(log)
+    sys.exit(1)
+
+
+def _current_totp_code(ctx: SyncContext) -> str | None:
+    if ctx.auth.otp_code_resolver is not None:
+        ctx.auth.otp_code = ctx.auth.otp_code_resolver()
+    if ctx.auth.otp_code:
+        return ctx.auth.otp_code
+    if not ctx.auth.totp_secret:
+        return ctx.output.prompt(
+            f"Current 6-digit TOTP code for {ctx.auth.totp_serial}"
         )
+    code = generate_totp(ctx.auth.totp_secret)
+    ctx.output.print("Generated the current TOTP code from the configured seed.")
+    return code
 
-        totp_serial = ensure_totp_serial(ctx, log)
-        ctx.output.phase(f"Selecting TOTP method {totp_serial}...")
-        totp_selection_data = {
-            "fudis_selected_token_ids_input": totp_serial,
-            "_eventId_proceed": "",
-            "csrf_token": csrf_token,
-        }
 
-        resp3 = post_sso_form(
-            session,
-            resp2.url,
-            totp_selection_data,
-            "TOTP method selection form",
-            log,
-        )
+def _submit_totp(
+    ctx: SyncContext,
+    session: requests.Session,
+    response: requests.Response,
+    soup: Any,
+    log: logging.Logger,
+) -> Any:
+    login_data = {
+        "fudis_otp_input": _current_totp_code(ctx),
+        "_eventId_proceed": "",
+        "csrf_token": _require_input_value(soup, "csrf_token", "TOTP entry form", log),
+    }
+    response = post_sso_form(
+        session,
+        response.url,
+        login_data,
+        "TOTP entry form",
+        log,
+    )
+    time.sleep(1)  # RWTH may close a connection advanced too quickly.
+    return parse_html(response.text)
 
-        soup = parse_html(resp3.text)
-        if soup.find(id="fudis_otp_input") is None:
-            log.critical(
-                "RWTH did not recognize TOTP serial %s. Check it in the RWTH "
-                "IDM Token Manager at %s. If it is correct, RWTH Single "
-                "Sign-On may be unavailable; use --verbose for diagnostics.",
-                totp_serial,
-                RWTH_TOTP_MANAGER_URL,
-            )
-            check_rwth_status_page(log)
-            sys.exit(1)
 
-        csrf_token = _require_input_value(soup, "csrf_token", "TOTP entry form", log)
-        totp_secret = ctx.auth.totp_secret
-        otp_code_resolver = ctx.auth.otp_code_resolver
-        if otp_code_resolver is not None:
-            ctx.auth.otp_code = otp_code_resolver()
-        if ctx.auth.otp_code:
-            totp_input = ctx.auth.otp_code
-        elif not totp_secret:
-            totp_input = ctx.output.prompt(
-                f"Current 6-digit TOTP code for {ctx.auth.totp_serial}"
-            )
-        else:
-            totp_input = generate_totp(totp_secret)
-            ctx.output.print(
-                "Generated the current TOTP code from the configured seed."
-            )
+def _saml_form(
+    ctx: SyncContext,
+    session: requests.Session,
+    response: requests.Response,
+    log: logging.Logger,
+) -> Any:
+    soup = parse_html(response.text)
+    if soup.find("input", {"name": "RelayState"}) is not None:
+        return soup
+    response, soup = _submit_password(ctx, session, response, soup, log)
+    response, soup = _select_totp_method(ctx, session, response, soup, log)
+    return _submit_totp(ctx, session, response, soup, log)
 
-        totp_login_data = {
-            "fudis_otp_input": totp_input,
-            "_eventId_proceed": "",
-            "csrf_token": csrf_token,
-        }
 
-        resp4 = post_sso_form(
-            session,
-            resp3.url,
-            totp_login_data,
-            "TOTP entry form",
-            log,
-        )
-
-        time.sleep(1)  # if we go too fast, we might have our connection closed
-        soup = parse_html(resp4.text)
+def _submit_saml_response(
+    session: requests.Session,
+    soup: Any,
+    log: logging.Logger,
+) -> str:
     if soup.find("input", {"name": "RelayState"}) is None:
         log.critical(
             "RWTH sign-in failed after TOTP verification. The code may be "
@@ -526,14 +537,56 @@ def login(  # noqa: C901 - legacy login flow awaiting decomposition
             soup, "SAMLResponse", "SAML response", log
         ),
     }
-    resp = post_sso_form(
+    response = post_sso_form(
         session,
         f"{MOODLE_URL}Shibboleth.sso/SAML2/POST",
         data,
         "SAML response",
         log,
     )
-    soup = parse_html(resp.text)
-    ctx.session_key = _get_session_key(soup, log)
+    return _get_session_key(parse_html(response.text), log)
+
+
+def _finish_login(
+    ctx: SyncContext,
+    session: requests.Session,
+    cookie_file: Path,
+    session_key: str,
+    persist_session: bool,
+) -> None:
+    ctx.session_key = session_key
     if persist_session and not ctx.config.dry_run:
-        save_session(cookie_file, session.cookies, ctx.session_key)
+        save_session(cookie_file, session.cookies, session_key)
+
+
+def login(
+    ctx: SyncContext,
+    log: logging.Logger = logger,
+    *,
+    reuse_cached_session: bool = True,
+    persist_session: bool = True,
+) -> None:
+    session = requests.Session()
+    ctx.session = session
+    cookie_file = Path(ctx.config.cookie_file).expanduser()
+    if reuse_cached_session:
+        cookie_payload = read_private_gzip_json(cookie_file, "cached browser session")
+        if cookie_payload is not None:
+            load_session_from_data(session.cookies, cookie_payload)
+    response = _open_sso_login(session, log)
+    if response.url.startswith(f"{MOODLE_URL}my/"):
+        _finish_login(
+            ctx,
+            session,
+            cookie_file,
+            _get_session_key(parse_html(response.text), log),
+            persist_session,
+        )
+        return
+    _check_for_maintenance(response, log)
+    session_key = _submit_saml_response(
+        session,
+        _saml_form(ctx, session, response, log),
+        log,
+    )
+    _finish_login(ctx, session, cookie_file, session_key, persist_session)

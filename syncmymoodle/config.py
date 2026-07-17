@@ -27,9 +27,9 @@ from pathlib import Path
 from typing import Any, Callable, Literal, TypeAlias, cast
 
 from syncmymoodle import pathing
-from syncmymoodle.constants import (
-    COURSE_PREFIX_HANDLING_OPTIONS,
-    QUIZ_MODES,
+from syncmymoodle.constants import COURSE_PREFIX_HANDLING_OPTIONS, QUIZ_MODES
+from syncmymoodle.secret_providers import (
+    EXTERNAL_SECRET_PROVIDER_OPTIONS,
     SECRET_PROVIDER_OPTIONS,
 )
 
@@ -960,7 +960,7 @@ def _login_reference_errors(canonical: ConfigDict, provider: Any) -> list[str]:
                 "auth.login.password and auth.login.otp are not valid for "
                 "the command provider"
             )
-    elif provider in SECRET_PROVIDER_OPTIONS[:-1]:
+    elif provider in EXTERNAL_SECRET_PROVIDER_OPTIONS:
         if not password_ref:
             errors.append(
                 "auth.login.password is required for external secret providers"

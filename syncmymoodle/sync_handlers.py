@@ -26,7 +26,7 @@ from syncmymoodle.http_utils import (
     read_capped_body,
     safe_request_error,
 )
-from syncmymoodle.node import Node
+from syncmymoodle.node import DownloadKind, Node
 
 logger = logging.getLogger(__name__)
 H5P_PACKAGE_MAX_BYTES = 2 * 1024**3
@@ -57,6 +57,24 @@ class ModuleContext:
 class QuizCacheTiming:
     timeclose: int
     refresh_after: int | None
+
+
+@dataclass(frozen=True)
+class _PageScanContent:
+    text: str
+    base_url: str
+    cache_module_id: int | None
+    marker: str | None
+    cacheable: bool
+
+
+@dataclass(frozen=True)
+class _OpencastLtiLaunch:
+    endpoint: str
+    parameters: dict[str, Any]
+    title: Any
+    series_id: Any
+    episode_id: Any
 
 
 Handler = Callable[[ModuleContext, dict[str, Any]], None]
@@ -562,259 +580,309 @@ def handle_folder_module(
 
 
 @register_handler
-def handle_embedded_link_module(  # noqa: C901 - legacy handler awaiting decomposition
+def handle_embedded_link_module(
     module_context: ModuleContext,
     module: dict[str, Any],
 ) -> None:
-    ctx = module_context.ctx
-    section_node = module_context.section_node
-    course_id = module_context.course_id
-    log = module_context.log
-
-    # Get embedded videos in pages or labels
-    if (
-        module["modname"]
-        not in [
-            "page",
-            "label",
-            "h5pactivity",
-        ]
-        or not ctx.config.follow_links
-    ):
+    if module["modname"] not in {"page", "label", "h5pactivity"}:
         return
-
+    if not module_context.ctx.config.follow_links:
+        return
     if module["modname"] == "page":
-        opencast_enabled = ctx.config.link_source_enabled("opencast")
-        index_content = next(
-            (
-                content
-                for content in module.get("contents") or []
-                if content.get("filename") == "index.html"
-                and isinstance(content.get("fileurl"), str)
-                and content["fileurl"]
-            ),
-            None,
-        )
-        html_url = (
-            index_content["fileurl"]
-            if index_content is not None
-            else module.get("url") or f"{MOODLE_URL}mod/page/view.php?id={module['id']}"
-        )
-        scan_page_links = not filters.should_skip_url(ctx, html_url, "page link")
-        if opencast_enabled or scan_page_links:
-            module_id = module["id"]
-            cache_module_id = (
-                module_id
-                if isinstance(module_id, int) and not isinstance(module_id, bool)
-                else None
-            )
-            marker = (
-                _content_marker(
-                    index_content,
-                    index_content,
-                    url=index_content["fileurl"],
-                )
-                if index_content is not None
-                else None
-            )
-            cached = (
-                course_cache.get_cached_text(
-                    ctx,
-                    module_context.course_node,
-                    course_cache.PAGE_CONTENT_KIND,
-                    cache_module_id,
-                    marker,
-                    log,
-                )
-                if cache_module_id is not None and marker is not None
-                else None
-            )
-            page_content: str | None = None
-            page_base_url = html_url
-            cacheable = cached is not None
-            if cached is not None:
-                module_context.status("scanning cached page")
-                page_content = cached.content
-                page_base_url = cached.base_url or html_url
-            else:
-                module_context.status("fetching page")
-                try:
-                    response = ctx.require_session().get(
-                        html_url,
-                        timeout=HTTP_TIMEOUT_SECONDS,
-                    )
-                except requests.RequestException as error:
-                    log.warning(
-                        "Failed to fetch page module %s: %s",
-                        module_id,
-                        safe_request_error(error),
-                    )
-                    ctx.stats.failed += 1
-                    response = None
-                if response is not None and not (200 <= response.status_code < 300):
-                    log.warning(
-                        "Page module %s returned status %s",
-                        module_id,
-                        response.status_code,
-                    )
-                    ctx.stats.failed += 1
-                    response = None
-                if response is not None:
-                    page_content = response.text
-                    page_base_url = response.url or html_url
-                    cacheable = _page_response_cacheable(response, html_url)
-
-            if page_content is not None:
-                if opencast_enabled:
-                    html = parse_html(page_content)
-                    for iframe in html.find_all("iframe"):
-                        iframe_src_value = iframe.get("src")
-                        if not iframe_src_value:
-                            continue
-                        iframe_src = urllib.parse.urljoin(
-                            page_base_url,
-                            cast(str, iframe_src_value),
-                        )
-                        vid_id = opencast_api.extract_episode_id(iframe_src)
-                        if not vid_id:
-                            continue
-                        opencast_api.add_episode_nodes(
-                            ctx,
-                            section_node,
-                            module["name"],
-                            vid_id,
-                            log,
-                            course_id=course_id,
-                        )
-
-                if scan_page_links:
-                    module_context.status("scanning page links")
-                    links_api.scan_html_text_for_links(
-                        ctx,
-                        page_content,
-                        page_base_url,
-                        section_node,
-                        course_id,
-                        module_title=module["name"],
-                    )
-                if cache_module_id is not None and marker is not None and cacheable:
-                    course_cache.store_cached_text(
-                        ctx,
-                        module_context.course_node,
-                        course_cache.PAGE_CONTENT_KIND,
-                        cache_module_id,
-                        marker,
-                        page_content,
-                        page_base_url,
-                        log,
-                    )
-    # "Interactive" h5p videos
+        _handle_page_links(module_context, module)
     elif module["modname"] == "h5pactivity":
-        module_context.status("loading H5P activity")
-        activity = module_instance(
-            ctx,
-            module,
-            course_id,
-            ctx.h5p_activity_cache,
-            moodle_api.get_h5pactivities_by_course,
-        )
-        package_files = activity.get("package") if activity else None
-        if isinstance(package_files, dict):
-            package_files = [package_files]
-        package_file = next(
-            (
-                item
-                for item in package_files or []
-                if isinstance(item, dict) and isinstance(item.get("fileurl"), str)
-            ),
-            None,
-        )
-        if isinstance(activity, dict) and isinstance(package_file, dict):
-            package_url = package_file["fileurl"]
-            assert isinstance(package_url, str)
-            module_id = module["id"]
-            cache_module_id = (
-                module_id
-                if isinstance(module_id, int) and not isinstance(module_id, bool)
-                else None
-            )
-            marker = _content_marker(activity, package_file)
-            cached = (
-                course_cache.get_cached_text(
-                    ctx,
-                    module_context.course_node,
-                    course_cache.H5P_CONTENT_KIND,
-                    cache_module_id,
-                    marker,
-                    log,
-                )
-                if cache_module_id is not None and marker is not None
-                else None
-            )
-            content = cached.content if cached is not None else None
-            from_cache = cached is not None
-            if content is None:
-                module_context.status("downloading H5P package")
-                content = _read_h5p_content(
-                    ctx.require_session(),
-                    package_url,
-                    module_id,
-                    log,
-                    package_file.get("filesize"),
-                )
-                if (
-                    content is not None
-                    and cache_module_id is not None
-                    and marker is not None
-                ):
-                    course_cache.store_cached_text(
-                        ctx,
-                        module_context.course_node,
-                        course_cache.H5P_CONTENT_KIND,
-                        cache_module_id,
-                        marker,
-                        content,
-                        log=log,
-                    )
-            if content is not None:
-                module_context.status(
-                    "scanning cached H5P content"
-                    if from_cache
-                    else "scanning H5P content"
-                )
-                links_api.scan_for_links(
-                    ctx,
-                    content,
-                    section_node,
-                    course_id,
-                    module_title=module["name"],
-                    single=False,
-                )
+        _handle_h5p_links(module_context, module)
     else:
         module_context.status("scanning embedded links")
         links_api.scan_for_links(
-            ctx,
+            module_context.ctx,
             module.get("description", ""),
-            section_node,
-            course_id,
+            module_context.section_node,
+            module_context.course_id,
             module_title=module["name"],
         )
 
 
-@register_handler
-def handle_opencast_lti_module(  # noqa: C901 - legacy handler awaiting decomposition
+def _strict_module_id(module: dict[str, Any]) -> int | None:
+    module_id = module["id"]
+    return (
+        module_id
+        if isinstance(module_id, int) and not isinstance(module_id, bool)
+        else None
+    )
+
+
+def _page_location(
+    module: dict[str, Any],
+) -> tuple[dict[str, Any] | None, str]:
+    index_content = next(
+        (
+            content
+            for content in module.get("contents") or []
+            if content.get("filename") == "index.html"
+            and isinstance(content.get("fileurl"), str)
+            and content["fileurl"]
+        ),
+        None,
+    )
+    html_url = (
+        index_content["fileurl"]
+        if index_content is not None
+        else module.get("url") or f"{MOODLE_URL}mod/page/view.php?id={module['id']}"
+    )
+    return index_content, html_url
+
+
+def _cached_text(
+    module_context: ModuleContext,
+    kind: str,
+    module_id: int | None,
+    marker: str | None,
+) -> course_cache.CachedTextEntry | None:
+    if module_id is None or marker is None:
+        return None
+    return course_cache.get_cached_text(
+        module_context.ctx,
+        module_context.course_node,
+        kind,
+        module_id,
+        marker,
+        module_context.log,
+    )
+
+
+def _fetch_page(
+    module_context: ModuleContext,
+    module_id: Any,
+    html_url: str,
+) -> requests.Response | None:
+    module_context.status("fetching page")
+    try:
+        response = module_context.ctx.require_session().get(
+            html_url,
+            timeout=HTTP_TIMEOUT_SECONDS,
+        )
+    except requests.RequestException as error:
+        module_context.log.warning(
+            "Failed to fetch page module %s: %s",
+            module_id,
+            safe_request_error(error),
+        )
+        module_context.ctx.stats.failed += 1
+        return None
+    if 200 <= response.status_code < 300:
+        return response
+    module_context.log.warning(
+        "Page module %s returned status %s",
+        module_id,
+        response.status_code,
+    )
+    module_context.ctx.stats.failed += 1
+    return None
+
+
+def _page_scan_content(
+    module_context: ModuleContext,
+    module: dict[str, Any],
+    index_content: dict[str, Any] | None,
+    html_url: str,
+) -> _PageScanContent | None:
+    cache_module_id = _strict_module_id(module)
+    marker = (
+        _content_marker(
+            index_content,
+            index_content,
+            url=index_content["fileurl"],
+        )
+        if index_content is not None
+        else None
+    )
+    cached = _cached_text(
+        module_context,
+        course_cache.PAGE_CONTENT_KIND,
+        cache_module_id,
+        marker,
+    )
+    if cached is not None:
+        module_context.status("scanning cached page")
+        return _PageScanContent(
+            cached.content,
+            cached.base_url or html_url,
+            cache_module_id,
+            marker,
+            True,
+        )
+    response = _fetch_page(module_context, module["id"], html_url)
+    if response is None:
+        return None
+    return _PageScanContent(
+        response.text,
+        response.url or html_url,
+        cache_module_id,
+        marker,
+        _page_response_cacheable(response, html_url),
+    )
+
+
+def _scan_page_opencast(
+    module_context: ModuleContext,
+    module: dict[str, Any],
+    content: _PageScanContent,
+) -> None:
+    for iframe in parse_html(content.text).find_all("iframe"):
+        iframe_src_value = iframe.get("src")
+        if not iframe_src_value:
+            continue
+        iframe_src = urllib.parse.urljoin(
+            content.base_url,
+            cast(str, iframe_src_value),
+        )
+        video_id = opencast_api.extract_episode_id(iframe_src)
+        if not video_id:
+            continue
+        opencast_api.add_episode_nodes(
+            module_context.ctx,
+            module_context.section_node,
+            module["name"],
+            video_id,
+            module_context.log,
+            course_id=module_context.course_id,
+        )
+
+
+def _store_page_content(
+    module_context: ModuleContext,
+    content: _PageScanContent,
+) -> None:
+    if (
+        content.cache_module_id is None
+        or content.marker is None
+        or not content.cacheable
+    ):
+        return
+    course_cache.store_cached_text(
+        module_context.ctx,
+        module_context.course_node,
+        course_cache.PAGE_CONTENT_KIND,
+        content.cache_module_id,
+        content.marker,
+        content.text,
+        content.base_url,
+        module_context.log,
+    )
+
+
+def _handle_page_links(
+    module_context: ModuleContext,
+    module: dict[str, Any],
+) -> None:
+    index_content, html_url = _page_location(module)
+    opencast_enabled = module_context.ctx.config.link_source_enabled("opencast")
+    scan_page_links = not filters.should_skip_url(
+        module_context.ctx, html_url, "page link"
+    )
+    if not opencast_enabled and not scan_page_links:
+        return
+    content = _page_scan_content(module_context, module, index_content, html_url)
+    if content is None:
+        return
+    if opencast_enabled:
+        _scan_page_opencast(module_context, module, content)
+    if scan_page_links:
+        module_context.status("scanning page links")
+        links_api.scan_html_text_for_links(
+            module_context.ctx,
+            content.text,
+            content.base_url,
+            module_context.section_node,
+            module_context.course_id,
+            module_title=module["name"],
+        )
+    _store_page_content(module_context, content)
+
+
+def _h5p_package_file(activity: dict[str, Any]) -> dict[str, Any] | None:
+    package_files = activity.get("package")
+    if isinstance(package_files, dict):
+        package_files = [package_files]
+    return next(
+        (
+            item
+            for item in package_files or []
+            if isinstance(item, dict) and isinstance(item.get("fileurl"), str)
+        ),
+        None,
+    )
+
+
+def _handle_h5p_links(
     module_context: ModuleContext,
     module: dict[str, Any],
 ) -> None:
     ctx = module_context.ctx
-    section_node = module_context.section_node
-    course_node = module_context.course_node
-    log = module_context.log
-
-    # New OpenCast integration
-    if module["modname"] != "lti" or not ctx.config.link_source_enabled("opencast"):
+    module_context.status("loading H5P activity")
+    activity = module_instance(
+        ctx,
+        module,
+        module_context.course_id,
+        ctx.h5p_activity_cache,
+        moodle_api.get_h5pactivities_by_course,
+    )
+    if not isinstance(activity, dict):
         return
+    package_file = _h5p_package_file(activity)
+    if package_file is None:
+        return
+    package_url = package_file["fileurl"]
+    assert isinstance(package_url, str)
+    module_id = _strict_module_id(module)
+    marker = _content_marker(activity, package_file)
+    cached = _cached_text(
+        module_context,
+        course_cache.H5P_CONTENT_KIND,
+        module_id,
+        marker,
+    )
+    content = cached.content if cached is not None else None
+    if content is None:
+        module_context.status("downloading H5P package")
+        content = _read_h5p_content(
+            ctx.require_session(),
+            package_url,
+            module["id"],
+            module_context.log,
+            package_file.get("filesize"),
+        )
+        if content is not None and module_id is not None and marker is not None:
+            course_cache.store_cached_text(
+                ctx,
+                module_context.course_node,
+                course_cache.H5P_CONTENT_KIND,
+                module_id,
+                marker,
+                content,
+                log=module_context.log,
+            )
+    if content is None:
+        return
+    module_context.status(
+        "scanning cached H5P content" if cached is not None else "scanning H5P content"
+    )
+    links_api.scan_for_links(
+        ctx,
+        content,
+        module_context.section_node,
+        module_context.course_id,
+        module_title=module["name"],
+        single=False,
+    )
 
+
+def _opencast_lti_launch(
+    module_context: ModuleContext,
+    module: dict[str, Any],
+) -> _OpencastLtiLaunch | None:
+    ctx = module_context.ctx
     module_context.status("loading Opencast activity")
     instance = module_instance(
         ctx,
@@ -825,97 +893,132 @@ def handle_opencast_lti_module(  # noqa: C901 - legacy handler awaiting decompos
     )
     tool_id = instance.get("id") if instance else module.get("instance")
     if not isinstance(tool_id, int):
-        log.warning("Opencast: LTI module %s has no tool instance id", module["id"])
-        return
+        module_context.log.warning(
+            "Opencast: LTI module %s has no tool instance id", module["id"]
+        )
+        return None
     module_context.status("loading Opencast launch data")
     launch_data = moodle_api.get_lti_launch_data(
         ctx.require_session(), ctx.require_moodle_account().wstoken, tool_id
     )
     if launch_data is None:
-        return
+        return None
     endpoint = launch_data.get("endpoint")
     if not isinstance(endpoint, str):
-        log.warning("Opencast: LTI module %s has no launch endpoint", module["id"])
-        return
+        module_context.log.warning(
+            "Opencast: LTI module %s has no launch endpoint", module["id"]
+        )
+        return None
     engage_data = {
         str(item["name"]): item.get("value", "")
         for item in launch_data.get("parameters") or []
         if isinstance(item, dict) and item.get("name")
     }
-    engage_series_id = engage_data.get("custom_series")
-    engage_single_id = engage_data.get("custom_id")
-    name = engage_data.get("resource_link_title") or module["name"]
+    return _OpencastLtiLaunch(
+        endpoint,
+        engage_data,
+        engage_data.get("resource_link_title") or module["name"],
+        engage_data.get("custom_series"),
+        engage_data.get("custom_id"),
+    )
 
-    if engage_series_id:
-        # Found an Opencast "series" page
-        series_id = engage_series_id
 
-        if not opencast_api.course_is_authorized(
+def _handle_opencast_series(
+    module_context: ModuleContext,
+    module: dict[str, Any],
+    launch: _OpencastLtiLaunch,
+) -> None:
+    ctx = module_context.ctx
+    if not opencast_api.course_is_authorized(
+        ctx,
+        module_context.course_id,
+        launch.endpoint,
+    ):
+        module_context.status("authorizing Opencast course")
+        if not opencast_api.submit_lti_form(
             ctx,
-            module_context.course_id,
-            endpoint,
+            launch.parameters,
+            f"LTI series module {module['id']}",
+            module_context.log,
+            endpoint=launch.endpoint,
+            course_id=module_context.course_id,
         ):
-            module_context.status("authorizing Opencast course")
-            if not opencast_api.submit_lti_form(
-                ctx,
-                engage_data,
-                f"LTI series module {module['id']}",
-                log,
-                endpoint=endpoint,
-                course_id=module_context.course_id,
-            ):
-                return
-
-        episodes = opencast_api.list_series_episodes(
-            ctx,
-            series_id,
-            log,
-            module_context.course_id,
-        )
-        if episodes is None:
             return
-        series_node = cast(Node, course_node.add_child(name, series_id, "Section"))
+    episodes = opencast_api.list_series_episodes(
+        ctx,
+        launch.series_id,
+        module_context.log,
+        module_context.course_id,
+    )
+    if episodes is None:
+        return
+    series_node = cast(
+        Node,
+        module_context.course_node.add_child(launch.title, launch.series_id, "Section"),
+    )
+    for index, (episode_id, episode_title) in enumerate(episodes, start=1):
+        module_context.status(f"resolving Opencast episode {index}/{len(episodes)}")
+        opencast_api.add_episode_nodes(
+            ctx,
+            series_node,
+            episode_title,
+            episode_id,
+            module_context.log,
+            course_id=module_context.course_id,
+        )
 
-        for index, (episode_id, episode_title) in enumerate(episodes, start=1):
-            module_context.status(f"resolving Opencast episode {index}/{len(episodes)}")
-            opencast_api.add_episode_nodes(
-                ctx,
-                series_node,
-                episode_title,
-                episode_id,
-                log,
-                course_id=module_context.course_id,
-            )
+
+def _handle_opencast_episode(
+    module_context: ModuleContext,
+    module: dict[str, Any],
+    launch: _OpencastLtiLaunch,
+) -> None:
+    if not launch.episode_id:
+        module_context.log.info(
+            "Opencast LTI module %s has neither custom_id nor custom_series",
+            module["id"],
+        )
+        return
+    if not opencast_api.course_is_authorized(
+        module_context.ctx,
+        module_context.course_id,
+        launch.endpoint,
+    ):
+        module_context.status("authorizing Opencast course")
+        if not opencast_api.submit_lti_form(
+            module_context.ctx,
+            launch.parameters,
+            f"LTI module {module['id']}",
+            module_context.log,
+            endpoint=launch.endpoint,
+            course_id=module_context.course_id,
+        ):
+            return
+    opencast_api.add_episode_nodes(
+        module_context.ctx,
+        module_context.section_node,
+        launch.title,
+        launch.episode_id,
+        module_context.log,
+        course_id=module_context.course_id,
+    )
+
+
+@register_handler
+def handle_opencast_lti_module(
+    module_context: ModuleContext,
+    module: dict[str, Any],
+) -> None:
+    ctx = module_context.ctx
+    if module["modname"] != "lti" or not ctx.config.link_source_enabled("opencast"):
+        return
+    launch = _opencast_lti_launch(module_context, module)
+    if launch is None:
+        return
+    if launch.series_id:
+        _handle_opencast_series(module_context, module, launch)
     else:
-        if not engage_single_id:
-            log.info(
-                "Opencast LTI module %s has neither custom_id nor custom_series",
-                module["id"],
-            )
-        else:
-            if not opencast_api.course_is_authorized(
-                ctx,
-                module_context.course_id,
-                endpoint,
-            ):
-                module_context.status("authorizing Opencast course")
-                if not opencast_api.submit_lti_form(
-                    ctx,
-                    engage_data,
-                    f"LTI module {module['id']}",
-                    log,
-                    endpoint=endpoint,
-                    course_id=module_context.course_id,
-                ):
-                    return
-            opencast_api.add_episode_nodes(
-                ctx,
-                section_node,
-                name,
-                engage_single_id,
-                log,
-                course_id=module_context.course_id,
-            )
+        _handle_opencast_episode(module_context, module, launch)
 
 
 def _quiz_review_html(name: str, review: dict[str, Any]) -> str:
@@ -1071,7 +1174,13 @@ def _add_quiz_nodes(
         name = f"{module_name}, Versuch {index}"
         review_url = f"{MOODLE_URL}mod/quiz/review.php?attempt={attempt_id}"
         ctx.quiz_review_cache[review_url] = _quiz_review_html(name, review)
-        section_node.add_child(name, attempt_id, "Quiz", url=review_url)
+        section_node.add_child(
+            name,
+            attempt_id,
+            "Quiz",
+            url=review_url,
+            download_kind=DownloadKind.QUIZ,
+        )
 
 
 @register_handler
