@@ -1,12 +1,41 @@
+import urllib.parse
 from typing import Any
 
+from syncmymoodle.constants import HASH_ALGOS_BY_LENGTH, MOODLE_URL
 from syncmymoodle.http_utils import (
     HTML_CONTENT_TYPES,
     filename_from_url,
     media_type_without_parameters,
+    same_origin,
 )
-from syncmymoodle.node import NAME_CLASH_ID_UNSET, Node
+from syncmymoodle.node import NAME_CLASH_ID_UNSET, Node, RemoteMarkerKind
 from syncmymoodle.pathing import sanitize_path_part
+
+
+def canonicalize_moodle_file_url(url: str) -> str:
+    """Normalize Moodle file endpoint quirks without changing external URLs."""
+    if not same_origin(url, MOODLE_URL):
+        return url
+
+    parsed = urllib.parse.urlsplit(url)
+    path = parsed.path
+    webservice_prefix = "/webservice/pluginfile.php/"
+    if path.startswith(webservice_prefix):
+        path = f"/pluginfile.php/{path.removeprefix(webservice_prefix)}"
+    legacy_page_prefix = "/mod_page/content/3/"
+    if legacy_page_prefix in path:
+        path = path.replace(legacy_page_prefix, "/mod_page/content/", 1)
+    query = urllib.parse.urlencode(
+        [
+            (name, value)
+            for name, value in urllib.parse.parse_qsl(
+                parsed.query,
+                keep_blank_values=True,
+            )
+            if name.casefold() != "forcedownload"
+        ]
+    )
+    return urllib.parse.urlunsplit(parsed._replace(path=path, query=query))
 
 
 def get_or_add_child(
@@ -35,7 +64,10 @@ def add_moodle_file_node(
     timemodified: Any = None,
     remote_size: int | None = None,
     name_clash_id: Any = NAME_CLASH_ID_UNSET,
+    remote_content_hash: Any = None,
 ) -> Node | None:
+    if url is not None:
+        url = canonicalize_moodle_file_url(url)
     target_node: Node | None = parent_node
     path_segments = [
         segment
@@ -54,12 +86,23 @@ def add_moodle_file_node(
     if target_node is None:
         return None
 
+    content_hash = (
+        remote_content_hash.lower()
+        if isinstance(remote_content_hash, str)
+        and len(remote_content_hash) in HASH_ALGOS_BY_LENGTH
+        and all(
+            character in "0123456789abcdefABCDEF" for character in remote_content_hash
+        )
+        else None
+    )
     return target_node.add_child(
         filename,
         id,
         type,
         url=url,
         timemodified=timemodified,
+        etag=content_hash,
+        etag_kind=RemoteMarkerKind.CONTENT_HASH if content_hash else None,
         remote_size=remote_size,
         name_clash_id=name_clash_id,
     )
@@ -90,6 +133,7 @@ def add_moodle_content_file_node(
         timemodified=content.get("timemodified"),
         remote_size=content.get("filesize"),
         name_clash_id=None,
+        remote_content_hash=content.get("contenthash"),
     )
 
 

@@ -1,7 +1,9 @@
-from syncmymoodle import course_cache, moodle, opencast, sync
-from syncmymoodle.constants import COURSE_CACHE_FILENAME
-from syncmymoodle.node import Node
-from syncmymoodle.storage import write_private_gzip_json
+from syncmymoodle import course_cache, moodle, opencast, pathing, sync, sync_handlers
+from syncmymoodle.constants import COURSE_CACHE_FILENAME, MOODLE_URL
+from syncmymoodle.context import MoodleAccount
+from syncmymoodle.moodle_tokens import MoodleTokens
+from syncmymoodle.node import DownloadKind, Node
+from syncmymoodle.storage import read_private_gzip_json, write_private_gzip_json
 
 from .helpers import FakeSession, make_context, node_path
 
@@ -23,12 +25,44 @@ def course_tree():
     return root, course
 
 
+def tagged_v1_payload(*, site=MOODLE_URL):
+    file_url = f"{site.rstrip('/')}/pluginfile.php/301/slides.pdf"
+    return {
+        "format": course_cache.COURSE_CACHE_FORMAT,
+        "course": {
+            "name": "Download Course",
+            "id": 301,
+            "type": "Course",
+            "download_status": "pending",
+            "children": [
+                {
+                    "name": "General",
+                    "id": 401,
+                    "type": "Section",
+                    "download_status": "pending",
+                    "children": [
+                        {
+                            "name": "slides.pdf",
+                            "id": "file-id",
+                            "type": "Linked file [application/pdf]",
+                            "url": file_url,
+                            "timemodified": 100,
+                            "download_status": "handled",
+                            "children": [],
+                        }
+                    ],
+                }
+            ],
+        },
+    }
+
+
 def test_failed_course_fetch_preserves_previous_course_cache(tmp_path, monkeypatch):
     config = {"paths.sync_directory": str(tmp_path)}
     cached_context = make_context(config)
     cached_context.root_node, course_node = course_tree()
     course_cache.cache_root_node(cached_context)
-    cache_path = node_path(cached_context, course_node) / COURSE_CACHE_FILENAME
+    cache_path = course_cache.course_cache_path(cached_context, course_node)
     cached_bytes = cache_path.read_bytes()
     context = make_context(config)
     context.session = FakeSession()
@@ -54,24 +88,211 @@ def test_failed_course_fetch_preserves_previous_course_cache(tmp_path, monkeypat
 
 
 def test_malformed_nested_course_cache_is_ignored(tmp_path, caplog):
-    context = make_context({"paths.sync_directory": str(tmp_path)})
-    _, course_node = course_tree()
-    cache_path = node_path(context, course_node) / COURSE_CACHE_FILENAME
+    config = {"paths.sync_directory": str(tmp_path)}
+    writer = make_context(config)
+    writer.root_node, course_node = course_tree()
+    course_cache.cache_root_node(writer)
+    cache_path = course_cache.course_cache_path(writer, course_node)
+    payload = read_private_gzip_json(cache_path, "course cache")
+    assert isinstance(payload, dict)
+    payload["course"]["children"] = 1
+    write_private_gzip_json(cache_path, payload)
+
+    reader = make_context(config)
+    _, reader_course = course_tree()
+    assert course_cache.get_course_cache_root(reader, reader_course) is None
+    assert "Ignoring malformed course cache" in caplog.text
+
+
+def test_course_cache_survives_course_rename(tmp_path):
+    config = {"paths.sync_directory": str(tmp_path)}
+    seeded = make_context(config)
+    seeded.root_node, course_node = course_tree()
+    course_cache.store_cached_text(
+        seeded,
+        course_node,
+        course_cache.H5P_CONTENT_KIND,
+        11,
+        "marker",
+        "cached page",
+    )
+    course_cache.cache_root_node(seeded)
+
+    loaded = make_context(config)
+    _, renamed_course = course_tree()
+    renamed_course.name = "Renamed Course"
+
+    entry = course_cache.get_cached_text(
+        loaded,
+        renamed_course,
+        course_cache.H5P_CONTENT_KIND,
+        11,
+        "marker",
+    )
+    assert entry is not None
+    assert entry.content == "cached page"
+
+
+def test_tagged_v1_course_cache_is_moved_from_renamed_course_directory(tmp_path):
+    config = {"paths.sync_directory": str(tmp_path)}
+    context = make_context(config)
+    _, old_course = course_tree()
+    legacy_path = node_path(context, old_course) / COURSE_CACHE_FILENAME
+    write_private_gzip_json(legacy_path, tagged_v1_payload())
+
+    _, renamed_course = course_tree()
+    renamed_course.name = "Renamed Course"
+    cached_root = course_cache.get_course_cache_root(context, renamed_course)
+
+    assert cached_root is not None
+    cached_file = cached_root.children[0].children[0]
+    assert cached_file.is_verified
+    assert cached_file.download_kind is DownloadKind.DIRECT
+    cache_path = course_cache.course_cache_path(context, renamed_course)
+    migrated = read_private_gzip_json(cache_path, "course cache")
+    assert isinstance(migrated, dict)
+    assert migrated["format"] == "syncmymoodle.course-cache.v1"
+    assert migrated["identity"] == {
+        "site": MOODLE_URL,
+        "user_id": 10001,
+        "course_id": 301,
+    }
+    assert not legacy_path.exists()
+
+
+def test_legacy_course_cache_from_another_site_is_not_moved(tmp_path):
+    config = {"paths.sync_directory": str(tmp_path)}
+    context = make_context(config)
+    _, course = course_tree()
+    legacy_path = node_path(context, course) / COURSE_CACHE_FILENAME
     write_private_gzip_json(
-        cache_path,
-        {
-            "format": course_cache.COURSE_CACHE_FORMAT,
-            "course": {
-                "name": course_node.name,
-                "id": course_node.id,
-                "type": "Course",
-                "children": 1,
-            },
-        },
+        legacy_path,
+        tagged_v1_payload(site="https://other-moodle.example/"),
     )
 
-    assert course_cache.get_course_cache_root(context, course_node) is None
-    assert "Ignoring malformed course cache" in caplog.text
+    assert course_cache.get_course_cache_root(context, course) is None
+    assert legacy_path.exists()
+    assert not course_cache.course_cache_path(context, course).exists()
+
+
+def test_legacy_cache_drops_personal_data_without_matching_owner(tmp_path):
+    config = {"paths.sync_directory": str(tmp_path)}
+    context = make_context(config)
+    _, course = course_tree()
+    payload = tagged_v1_payload()
+    section_children = payload["course"]["children"][0]["children"]
+    section_children.extend(
+        [
+            {
+                "name": "my-submission.pdf",
+                "id": "submission-id",
+                "type": "Assignment File",
+                "url": f"{MOODLE_URL}pluginfile.php/301/submission.pdf",
+                "download_status": "handled",
+                "children": [],
+            },
+            {
+                "name": "Attempt 1",
+                "id": 123,
+                "type": "Quiz",
+                "url": f"{MOODLE_URL}mod/quiz/review.php?attempt=123",
+                "download_status": "handled",
+                "children": [],
+            },
+        ]
+    )
+    payload[course_cache.MODULE_CACHE_KEY] = {
+        "owner_user_id": 20002,
+        "assignments": {"501": {"since": 1, "files": []}},
+        course_cache.CACHED_TEXT_CACHE_KEY: {
+            course_cache.H5P_CONTENT_KIND: {
+                "11": {"marker": "marker", "content": "shared"}
+            }
+        },
+    }
+    legacy_path = node_path(context, course) / COURSE_CACHE_FILENAME
+    write_private_gzip_json(legacy_path, payload)
+
+    cached_root = course_cache.get_course_cache_root(context, course)
+
+    assert cached_root is not None
+    assert [child.name for child in cached_root.children[0].children] == ["slides.pdf"]
+    migrated = read_private_gzip_json(
+        course_cache.course_cache_path(context, course), "course cache"
+    )
+    assert isinstance(migrated, dict)
+    assert set(migrated[course_cache.MODULE_CACHE_KEY]) == {
+        course_cache.CACHED_TEXT_CACHE_KEY
+    }
+
+
+def test_course_cache_is_isolated_by_moodle_account(tmp_path):
+    config = {"paths.sync_directory": str(tmp_path)}
+    seeded = make_context(config)
+    seeded.root_node, course_node = course_tree()
+    course_cache.cache_root_node(seeded)
+
+    other = make_context(config)
+    other.moodle_account = MoodleAccount(
+        MoodleTokens(
+            "other-user",
+            "other-token",
+            "other-private-token",
+            moodle_user_id=10002,
+        )
+    )
+    _, other_course = course_tree()
+
+    assert course_cache.course_cache_path(
+        seeded, course_node
+    ) != course_cache.course_cache_path(other, other_course)
+    assert course_cache.get_course_cache_root(other, other_course) is None
+
+
+def test_module_handler_failure_preserves_previous_course_cache(
+    tmp_path,
+    monkeypatch,
+):
+    config = {"paths.sync_directory": str(tmp_path)}
+    seeded = make_context(config)
+    seeded.root_node, course_node = course_tree()
+    course_cache.cache_root_node(seeded)
+    cache_path = course_cache.course_cache_path(seeded, course_node)
+    cached_bytes = cache_path.read_bytes()
+
+    monkeypatch.setattr(
+        moodle,
+        "get_all_courses",
+        lambda session, wstoken, user_id: [
+            {"id": 301, "shortname": "Download Course", "idnumber": "26ss"}
+        ],
+    )
+    monkeypatch.setattr(
+        moodle,
+        "get_course",
+        lambda session, wstoken, course_id: [
+            {
+                "id": 401,
+                "name": "General",
+                "modules": [
+                    {"id": 501, "modname": "resource", "name": "Broken module"}
+                ],
+            }
+        ],
+    )
+
+    def fail_module(module_context, module):
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(sync_handlers, "handle_module", fail_module)
+    current = make_context(config)
+    current.session = FakeSession()
+
+    sync.sync(current)
+    course_cache.cache_root_node(current)
+
+    assert current.stats.failed == 1
+    assert cache_path.read_bytes() == cached_bytes
 
 
 def test_cached_module_data_survives_course_name_disambiguation(tmp_path):
@@ -102,12 +323,12 @@ def test_cached_module_data_survives_course_name_disambiguation(tmp_path):
         "second",
     )
 
-    root.remove_children_nameclashes()
+    pathing.resolve_node_path_clashes(root)
     course_cache.cache_root_node(context)
 
     loaded = make_context({"paths.sync_directory": str(tmp_path)})
     loaded_root, loaded_first, loaded_second = colliding_courses(loaded)
-    loaded_root.remove_children_nameclashes()
+    pathing.resolve_node_path_clashes(loaded_root)
 
     assert (
         course_cache.get_cached_text(

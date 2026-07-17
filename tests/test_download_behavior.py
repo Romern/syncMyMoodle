@@ -5,13 +5,21 @@ import os
 import pytest
 import requests
 
-from syncmymoodle import course_cache, downloader, links, moodle, opencast, pathing
+from syncmymoodle import (
+    course_cache,
+    downloader,
+    links,
+    moodle,
+    moodle_files,
+    opencast,
+    pathing,
+)
 from syncmymoodle.constants import COURSE_CACHE_FILENAME, YOUTUBE_WATCH_URL
 from syncmymoodle.downloader import download_file
-from syncmymoodle.node import DownloadKind, Node, RemoteMarkerKind
+from syncmymoodle.node import DownloadKind, DownloadStatus, Node, RemoteMarkerKind
 from syncmymoodle.outcomes import HANDLED_DOWNLOAD
 from syncmymoodle.output import format_size
-from syncmymoodle.storage import write_private_gzip_json
+from syncmymoodle.storage import read_private_gzip_json, write_private_gzip_json
 
 from .helpers import (
     FakeResponse,
@@ -60,6 +68,45 @@ def test_classify_local_file_is_tristate(tmp_path):
     assert classify_local_file(f, None) is FileMatch.UNKNOWN
     assert classify_local_file(f, "") is FileMatch.UNKNOWN
     assert classify_local_file(tmp_path / "nope", sha1(b"x")) is FileMatch.UNKNOWN
+
+
+def test_moodle_content_hash_skips_identical_untracked_file(tmp_path):
+    content = b"already downloaded Moodle file"
+    ctx = make_context(
+        {
+            "paths.sync_directory": str(tmp_path),
+            "downloads.update_files": True,
+            "downloads.conflict_handling": "rename",
+        }
+    )
+    ctx.session = FakeSession()
+    root = Node("", -1, "Root", None)
+    semester = root.add_child("26ss", None, "Semester")
+    course = semester.add_child("Course", 301, "Course")
+    section = course.add_child("General", 401, "Section")
+    file_node = moodle_files.add_moodle_content_file_node(
+        section,
+        {
+            "filename": "slides.pdf",
+            "fileurl": URL,
+            "mimetype": "application/pdf",
+            "timemodified": 1710000300,
+            "filesize": len(content),
+            "contenthash": sha1(content),
+        },
+    )
+    assert file_node is not None
+    download_path = node_path(ctx, file_node)
+    download_path.parent.mkdir(parents=True, exist_ok=True)
+    download_path.write_bytes(content)
+
+    outcome = download_file(ctx, file_node)
+
+    assert outcome.unchanged == 1
+    assert file_node.etag == sha1(content)
+    assert file_node.etag_kind is RemoteMarkerKind.CONTENT_HASH
+    assert ctx.session.calls == []
+    assert list(download_path.parent.glob("*.syncconflict.*")) == []
 
 
 def test_transfer_plan_applies_windows_prefix_to_appended_temp_paths(
@@ -234,6 +281,7 @@ def build_opencast_tree(etag):
         etag=etag,
         etag_kind=RemoteMarkerKind.CONTENT_HASH,
         remote_size=5,
+        download_kind=DownloadKind.OPENCAST,
     )
     return root, video
 
@@ -981,6 +1029,35 @@ def test_conflict_rename_moves_local_file_aside_before_download(tmp_path):
     assert syncer.session.count("GET", URL) == 1
 
 
+def test_identical_staged_update_does_not_create_conflict_copy(tmp_path):
+    syncer, file_node, download_path, local_modified = _setup_conflict(
+        tmp_path, "rename"
+    )
+    _add_new_remote(syncer, local_modified)
+    root = file_node
+    while root.parent is not None:
+        root = root.parent
+    syncer.root_node = root
+
+    downloader.download_node_tree(syncer, root)
+    course_cache.cache_root_node(syncer)
+
+    assert syncer.stats.unchanged == 1
+    assert syncer.stats.updated == 0
+    assert syncer.stats.transferred_bytes == len(local_modified)
+    assert download_path.read_bytes() == local_modified
+    assert file_node.content_hash == sha256(local_modified)
+    assert int(download_path.stat().st_mtime) == 1710000400
+    assert download_path in syncer.downloaded_paths
+    assert list(download_path.parent.glob("*.syncconflict.*")) == []
+    assert not (download_path.parent / f".{download_path.name}.smmpart").exists()
+    loaded = make_context({"paths.sync_directory": str(tmp_path)})
+    cached_file = course_cache.get_old_node_for(loaded, file_node)
+    assert cached_file is not None
+    assert cached_file.timemodified == 1710000400
+    assert cached_file.content_hash == sha256(local_modified)
+
+
 def test_unchanged_timemodified_skips_download_despite_local_edit(tmp_path):
     # When Moodle reports the same timemodified as the cache, the file is
     # considered unchanged remotely and the local copy is left untouched.
@@ -999,6 +1076,43 @@ def test_unchanged_timemodified_skips_download_despite_local_edit(tmp_path):
     assert download_file(syncer, file_node).is_handled
     assert syncer.session.calls == []
     assert list(download_path.parent.glob("*.syncconflict.*")) == []
+
+
+def test_legacy_course_cache_prevents_unchanged_file_false_conflict(tmp_path):
+    config = {
+        "paths.sync_directory": str(tmp_path),
+        "downloads.update_files": True,
+        "downloads.conflict_handling": "rename",
+    }
+    seeded = make_context(config)
+    seeded.root_node, seeded_file = build_single_file_tree(
+        "slides.pdf", URL, timemodified=1710000300
+    )
+    seeded_file.mark_handled()
+    course_node = seeded.root_node.children[0].children[0]
+    course_cache.cache_root_node(seeded)
+    stable_path = course_cache.course_cache_path(seeded, course_node)
+    payload = read_private_gzip_json(stable_path, "course cache")
+    assert isinstance(payload, dict)
+    payload.pop("identity")
+    legacy_path = node_path(seeded, course_node) / COURSE_CACHE_FILENAME
+    write_private_gzip_json(legacy_path, payload)
+    stable_path.unlink()
+
+    current, current_file = make_run_syncer(config, timemodified=1710000300)
+    download_path = node_path(current, current_file)
+    download_path.parent.mkdir(parents=True, exist_ok=True)
+    download_path.write_bytes(b"unchanged remote bytes")
+    os.utime(download_path, (1710000300, 1710000300))
+
+    outcome = download_file(current, current_file)
+
+    assert outcome.unchanged == 1
+    assert current.session.calls == []
+    assert download_path.read_bytes() == b"unchanged remote bytes"
+    assert list(download_path.parent.glob("*.syncconflict.*")) == []
+    assert stable_path.exists()
+    assert not legacy_path.exists()
 
 
 def test_failed_previous_download_is_retried_not_skipped(tmp_path):
@@ -1130,6 +1244,7 @@ def test_missing_opencast_file_authorizes_immediately_before_download(
     current = make_context({"paths.sync_directory": str(tmp_path)})
     current.session = FakeSession()
     current.root_node, video = build_opencast_tree("11111111111111111111111111111111")
+    video.type = "Lecture recording"
     authorized = []
     monkeypatch.setattr(
         opencast,
@@ -1315,7 +1430,7 @@ def test_distinct_files_in_merged_sections_are_both_downloaded(tmp_path):
     syncer = make_context({"paths.sync_directory": str(tmp_path)})
     syncer.session = FakeSession()
     root, first_file, second_file = build_duplicate_section_file_tree()
-    root.remove_children_nameclashes()
+    pathing.resolve_node_path_clashes(root)
     first_path = node_path(syncer, first_file)
     second_path = node_path(syncer, second_file)
     syncer.session.add(
@@ -1801,6 +1916,64 @@ def _cached_file_node(config, course_node):
     return cached_course.children[0].children[0]  # General -> slides.pdf
 
 
+def test_update_disabled_does_not_verify_an_untracked_existing_file(tmp_path):
+    remote = b"server version"
+    local = b"untracked local version"
+    initial_config = {
+        "paths.sync_directory": str(tmp_path),
+        "downloads.update_files": False,
+    }
+    initial = make_context(initial_config)
+    initial.session = FakeSession()
+    root, file_node = build_single_file_tree(
+        "slides.pdf",
+        URL,
+        timemodified=100,
+        etag=sha1(remote),
+    )
+    file_node.etag_kind = RemoteMarkerKind.CONTENT_HASH
+    initial.root_node = root
+    download_path = node_path(initial, file_node)
+    download_path.parent.mkdir(parents=True, exist_ok=True)
+    download_path.write_bytes(local)
+
+    downloader.download_node_tree(initial, root)
+    course_cache.cache_root_node(initial)
+
+    cached_file = course_cache.get_old_node_for(initial, file_node)
+    assert cached_file is not None
+    assert cached_file.download_status is DownloadStatus.SKIPPED
+    assert cached_file.etag is None
+
+    update_config = {
+        "paths.sync_directory": str(tmp_path),
+        "downloads.update_files": True,
+    }
+    current = make_context(update_config)
+    current.session = FakeSession()
+    current.root_node, current_file = build_single_file_tree(
+        "slides.pdf",
+        URL,
+        timemodified=100,
+        etag=sha1(remote),
+    )
+    current_file.etag_kind = RemoteMarkerKind.CONTENT_HASH
+    current.session.add(
+        "GET",
+        URL,
+        FakeResponse(
+            headers={"Content-Type": "application/pdf"},
+            chunks=[remote],
+        ),
+    )
+
+    assert download_file(current, current_file).updated == 1
+    assert download_path.read_bytes() == remote
+    conflicts = list(download_path.parent.glob("*.syncconflict.*"))
+    assert len(conflicts) == 1
+    assert conflicts[0].read_bytes() == local
+
+
 def test_cache_preserves_markers_for_failed_download_over_existing_file(tmp_path):
     config = {"paths.sync_directory": str(tmp_path), "downloads.update_files": True}
     v1 = b"version one"
@@ -1825,74 +1998,6 @@ def test_cache_preserves_markers_for_failed_download_over_existing_file(tmp_path
     assert cached_file.timemodified == 100
     assert cached_file.etag == sha1(v1)
     assert cached_file.is_handled is True
-
-
-def test_legacy_is_downloaded_cache_key_is_read_as_handled(tmp_path):
-    config = {"paths.sync_directory": str(tmp_path), "downloads.update_files": True}
-    content = b"legacy cached file"
-    root, cached_file = build_single_file_tree(
-        "slides.pdf", URL, timemodified=100, etag=sha1(content)
-    )
-    course_node = root.children[0].children[0]
-    course_path = node_path(make_context(config), course_node)
-    course_path.mkdir(parents=True, exist_ok=True)
-    write_private_gzip_json(
-        course_path / COURSE_CACHE_FILENAME,
-        {
-            "format": course_cache.COURSE_CACHE_FORMAT,
-            "course": {
-                "name": course_node.name,
-                "id": course_node.id,
-                "type": course_node.type,
-                "children": [
-                    {
-                        "name": cached_file.parent.name,
-                        "id": cached_file.parent.id,
-                        "type": cached_file.parent.type,
-                        "children": [
-                            {
-                                "name": cached_file.name,
-                                "id": cached_file.id,
-                                "type": cached_file.type,
-                                "url": cached_file.url,
-                                "timemodified": cached_file.timemodified,
-                                "etag": cached_file.etag,
-                                "is_downloaded": True,
-                            }
-                        ],
-                    }
-                ],
-            },
-        },
-    )
-
-    syncer, current_file = make_run_syncer(config, timemodified=100)
-    download_path = node_path(syncer, current_file)
-    download_path.parent.mkdir(parents=True, exist_ok=True)
-    download_path.write_bytes(content)
-
-    assert download_file(syncer, current_file).is_handled
-    assert syncer.session.calls == []
-    assert download_path.read_bytes() == content
-    assert course_cache.get_old_node_for(syncer, current_file).is_handled is True
-
-
-@pytest.mark.parametrize(
-    ("node_type", "expected_kind"),
-    [
-        ("Youtube", DownloadKind.YOUTUBE),
-        ("Emedia", DownloadKind.EMEDIA),
-        ("Quiz", DownloadKind.QUIZ),
-        ("Opencast", DownloadKind.OPENCAST),
-        ("Linked file [application/pdf]", DownloadKind.DIRECT),
-    ],
-)
-def test_legacy_cache_derives_download_kind_from_node_type(node_type, expected_kind):
-    node = course_cache.node_from_cache_data(
-        {"name": "cached", "type": node_type, "children": []}
-    )
-
-    assert node.download_kind is expected_kind
 
 
 def test_course_cache_round_trips_remote_size(tmp_path):

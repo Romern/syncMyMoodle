@@ -14,7 +14,7 @@ from typing import Any
 import requests
 import yt_dlp
 
-from syncmymoodle import course_cache, filters, links, opencast, pathing, quiz
+from syncmymoodle import course_cache, filters, links, opencast, pathing, quiz, storage
 from syncmymoodle.constants import (
     DEFAULT_BLOCK_SIZE,
     HASH_ALGOS_BY_LENGTH,
@@ -37,8 +37,9 @@ from syncmymoodle.http_utils import (
 from syncmymoodle.node import DownloadKind, Node, RemoteMarkerKind
 from syncmymoodle.outcomes import (
     FAILED_DOWNLOAD,
-    HANDLED_DOWNLOAD,
     PLANNED_DOWNLOAD,
+    POLICY_SKIPPED_DOWNLOAD,
+    SKIPPED_DOWNLOAD,
     UNCHANGED_DOWNLOAD,
     DownloadOutcome,
     completed_download,
@@ -95,6 +96,7 @@ class DownloadDecision(Enum):
 
     DOWNLOAD = "download"
     SKIP = "skip"
+    POLICY_SKIP = "policy_skip"
     CONFLICT = "conflict"
 
 
@@ -302,7 +304,7 @@ def conditional_get_confirms_unchanged(
     download_origin = normalized_http_origin(node.url)
     if download_origin and ctx.service_outages.should_skip(download_origin):
         return False
-    if node.type == "Opencast":
+    if node.download_kind is DownloadKind.OPENCAST:
         if ctx.config.dry_run:
             return False
         authorized, _ = authorize_opencast_download(ctx, node, log)
@@ -398,6 +400,15 @@ def assess_local_copy(
     cached_timemodified: Any,
 ) -> LocalCopyState:
     """Classify the on-disk file when the remote may have changed."""
+    remote_etag = getattr(node, "etag", None)
+    remote_etag_kind = node.etag_kind
+    if (
+        remote_etag_kind == RemoteMarkerKind.CONTENT_HASH
+        and classify_local_file(downloadpath, remote_etag) is FileMatch.MATCH
+    ):
+        align_mtime_with_timemodified(node, downloadpath)
+        return LocalCopyState.UP_TO_DATE
+
     verdict = classify_local_file(downloadpath, local_verification_marker(old_node))
     if verdict is FileMatch.MATCH:
         return LocalCopyState.CLEAN
@@ -412,16 +423,6 @@ def assess_local_copy(
         except (OSError, ValueError):
             return LocalCopyState.MODIFIED
 
-    remote_etag = getattr(node, "etag", None)
-    remote_etag_kind = node.etag_kind
-    if (
-        remote_etag_kind == RemoteMarkerKind.CONTENT_HASH
-        and classify_local_file(downloadpath, remote_etag) is FileMatch.MATCH
-    ):
-        node.etag = remote_etag
-        node.etag_kind = remote_etag_kind
-        align_mtime_with_timemodified(node, downloadpath)
-        return LocalCopyState.UP_TO_DATE
     return LocalCopyState.MODIFIED
 
 
@@ -437,22 +438,21 @@ def decide_download(
     if not downloadpath.exists():
         return DownloadDecision.DOWNLOAD
     if not ctx.config.update_files:
-        return DownloadDecision.SKIP
+        return DownloadDecision.POLICY_SKIP
 
     old_node = course_cache.get_old_node_for(ctx, node, log)
-    if old_node is not None and not old_node.is_handled:
+    if old_node is not None and not old_node.is_verified:
         old_node = None
     cached_timemodified = (
         getattr(old_node, "timemodified", None) if old_node is not None else None
     )
 
+    verdict = assess_local_copy(node, downloadpath, old_node, cached_timemodified)
+    if verdict is LocalCopyState.UP_TO_DATE:
+        return DownloadDecision.SKIP
     if old_node is not None and remote_unchanged(
         ctx, node, old_node, cached_timemodified, log
     ):
-        return DownloadDecision.SKIP
-
-    verdict = assess_local_copy(node, downloadpath, old_node, cached_timemodified)
-    if verdict is LocalCopyState.UP_TO_DATE:
         return DownloadDecision.SKIP
     if verdict is LocalCopyState.MODIFIED:
         return DownloadDecision.CONFLICT
@@ -463,7 +463,7 @@ def should_skip_before_decision(
     ctx: SyncContext, node: Node, downloadpath: Path
 ) -> DownloadOutcome | None:
     if filters.should_skip_url(ctx, node.url, f"{node.type} file"):
-        return HANDLED_DOWNLOAD
+        return SKIPPED_DOWNLOAD
     extension = node.name.split(".")[-1]
     if extension in ctx.config.exclude_filetypes:
         ctx.record_filtered(
@@ -472,7 +472,7 @@ def should_skip_before_decision(
             str(downloadpath),
             f"extension {extension!r} is excluded",
         )
-        return HANDLED_DOWNLOAD
+        return SKIPPED_DOWNLOAD
     pattern = next(
         (
             pattern
@@ -488,7 +488,7 @@ def should_skip_before_decision(
             str(downloadpath),
             f"matches {pattern!r}",
         )
-        return HANDLED_DOWNLOAD
+        return SKIPPED_DOWNLOAD
     if downloadpath in ctx.downloaded_paths:
         return UNCHANGED_DOWNLOAD
     return None
@@ -605,7 +605,7 @@ def planned_download_action(
     early_outcome = should_skip_before_decision(ctx, node, downloadpath)
     if early_outcome is not None:
         return early_outcome
-    if node.type == "Opencast":
+    if node.download_kind is DownloadKind.OPENCAST:
         course_node = _opencast_course_node(node)
         course_id = course_node.id if course_node is not None else None
         if opencast.episode_metadata_is_stale(
@@ -614,7 +614,7 @@ def planned_download_action(
             str(node.id or ""),
         ):
             if downloadpath.exists() and not ctx.config.update_files:
-                return UNCHANGED_DOWNLOAD
+                return POLICY_SKIPPED_DOWNLOAD
             log.warning(
                 "Skipping Opencast download %s because its metadata could not be "
                 "refreshed",
@@ -622,9 +622,11 @@ def planned_download_action(
             )
             return FAILED_DOWNLOAD
     if known_remote_size_violates_limit(ctx, node, downloadpath):
-        return HANDLED_DOWNLOAD
+        return SKIPPED_DOWNLOAD
 
     decision = decide_download(ctx, node, downloadpath, log)
+    if decision is DownloadDecision.POLICY_SKIP:
+        return POLICY_SKIPPED_DOWNLOAD
     if decision is DownloadDecision.SKIP:
         return UNCHANGED_DOWNLOAD
     action = (
@@ -633,7 +635,7 @@ def planned_download_action(
         else ConflictAction.DOWNLOAD
     )
     if action == ConflictAction.SKIP:
-        return UNCHANGED_DOWNLOAD
+        return POLICY_SKIPPED_DOWNLOAD
     return action
 
 
@@ -776,27 +778,15 @@ def install_downloaded_file(
     action: ConflictAction,
     log: logging.Logger = logger,
 ) -> bool:
-    if action == ConflictAction.RENAME_LOCAL:
-        conflict_path = pathing.make_conflict_path(downloadpath)
-        try:
-            downloadpath.rename(conflict_path)
-            log.warning(
-                "Detected local changes for %s, moved to %s before installing "
-                "the updated file from Moodle",
-                downloadpath,
-                conflict_path,
-            )
-        except OSError:
-            log.exception(
-                "Failed to move locally modified file %s to %s; keeping it "
-                "and discarding the downloaded update to avoid data loss",
-                downloadpath,
-                conflict_path,
-            )
-            transfer.discard_partial()
-            return False
-
-    os.replace(transfer.tmp_path, downloadpath)
+    if not storage.install_staged_file(
+        transfer.tmp_path,
+        downloadpath,
+        rename_local=action is ConflictAction.RENAME_LOCAL,
+        description="the updated file from Moodle",
+        log=log,
+    ):
+        transfer.discard_partial()
+        return False
     transfer.etag_sidecar.unlink(missing_ok=True)
     return True
 
@@ -805,12 +795,9 @@ def record_download_metadata(
     node: Node,
     downloadpath: Path,
     etag_header: str | None,
+    content_hash: str | None = None,
 ) -> None:
-    try:
-        with downloadpath.open("rb") as fh:
-            node.content_hash = hashlib.file_digest(fh, "sha256").hexdigest()
-    except OSError:
-        pass
+    node.content_hash = content_hash or storage.file_sha256(downloadpath)
 
     align_mtime_with_timemodified(node, downloadpath)
 
@@ -837,7 +824,7 @@ def process_download_response(
     if not download_response_is_usable(node, response, downloadpath, log):
         return FAILED_DOWNLOAD
     if download_violates_size_limits(ctx, node, response, resume_size, downloadpath):
-        return HANDLED_DOWNLOAD
+        return SKIPPED_DOWNLOAD
 
     if ctx.config.dry_run:
         return report_planned_download(ctx, downloadpath, node.type)
@@ -858,9 +845,19 @@ def process_download_response(
         content,
         first_chunk,
     )
+    staged_hash = storage.file_sha256(transfer.tmp_path)
+    local_hash = storage.file_sha256(downloadpath) if downloadpath.exists() else None
+    if staged_hash is not None and staged_hash == local_hash:
+        transfer.discard_partial()
+        record_download_metadata(node, downloadpath, etag_header, staged_hash)
+        ctx.downloaded_paths.add(downloadpath)
+        return DownloadOutcome(
+            unchanged=1,
+            transferred_bytes=transferred_bytes,
+        )
     if not install_downloaded_file(downloadpath, transfer, action, log):
         return FAILED_DOWNLOAD
-    record_download_metadata(node, downloadpath, etag_header)
+    record_download_metadata(node, downloadpath, etag_header, staged_hash)
     ctx.downloaded_paths.add(downloadpath)
     return completed_download(existed=existed, transferred_bytes=transferred_bytes)
 
@@ -940,12 +937,12 @@ def download_file(
     action = action_or_outcome
 
     if ctx.config.dry_run and (
-        node.type == "Opencast" or not size_limits_configured(ctx)
+        node.download_kind is DownloadKind.OPENCAST or not size_limits_configured(ctx)
     ):
         return report_planned_download(ctx, downloadpath, node.type)
 
     opencast_course_id: Any = None
-    if node.type == "Opencast":
+    if node.download_kind is DownloadKind.OPENCAST:
         authorized, opencast_course_id = authorize_opencast_download(ctx, node, log)
         if not authorized:
             return FAILED_DOWNLOAD
@@ -993,7 +990,7 @@ def download_file(
             log,
         )
         if (
-            node.type == "Opencast"
+            node.download_kind is DownloadKind.OPENCAST
             and not outcome.is_handled
             and (
                 response.status_code in {401, 403, 404, 410}
@@ -1070,7 +1067,10 @@ def download_node_tree(
         outcome = download_leaf(ctx, node, log)
         ctx.stats.record_download(outcome)
         if outcome.is_handled:
-            node.mark_handled()
+            if outcome.cache_verified:
+                node.mark_handled()
+            else:
+                node.mark_skipped()
         progress.finish_item(index)
 
 
@@ -1090,7 +1090,7 @@ def download_emedia_video(
         return action_or_outcome
     action = action_or_outcome
     if cached_yt_dlp_size_violates_limit(ctx, node, downloadpath, log):
-        return HANDLED_DOWNLOAD
+        return SKIPPED_DOWNLOAD
     if ctx.config.dry_run and not size_limits_configured(ctx):
         return report_planned_download(ctx, downloadpath, "Emedia")
 
@@ -1117,7 +1117,7 @@ def download_emedia_video(
         ydl_opts["fixup"] = "never"
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
         if yt_dlp_violates_size_limits(ctx, ydl, node, node.url, "emedia video"):
-            return HANDLED_DOWNLOAD
+            return SKIPPED_DOWNLOAD
         if ctx.config.dry_run:
             return report_planned_download(ctx, downloadpath, "Emedia")
         ctx.output.action("Downloading", downloadpath, "Emedia")
@@ -1167,7 +1167,7 @@ def scan_and_download_youtube(
     path = pathing.get_sanitized_node_path(node.parent, Path(ctx.config.sync_directory))
     link = node.url
     if filters.should_skip_url(ctx, link, "YouTube link"):
-        return HANDLED_DOWNLOAD
+        return SKIPPED_DOWNLOAD
     video_id = links.youtube_video_id_from_node(node)
     if youtube_download_exists(path, video_id):
         return UNCHANGED_DOWNLOAD
@@ -1179,7 +1179,7 @@ def scan_and_download_youtube(
             verb="Would download YouTube video",
         )
     if cached_yt_dlp_size_violates_limit(ctx, node, path, log):
-        return HANDLED_DOWNLOAD
+        return SKIPPED_DOWNLOAD
     outtmpl = pathing.with_windows_extended_length_prefix(
         path / "%(title)s-%(id)s.%(ext)s",
         force=True,
@@ -1195,7 +1195,7 @@ def scan_and_download_youtube(
     }
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
         if yt_dlp_violates_size_limits(ctx, ydl, node, link, "YouTube video"):
-            return HANDLED_DOWNLOAD
+            return SKIPPED_DOWNLOAD
         if ctx.config.dry_run:
             return report_planned_download(
                 ctx,
@@ -1228,7 +1228,7 @@ def cached_yt_dlp_size_violates_limit(
     log: logging.Logger = logger,
 ) -> bool:
     old_node = course_cache.get_old_node_for(ctx, node, log)
-    if old_node is None or not old_node.is_handled or old_node.remote_size is None:
+    if old_node is None or not old_node.is_verified or old_node.remote_size is None:
         return False
     node.remote_size = old_node.remote_size
     return known_remote_size_violates_limit(ctx, node, path)

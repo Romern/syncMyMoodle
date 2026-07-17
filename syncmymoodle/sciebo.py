@@ -81,7 +81,12 @@ def scan_public_shares(
         if _reuse_cached_share(ctx, link, parent_node):
             continue
         ctx.output.sync_progress.module_status("connecting to Sciebo share")
-        _scan_new_share(ctx, link, parent_node, log)
+        if not _scan_new_share(ctx, link, parent_node, log):
+            current: Node | None = parent_node
+            while current is not None and current.type != "Course":
+                current = current.parent
+            if current is not None:
+                ctx.mark_course_incomplete(current.id)
 
 
 def _reuse_cached_share(
@@ -173,18 +178,18 @@ def _scan_new_share(
     link: str,
     parent_node: Node,
     log: logging.Logger,
-) -> None:
+) -> bool:
     share_auth = _share_auth_headers(ctx, link, log)
     if share_auth is None:
         ctx.sciebo_link_cache[link] = None
-        return
+        return False
     sharing_token, auth_headers = share_auth
 
     sciebo_root = parent_node.add_child(
         f"sciebo-{sharing_token}", None, "Sciebo Folder"
     )
     if sciebo_root is None:
-        return
+        return True
 
     if _add_sciebo_files(
         ctx,
@@ -196,10 +201,11 @@ def _scan_new_share(
     ):
         ctx.service_outages.record_available(SCIEBO_URL)
         ctx.sciebo_link_cache[link] = sciebo_root.clone()
-        return
+        return True
 
     parent_node.children.remove(sciebo_root)
     ctx.sciebo_link_cache[link] = None
+    return False
 
 
 def _fetch_webdav_listing(

@@ -356,6 +356,7 @@ def _scan_single_link(
         return False
     course_key = str(course_id)
     cache = ctx.linked_resources_by_course.setdefault(course_key, {})
+    cached_resource = cache.get(url)
     ctx.seen_linked_resources.add((course_key, url))
     if url in ctx.linked_resource_results:
         resource = ctx.linked_resource_results[url]
@@ -371,6 +372,8 @@ def _scan_single_link(
             cache.pop(url, None)
 
     if resource is None:
+        if cached_resource is not None:
+            ctx.mark_course_incomplete(course_id)
         return False
     if resource.html is None:
         parent_node.add_child(

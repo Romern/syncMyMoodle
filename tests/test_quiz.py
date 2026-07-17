@@ -1,8 +1,9 @@
+import hashlib
 import subprocess
 from types import SimpleNamespace
 
-from syncmymoodle import quiz, sync_handlers
-from syncmymoodle.node import DownloadKind, Node
+from syncmymoodle import course_cache, quiz, sync_handlers
+from syncmymoodle.node import DownloadKind, Node, RemoteMarkerKind
 
 from .helpers import FakeResponse, FakeSession, make_context
 
@@ -158,6 +159,9 @@ def test_quiz_api_review_preserves_grade_and_feedback_titles(monkeypatch, tmp_pa
     assert "<h2>Grade</h2><p>9.00 &lt; 10.00</p>" in review
     assert "<div>Question body</div>" in review
     assert "<h2>Overall &lt;feedback&gt;</h2><p>Great</p>" in review
+    quiz_attempt = module_context.section_node.children[0]
+    assert quiz_attempt.etag == hashlib.sha256(review.encode("utf-8")).hexdigest()
+    assert quiz_attempt.etag_kind is RemoteMarkerKind.OPAQUE
 
 
 def test_quiz_node_keeps_remote_name_until_path_materialization(monkeypatch):
@@ -304,6 +308,43 @@ def test_html_mode_is_idempotent(tmp_path, capsys):
     assert ctx.session.count("GET", QUIZ_URL) == 0
 
 
+def test_changed_quiz_review_replaces_an_unmodified_snapshot(tmp_path):
+    def quiz_tree(review_html):
+        root = Node("", -1, "Root", None)
+        semester = root.add_child("26ss", None, "Semester")
+        course = semester.add_child("Course", 301, "Course")
+        section = course.add_child("General", 401, "Section")
+        attempt = section.add_child(
+            "My Quiz, Versuch 1",
+            5,
+            "Quiz",
+            url=QUIZ_URL,
+            etag=hashlib.sha256(review_html.encode("utf-8")).hexdigest(),
+            etag_kind=RemoteMarkerKind.OPAQUE,
+            download_kind=DownloadKind.QUIZ,
+        )
+        return root, attempt
+
+    first = quiz_context(tmp_path, "html")
+    first.root_node, first_node = quiz_tree(QUIZ_HTML)
+    assert quiz.download_quiz(first, first_node).downloaded == 1
+    first_node.mark_handled()
+    course_cache.cache_root_node(first)
+
+    updated_review = QUIZ_HTML.replace("My answer", "Updated answer")
+    current = quiz_context(tmp_path, "html")
+    current.config.update_files = True
+    current.quiz_review_cache[QUIZ_URL] = updated_review
+    current.root_node, current_node = quiz_tree(updated_review)
+
+    outcome = quiz.download_quiz(current, current_node)
+
+    html_path = tmp_path / "26ss" / "Course" / "General" / "My Quiz, Versuch 1.html"
+    assert outcome.updated == 1
+    assert "Updated answer" in html_path.read_text(encoding="utf-8")
+    assert list(html_path.parent.glob("*.syncconflict.*")) == []
+
+
 def test_pdf_mode_removes_html_on_success(tmp_path, monkeypatch, capsys):
     def fake_render(browser, html_path, pdf_path, log=quiz.logger):
         pdf_path.write_bytes(b"%PDF-1.4 fake")
@@ -336,6 +377,24 @@ def test_pdf_mode_keeps_html_when_no_browser(tmp_path, monkeypatch):
     # failure so the missing requested PDF is retried on future runs.
     assert (tmp_path / "root" / "My Quiz, Versuch 1.html").exists()
     assert not (tmp_path / "root" / "My Quiz, Versuch 1.pdf").exists()
+
+
+def test_pdf_mode_retry_removes_generated_html_fallback(tmp_path, monkeypatch):
+    monkeypatch.setattr(quiz, "find_chromium", lambda *a, **k: None)
+    ctx = quiz_context(tmp_path, "pdf")
+    node = quiz_node()
+    assert not quiz.download_quiz(ctx, node).is_handled
+
+    def fake_render(browser, html_path, pdf_path, log=quiz.logger):
+        pdf_path.write_bytes(b"%PDF-1.4 fake")
+        return True
+
+    monkeypatch.setattr(quiz, "find_chromium", lambda *a, **k: "/fake/chrome")
+    monkeypatch.setattr(quiz, "render_pdf_with_chromium", fake_render)
+
+    assert quiz.download_quiz(ctx, node).is_handled
+    assert not (tmp_path / "root" / "My Quiz, Versuch 1.html").exists()
+    assert (tmp_path / "root" / "My Quiz, Versuch 1.pdf").exists()
 
 
 def test_both_mode_retries_pdf_without_refetching(tmp_path, monkeypatch):

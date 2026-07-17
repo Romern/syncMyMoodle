@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import hashlib
 import html
 import ntpath
@@ -9,12 +10,9 @@ import sys
 import urllib.parse
 from dataclasses import dataclass
 from pathlib import Path, PureWindowsPath
-from typing import TYPE_CHECKING
 
 from syncmymoodle.constants import INVALID_CHARS
-
-if TYPE_CHECKING:
-    from syncmymoodle.node import Node
+from syncmymoodle.node import DownloadKind, Node
 
 WINDOWS_EXTENDED_PATH_THRESHOLD = 240
 # Leave room for download sidecars and ``.syncconflict`` suffixes while staying
@@ -132,6 +130,136 @@ def sanitized_node_path_parts(node: Node) -> tuple[str, ...]:
         for index, part in enumerate(node.get_path())
         if not (index == 0 and part == "")
     )
+
+
+def _clash_suffix(node: Node) -> str:
+    # A URL identifies the actual downloadable file, including direct-link
+    # nodes whose name_clash_id is None. Non-downloadable nodes such as courses
+    # fall back to their stable Moodle id.
+    key = node.url if node.url is not None else node.name_clash_id
+    digest = hashlib.md5(str(key).encode("utf-8"), usedforsecurity=False).hexdigest()
+    return base64.urlsafe_b64encode(digest.encode("utf-8")).decode()[:10]
+
+
+def _stable_clash_name(node: Node) -> str:
+    filename = Path(node.name)
+    return f"{filename.stem}_{_clash_suffix(node)}{filename.suffix}"
+
+
+def _opencast_clash_name(node: Node) -> str:
+    return f"{Path(node.name).name}_{str(node.url).split('/')[-1]}"
+
+
+def _filesystem_name_key(node: Node) -> str:
+    return sanitize_path_part(node.name).casefold()
+
+
+def _filesystem_path_key(node: Node) -> tuple[str, ...]:
+    return tuple(part.casefold() for part in sanitized_node_path_parts(node))
+
+
+def _general_name_clash(left: Node, right: Node) -> bool:
+    if _filesystem_name_key(left) != _filesystem_name_key(right):
+        return False
+    if left.url != right.url:
+        return True
+    return (
+        left.type == "Course"
+        and right.type == "Course"
+        and left.name_clash_id != right.name_clash_id
+    )
+
+
+def _apply_opencast_name_clashes(children: list[Node]) -> list[Node]:
+    remaining = children.copy()
+    renamed: list[Node] = []
+
+    while remaining:
+        child = remaining.pop(0)
+        renamed.append(child)
+        if child.download_kind is not DownloadKind.OPENCAST:
+            continue
+
+        siblings = [
+            sibling
+            for sibling in remaining
+            if _filesystem_name_key(sibling) == _filesystem_name_key(child)
+            and sibling.url != child.url
+        ]
+        if not siblings:
+            continue
+
+        child.name = _opencast_clash_name(child)
+        for sibling in siblings:
+            sibling.name = _opencast_clash_name(sibling)
+            remaining.remove(sibling)
+            renamed.append(sibling)
+
+    return renamed
+
+
+def _apply_general_name_clashes(children: list[Node]) -> list[Node]:
+    remaining = children.copy()
+    renamed: list[Node] = []
+
+    while remaining:
+        child = remaining.pop(0)
+        renamed.append(child)
+        siblings = [
+            sibling for sibling in remaining if _general_name_clash(child, sibling)
+        ]
+        if not siblings:
+            continue
+
+        child.name = _stable_clash_name(child)
+        for sibling in siblings:
+            sibling.name = _stable_clash_name(sibling)
+            remaining.remove(sibling)
+            renamed.append(sibling)
+
+    return renamed
+
+
+def _resolve_sibling_name_clashes(node: Node) -> None:
+    node.children = _apply_opencast_name_clashes(node.children)
+    node.children = _apply_general_name_clashes(node.children)
+    for child in node.children:
+        _resolve_sibling_name_clashes(child)
+
+
+def _resolve_download_path_clashes(root: Node) -> None:
+    download_nodes: list[Node] = []
+    remaining = [root]
+    while remaining:
+        node = remaining.pop()
+        remaining.extend(node.children)
+        if node.url:
+            download_nodes.append(node)
+
+    # Each pass either resolves every collision or moves a colliding file away
+    # from a pre-existing generated name. At most one such name can be consumed
+    # per file; the bound prevents a malformed tree from looping.
+    for _ in range(len(download_nodes) + 1):
+        nodes_by_path: dict[tuple[str, ...], list[Node]] = {}
+        for node in download_nodes:
+            nodes_by_path.setdefault(_filesystem_path_key(node), []).append(node)
+        clashes = [
+            nodes
+            for nodes in nodes_by_path.values()
+            if len({node.url for node in nodes}) > 1
+        ]
+        if not clashes:
+            return
+        for nodes in clashes:
+            for node in nodes:
+                node.name = _stable_clash_name(node)
+    raise ValueError("Could not create unique paths for downloaded files")
+
+
+def resolve_node_path_clashes(root: Node) -> None:
+    """Make every materialized node path unique on supported filesystems."""
+    _resolve_sibling_name_clashes(root)
+    _resolve_download_path_clashes(root)
 
 
 def windows_extended_length_path(path: str) -> str:

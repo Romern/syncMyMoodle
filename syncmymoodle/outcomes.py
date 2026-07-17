@@ -24,6 +24,7 @@ class DownloadOutcome:
     unchanged: int = 0
     planned: int = 0
     transferred_bytes: int = 0
+    cache_verified: bool = True
 
     @property
     def is_handled(self) -> bool:
@@ -46,13 +47,19 @@ class DownloadOutcome:
             unchanged=self.unchanged + other.unchanged,
             planned=self.planned + other.planned,
             transferred_bytes=self.transferred_bytes + other.transferred_bytes,
+            cache_verified=self.cache_verified and other.cache_verified,
         )
 
 
 HANDLED_DOWNLOAD = DownloadOutcome()
-FAILED_DOWNLOAD = DownloadOutcome(state=DownloadState.FAILED)
+SKIPPED_DOWNLOAD = DownloadOutcome(cache_verified=False)
+POLICY_SKIPPED_DOWNLOAD = DownloadOutcome(unchanged=1, cache_verified=False)
+FAILED_DOWNLOAD = DownloadOutcome(
+    state=DownloadState.FAILED,
+    cache_verified=False,
+)
 UNCHANGED_DOWNLOAD = DownloadOutcome(unchanged=1)
-PLANNED_DOWNLOAD = DownloadOutcome(planned=1)
+PLANNED_DOWNLOAD = DownloadOutcome(planned=1, cache_verified=False)
 
 
 def completed_download(*, existed: bool, transferred_bytes: int = 0) -> DownloadOutcome:

@@ -617,20 +617,28 @@ def _get_course_module_instances(
     course_id: int,
     function: str,
     response_key: str,
-) -> list[dict[str, Any]]:
+) -> list[dict[str, Any]] | None:
     payload = call_webservice(
         session,
         wstoken,
         function,
         {"courseids[0]": course_id},
     )
-    instances = payload.get(response_key) if isinstance(payload, dict) else None
-    return [item for item in instances or [] if isinstance(item, dict)]
+    return _dict_list_field(payload, response_key)
+
+
+def _dict_list_field(payload: Any, key: str) -> list[dict[str, Any]] | None:
+    if not isinstance(payload, dict):
+        return None
+    value = payload.get(key)
+    if not isinstance(value, list) or not all(isinstance(item, dict) for item in value):
+        return None
+    return value
 
 
 def get_ltis_by_course(
     session: requests.Session, wstoken: str, course_id: int
-) -> list[dict[str, Any]]:
+) -> list[dict[str, Any]] | None:
     return _get_course_module_instances(
         session, wstoken, course_id, "mod_lti_get_ltis_by_courses", "ltis"
     )
@@ -647,7 +655,7 @@ def get_lti_launch_data(
 
 def get_h5pactivities_by_course(
     session: requests.Session, wstoken: str, course_id: int
-) -> list[dict[str, Any]]:
+) -> list[dict[str, Any]] | None:
     return _get_course_module_instances(
         session,
         wstoken,
@@ -659,7 +667,7 @@ def get_h5pactivities_by_course(
 
 def get_quizzes_by_course(
     session: requests.Session, wstoken: str, course_id: int
-) -> list[dict[str, Any]]:
+) -> list[dict[str, Any]] | None:
     return _get_course_module_instances(
         session, wstoken, course_id, "mod_quiz_get_quizzes_by_courses", "quizzes"
     )
@@ -958,7 +966,7 @@ def get_folders_by_courses(
     wstoken: str,
     course_id: Any,
     log: logging.Logger = logger,
-) -> Any:
+) -> list[dict[str, Any]] | None:
     payload = call_webservice(
         session,
         wstoken,
@@ -970,6 +978,4 @@ def get_folders_by_courses(
         },
         log,
     )
-    if not isinstance(payload, dict):
-        return []
-    return payload.get("folders") or []
+    return _dict_list_field(payload, "folders")

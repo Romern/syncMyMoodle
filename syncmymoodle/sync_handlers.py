@@ -1,3 +1,4 @@
+import hashlib
 import html
 import io
 import logging
@@ -16,7 +17,7 @@ from syncmymoodle import links as links_api
 from syncmymoodle import moodle as moodle_api
 from syncmymoodle import opencast as opencast_api
 from syncmymoodle.constants import HTTP_TIMEOUT_SECONDS, MOODLE_URL
-from syncmymoodle.context import SyncContext
+from syncmymoodle.context import ModuleInstanceCache, SyncContext
 from syncmymoodle.http_utils import (
     HTML_CONTENT_TYPES,
     content_length,
@@ -26,7 +27,7 @@ from syncmymoodle.http_utils import (
     read_capped_body,
     safe_request_error,
 )
-from syncmymoodle.node import DownloadKind, Node
+from syncmymoodle.node import DownloadKind, Node, RemoteMarkerKind
 
 logger = logging.getLogger(__name__)
 H5P_PACKAGE_MAX_BYTES = 2 * 1024**3
@@ -51,6 +52,9 @@ class ModuleContext:
 
     def status(self, message: str) -> None:
         self.ctx.output.sync_progress.module_status(message)
+
+    def mark_incomplete(self) -> None:
+        self.ctx.mark_course_incomplete(self.course_node.id)
 
 
 @dataclass(frozen=True)
@@ -361,20 +365,38 @@ def _read_h5p_content(
 
 
 def module_instance(
-    ctx: SyncContext,
+    module_context: ModuleContext,
     module: dict[str, Any],
-    course_id: Any,
-    cache: dict[int, dict[str, Any]],
-    fetch: Callable[[Any, str, int], list[dict[str, Any]]],
+    cache: ModuleInstanceCache,
+    fetch: Callable[[Any, str, int], list[dict[str, Any]] | None],
 ) -> dict[str, Any] | None:
+    ctx = module_context.ctx
     module_id = int(module["id"])
-    if module_id not in cache:
+    course_id = int(module_context.course_id)
+    if course_id not in cache:
         account = ctx.require_moodle_account()
-        for item in fetch(ctx.require_session(), account.wstoken, int(course_id)):
-            course_module = item.get("coursemodule")
-            if isinstance(course_module, int):
-                cache[course_module] = item
-    return cache.get(module_id)
+        items = fetch(ctx.require_session(), account.wstoken, course_id)
+        if items is None:
+            cache[course_id] = None
+            module_context.mark_incomplete()
+        else:
+            instances: dict[int, dict[str, Any]] = {}
+            for item in items:
+                course_module = item.get("coursemodule")
+                if (
+                    not isinstance(course_module, int)
+                    or isinstance(course_module, bool)
+                    or course_module <= 0
+                    or course_module in instances
+                ):
+                    cache[course_id] = None
+                    module_context.mark_incomplete()
+                    break
+                instances[course_module] = item
+            else:
+                cache[course_id] = instances
+    course_instances = cache[course_id]
+    return course_instances.get(module_id) if course_instances is not None else None
 
 
 def _assignment_submission_files(
@@ -406,6 +428,7 @@ def _assignment_submission_files(
         assignment_id,
     )
     if fetched is None:
+        module_context.mark_incomplete()
         return None
     return [item for item in fetched if isinstance(item, dict)]
 
@@ -429,6 +452,7 @@ def _add_assignment_file_nodes(
             item["fileurl"],
             timemodified=item.get("timemodified"),
             remote_size=item.get("filesize"),
+            remote_content_hash=item.get("contenthash"),
         )
 
 
@@ -576,6 +600,7 @@ def handle_folder_module(
                 c["fileurl"],
                 timemodified=c.get("timemodified"),
                 remote_size=c.get("filesize"),
+                remote_content_hash=c.get("contenthash"),
             )
 
 
@@ -669,6 +694,7 @@ def _fetch_page(
             safe_request_error(error),
         )
         module_context.ctx.stats.failed += 1
+        module_context.mark_incomplete()
         return None
     if 200 <= response.status_code < 300:
         return response
@@ -678,6 +704,7 @@ def _fetch_page(
         response.status_code,
     )
     module_context.ctx.stats.failed += 1
+    module_context.mark_incomplete()
     return None
 
 
@@ -822,9 +849,8 @@ def _handle_h5p_links(
     ctx = module_context.ctx
     module_context.status("loading H5P activity")
     activity = module_instance(
-        ctx,
+        module_context,
         module,
-        module_context.course_id,
         ctx.h5p_activity_cache,
         moodle_api.get_h5pactivities_by_course,
     )
@@ -853,6 +879,8 @@ def _handle_h5p_links(
             module_context.log,
             package_file.get("filesize"),
         )
+        if content is None:
+            module_context.mark_incomplete()
         if content is not None and module_id is not None and marker is not None:
             course_cache.store_cached_text(
                 ctx,
@@ -885,9 +913,8 @@ def _opencast_lti_launch(
     ctx = module_context.ctx
     module_context.status("loading Opencast activity")
     instance = module_instance(
-        ctx,
+        module_context,
         module,
-        module_context.course_id,
         ctx.lti_instance_cache,
         moodle_api.get_ltis_by_course,
     )
@@ -902,6 +929,7 @@ def _opencast_lti_launch(
         ctx.require_session(), ctx.require_moodle_account().wstoken, tool_id
     )
     if launch_data is None:
+        module_context.mark_incomplete()
         return None
     endpoint = launch_data.get("endpoint")
     if not isinstance(endpoint, str):
@@ -951,6 +979,7 @@ def _handle_opencast_series(
         module_context.course_id,
     )
     if episodes is None:
+        module_context.mark_incomplete()
         return
     series_node = cast(
         Node,
@@ -1173,12 +1202,15 @@ def _add_quiz_nodes(
             continue
         name = f"{module_name}, Versuch {index}"
         review_url = f"{MOODLE_URL}mod/quiz/review.php?attempt={attempt_id}"
-        ctx.quiz_review_cache[review_url] = _quiz_review_html(name, review)
+        review_html = _quiz_review_html(name, review)
+        ctx.quiz_review_cache[review_url] = review_html
         section_node.add_child(
             name,
             attempt_id,
             "Quiz",
             url=review_url,
+            etag=hashlib.sha256(review_html.encode("utf-8")).hexdigest(),
+            etag_kind=RemoteMarkerKind.OPAQUE,
             download_kind=DownloadKind.QUIZ,
         )
 
@@ -1203,9 +1235,8 @@ def handle_quiz_module(
     # when Moodle changes which review fields are visible.
     module_context.status("loading quiz activity")
     instance = module_instance(
-        ctx,
+        module_context,
         module,
-        module_context.course_id,
         ctx.quiz_instance_cache,
         moodle_api.get_quizzes_by_course,
     )
@@ -1221,6 +1252,7 @@ def handle_quiz_module(
     else:
         loaded = _load_quiz_data(module_context, quiz_id)
         if loaded is None:
+            module_context.mark_incomplete()
             return
         attempts, reviews, complete = loaded
         timing = _quiz_cache_timing(

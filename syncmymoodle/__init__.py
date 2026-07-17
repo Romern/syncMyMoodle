@@ -33,7 +33,7 @@ Download:
 
 Persistence:
     storage         private gzip-JSON and cookie (de)serialization
-    course_cache    per-course sync-tree cache (.syncmymoodle_cache)
+    course_cache    account-bound per-course sync-tree cache
     pathing         path sanitization, traversal safety, conflict paths
     cleanup         local cleanup of redundant conflict files and caches
 

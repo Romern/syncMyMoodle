@@ -26,6 +26,7 @@ if TYPE_CHECKING:
 # Retain a small overlap so a change committed at the integer-second token
 # validation boundary cannot fall between incremental update queries.
 MOODLE_UPDATE_OVERLAP_SECONDS = 5
+ModuleInstanceCache = dict[int, dict[int, dict[str, Any]] | None]
 
 
 class BrowserSessionUnavailable(RuntimeError):
@@ -146,9 +147,9 @@ class SyncContext:
     downloaded_paths: set[Path] = field(default_factory=set)
     filtered_items: set[FilteredItem] = field(default_factory=set)
     quiz_review_cache: dict[str, str] = field(default_factory=dict)
-    lti_instance_cache: dict[int, dict[str, Any]] = field(default_factory=dict)
-    h5p_activity_cache: dict[int, dict[str, Any]] = field(default_factory=dict)
-    quiz_instance_cache: dict[int, dict[str, Any]] = field(default_factory=dict)
+    lti_instance_cache: ModuleInstanceCache = field(default_factory=dict)
+    h5p_activity_cache: ModuleInstanceCache = field(default_factory=dict)
+    quiz_instance_cache: ModuleInstanceCache = field(default_factory=dict)
     linked_resources_by_course: dict[str, dict[str, LinkedResourceCacheEntry]] = field(
         default_factory=dict
     )
@@ -156,6 +157,7 @@ class SyncContext:
         default_factory=dict
     )
     seen_linked_resources: set[tuple[str, str]] = field(default_factory=set)
+    incomplete_course_ids: set[int] = field(default_factory=set)
 
     def __post_init__(self) -> None:
         self.auth = AuthState.from_config(self.config)
@@ -175,6 +177,14 @@ class SyncContext:
         reason: str,
     ) -> None:
         self.filtered_items.add(FilteredItem(config_key, category, item, reason))
+
+    def mark_course_incomplete(self, course_id: Any) -> None:
+        if (
+            isinstance(course_id, int)
+            and not isinstance(course_id, bool)
+            and course_id > 0
+        ):
+            self.incomplete_course_ids.add(course_id)
 
     def require_session(self) -> requests.Session:
         """Return the token-capable general HTTP session."""

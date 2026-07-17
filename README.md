@@ -358,8 +358,8 @@ another directory.
 
 `clean conflicts` removes only `.syncconflict.*` files whose content duplicates
 the current file or another conflict copy. `clean caches` removes per-course
-`.syncmymoodle_cache` files; it is a recovery command and makes the next sync
-rebuild its metadata.
+`.syncmymoodle-cache/.../.syncmymoodle_cache` files; it is a recovery command
+and makes the next sync rebuild its metadata.
 
 ## Migrating a legacy configuration
 

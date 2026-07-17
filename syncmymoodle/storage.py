@@ -1,4 +1,5 @@
 import gzip
+import hashlib
 import importlib
 import json
 import logging
@@ -12,6 +13,47 @@ import requests
 from syncmymoodle import pathing
 
 logger = logging.getLogger(__name__)
+
+
+def file_sha256(path: Path) -> str | None:
+    """Return a file's SHA-256 digest, or ``None`` when it cannot be read."""
+    try:
+        with path.open("rb") as handle:
+            return hashlib.file_digest(handle, "sha256").hexdigest()
+    except OSError:
+        return None
+
+
+def install_staged_file(
+    staged_path: Path,
+    target_path: Path,
+    *,
+    rename_local: bool,
+    description: str,
+    log: logging.Logger = logger,
+) -> bool:
+    """Atomically install a staged file, preserving a conflicting local copy."""
+    conflict_path: Path | None = None
+    try:
+        if target_path.exists() and rename_local:
+            conflict_path = pathing.make_conflict_path(target_path)
+            target_path.rename(conflict_path)
+            log.warning(
+                "Detected local changes for %s, moved to %s before installing %s",
+                target_path,
+                conflict_path,
+                description,
+            )
+        os.replace(staged_path, target_path)
+        return True
+    except OSError:
+        log.exception("Failed to install %s at %s", description, target_path)
+        if conflict_path is not None and not target_path.exists():
+            try:
+                conflict_path.rename(target_path)
+            except OSError:
+                log.exception("Failed to restore local file %s", target_path)
+        return False
 
 
 def restrict_private_file_windows(path: Path) -> None:

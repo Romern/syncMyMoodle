@@ -22,7 +22,7 @@ from typing import Any
 import latex2mathml.converter
 import requests
 
-from syncmymoodle import pathing
+from syncmymoodle import course_cache, pathing, storage
 from syncmymoodle.config import Config
 from syncmymoodle.constants import (
     CHROMIUM_BINARY_NAMES,
@@ -44,6 +44,7 @@ from syncmymoodle.http_utils import (
     request_following_safe_redirects,
     same_origin,
 )
+from syncmymoodle.node import Node
 from syncmymoodle.outcomes import (
     FAILED_DOWNLOAD,
     HANDLED_DOWNLOAD,
@@ -703,12 +704,12 @@ def render_pdf_with_chromium(
 
 def render_quiz_pdf(
     ctx: SyncContext,
-    node: Any,
+    node: Node,
     html_path: Path,
     pdf_path: Path,
-    mode: str,
+    display_path: Path,
     log: logging.Logger = logger,
-) -> DownloadOutcome:
+) -> bool:
     browser = find_chromium(ctx.config, log)
     if browser is None:
         log.warning(
@@ -717,18 +718,16 @@ def render_quiz_pdf(
             "Edge, or set 'browser' in the [paths] table of your config.",
             node.name,
         )
-        return FAILED_DOWNLOAD
+        return False
 
-    ctx.output.action("Rendering", pdf_path, "Quiz PDF")
+    ctx.output.action("Rendering", display_path, "Quiz PDF")
     pdf_ok = render_pdf_with_chromium(browser, html_path, pdf_path, log)
     if not pdf_ok:
         log.warning(
             "Keeping the HTML snapshot for %s after PDF rendering failed.",
             node.name,
         )
-    elif mode == "pdf":
-        html_path.unlink(missing_ok=True)
-    return completed_download(existed=False) if pdf_ok else FAILED_DOWNLOAD
+    return pdf_ok
 
 
 def report_quiz_dry_run(
@@ -738,21 +737,285 @@ def report_quiz_dry_run(
     *,
     want_html: bool,
     want_pdf: bool,
+    refresh: bool,
 ) -> DownloadOutcome:
     outcome = HANDLED_DOWNLOAD
-    if not html_path.exists():
-        ctx.output.action("Would download", html_path, "Quiz", dry_run=True)
-        if want_html:
-            outcome = outcome.merge(PLANNED_DOWNLOAD)
-    if want_pdf and not pdf_path.exists():
-        ctx.output.action("Would render", pdf_path, "Quiz PDF", dry_run=True)
+    if want_html and (refresh or not html_path.exists()):
+        verb = "Would update" if html_path.exists() else "Would download"
+        ctx.output.action(verb, html_path, "Quiz", dry_run=True)
         outcome = outcome.merge(PLANNED_DOWNLOAD)
+    if want_pdf and (refresh or not pdf_path.exists()):
+        verb = "Would update" if pdf_path.exists() else "Would render"
+        ctx.output.action(verb, pdf_path, "Quiz PDF", dry_run=True)
+        outcome = outcome.merge(PLANNED_DOWNLOAD)
+    return outcome
+
+
+def _same_quiz_revision(node: Node, old_node: Node | None) -> bool:
+    if node.etag is None:
+        return True
+    return (
+        old_node is not None
+        and old_node.etag == node.etag
+        and old_node.etag_kind == node.etag_kind
+    )
+
+
+def _known_quiz_artifacts(
+    node: Node,
+    old_node: Node | None,
+    artifacts: dict[str, Path],
+) -> set[str]:
+    existing = {kind for kind, path in artifacts.items() if path.exists()}
+    if node.etag is None or (old_node is not None and old_node.is_verified):
+        return existing
+    if old_node is None:
+        return set()
+    return existing & old_node.artifact_hashes.keys()
+
+
+def _initialize_quiz_artifact_hashes(
+    node: Node,
+    old_node: Node | None,
+    same_revision: bool,
+) -> None:
+    if same_revision and old_node is not None:
+        node.artifact_hashes = dict(old_node.artifact_hashes)
+    elif not same_revision:
+        node.artifact_hashes = {}
+
+
+def _retain_old_quiz_revision(
+    node: Node,
+    old_node: Node | None,
+    unchanged: int,
+) -> DownloadOutcome:
+    if old_node is None or not old_node.is_verified:
+        node.etag = None
+        node.etag_kind = None
+        node.artifact_hashes = {}
+        return DownloadOutcome(unchanged=unchanged, cache_verified=False)
+    node.timemodified = old_node.timemodified
+    node.etag = old_node.etag
+    node.etag_kind = old_node.etag_kind
+    node.artifact_hashes = dict(old_node.artifact_hashes)
+    return DownloadOutcome(unchanged=unchanged)
+
+
+def _temporary_quiz_path(path: Path) -> Path:
+    return pathing.with_windows_extended_length_prefix(
+        path.with_name(f".{path.name}.smmpart")
+    )
+
+
+def _install_quiz_artifact(
+    ctx: SyncContext,
+    node: Node,
+    kind: str,
+    staged_path: Path,
+    target_path: Path,
+    rename_local: bool,
+    log: logging.Logger,
+) -> DownloadOutcome:
+    existed = target_path.exists()
+    if not storage.install_staged_file(
+        staged_path,
+        target_path,
+        rename_local=rename_local,
+        description="the updated quiz artifact",
+        log=log,
+    ):
+        staged_path.unlink(missing_ok=True)
+        return FAILED_DOWNLOAD
+
+    digest = storage.file_sha256(target_path)
+    if digest is None:
+        return FAILED_DOWNLOAD
+    node.artifact_hashes[kind] = digest
+    ctx.downloaded_paths.add(target_path)
+    return completed_download(existed=existed)
+
+
+def _quiz_modified_artifacts(
+    old_node: Node | None,
+    artifacts: dict[str, Path],
+) -> set[str]:
+    baseline = old_node if old_node is not None and old_node.is_verified else None
+    return {
+        kind
+        for kind, path in artifacts.items()
+        if path.exists()
+        and (
+            baseline is None
+            or baseline.artifact_hashes.get(kind) is None
+            or storage.file_sha256(path) != baseline.artifact_hashes[kind]
+        )
+    }
+
+
+def _quiz_policy_outcome(
+    ctx: SyncContext,
+    node: Node,
+    old_node: Node | None,
+    *,
+    same_revision: bool,
+    existing: set[str],
+    known: set[str],
+    modified: set[str],
+) -> DownloadOutcome | None:
+    replacing_existing = bool(existing - known) or (
+        not same_revision and bool(existing)
+    )
+    pending_revision = (
+        same_revision and old_node is not None and not old_node.is_verified
+    )
+    if replacing_existing and not ctx.config.update_files:
+        return (
+            FAILED_DOWNLOAD
+            if pending_revision
+            else _retain_old_quiz_revision(node, old_node, len(existing))
+        )
+    if modified and ctx.config.conflict_handling == "keep":
+        return (
+            FAILED_DOWNLOAD
+            if pending_revision
+            else _retain_old_quiz_revision(node, old_node, len(existing))
+        )
+    return None
+
+
+def _stage_quiz_snapshot(
+    ctx: SyncContext,
+    node: Node,
+    html_path: Path,
+    log: logging.Logger,
+) -> Path | None:
+    if node.url is None:
+        log.warning("No token-derived quiz review is available for %s", node.url)
+        return None
+    review_html = ctx.quiz_review_cache.get(node.url)
+    if review_html is None:
+        log.warning("No token-derived quiz review is available for %s", node.url)
+        return None
+    ctx.output.action("Downloading", html_path, "Quiz")
+    html_path.parent.mkdir(parents=True, exist_ok=True)
+    staged_path = _temporary_quiz_path(html_path)
+    staged_path.unlink(missing_ok=True)
+    try:
+        snapshot = build_quiz_snapshot(
+            review_html,
+            ctx.require_session(),
+            node.url,
+            log,
+        )
+        staged_path.write_text(snapshot, encoding="utf-8")
+    except (OSError, ValueError):
+        log.exception("Failed to create quiz snapshot %s", html_path)
+        staged_path.unlink(missing_ok=True)
+        return None
+    return staged_path
+
+
+def _prepare_quiz_artifacts(
+    ctx: SyncContext,
+    node: Node,
+    html_path: Path,
+    pdf_path: Path,
+    *,
+    snapshot_needed: bool,
+    pdf_needed: bool,
+    log: logging.Logger,
+) -> tuple[Path | None, Path | None, bool]:
+    html_stage = (
+        _stage_quiz_snapshot(ctx, node, html_path, log) if snapshot_needed else None
+    )
+    if snapshot_needed and html_stage is None:
+        return None, None, False
+    if not pdf_needed:
+        return html_stage, None, True
+
+    html_source = html_stage or html_path
+    pdf_stage = _temporary_quiz_path(pdf_path)
+    pdf_stage.unlink(missing_ok=True)
+    if not render_quiz_pdf(ctx, node, html_source, pdf_stage, pdf_path, log):
+        pdf_stage.unlink(missing_ok=True)
+        return html_stage, None, False
+    return html_stage, pdf_stage, True
+
+
+def _install_prepared_quiz_artifacts(
+    ctx: SyncContext,
+    node: Node,
+    html_path: Path,
+    pdf_path: Path,
+    html_stage: Path | None,
+    pdf_stage: Path | None,
+    *,
+    want_html: bool,
+    pdf_needed: bool,
+    prepared: bool,
+    modified: set[str],
+    log: logging.Logger,
+) -> DownloadOutcome:
+    outcome = HANDLED_DOWNLOAD
+    rename_conflicts = ctx.config.conflict_handling == "rename"
+    install_html = html_stage is not None and (
+        (prepared and want_html)
+        or (not prepared and not html_path.exists() and not pdf_path.exists())
+    )
+    if install_html:
+        assert html_stage is not None
+        outcome = outcome.merge(
+            _install_quiz_artifact(
+                ctx,
+                node,
+                "html",
+                html_stage,
+                html_path,
+                rename_conflicts and "html" in modified,
+                log,
+            )
+        )
+        html_stage = None
+    if not outcome.is_handled:
+        if pdf_stage is not None:
+            pdf_stage.unlink(missing_ok=True)
+        return outcome
+
+    if pdf_stage is not None:
+        outcome = outcome.merge(
+            _install_quiz_artifact(
+                ctx,
+                node,
+                "pdf",
+                pdf_stage,
+                pdf_path,
+                rename_conflicts and "pdf" in modified,
+                log,
+            )
+        )
+        expected_html_hash = node.artifact_hashes.get("html")
+        if (
+            outcome.is_handled
+            and not want_html
+            and expected_html_hash is not None
+            and storage.file_sha256(html_path) == expected_html_hash
+        ):
+            try:
+                html_path.unlink(missing_ok=True)
+                node.artifact_hashes.pop("html", None)
+            except OSError:
+                log.warning("Could not remove temporary quiz snapshot %s", html_path)
+    if html_stage is not None:
+        html_stage.unlink(missing_ok=True)
+    if not prepared:
+        outcome = outcome.merge(FAILED_DOWNLOAD)
     return outcome
 
 
 def download_quiz(
     ctx: SyncContext,
-    node: Any,
+    node: Node,
     log: logging.Logger = logger,
 ) -> DownloadOutcome:
     """Save a quiz review attempt as an HTML snapshot and/or a rendered PDF.
@@ -763,7 +1026,7 @@ def download_quiz(
     as a usable fallback when no browser is available.
     """
     mode = ctx.config.quiz_mode
-    if mode == "off":
+    if mode == "off" or node.parent is None:
         return FAILED_DOWNLOAD
     want_html = mode in ("html", "both")
     want_pdf = mode in ("pdf", "both")
@@ -773,52 +1036,83 @@ def download_quiz(
     html_path = pathing.with_windows_extended_length_prefix(path / f"{safe_name}.html")
     pdf_path = pathing.with_windows_extended_length_prefix(path / f"{safe_name}.pdf")
 
-    # Idempotency: skip when every wanted artifact is already on disk.
-    html_done = html_path.exists() if want_html else True
-    pdf_done = pdf_path.exists() if want_pdf else True
-    outcome = DownloadOutcome(
-        unchanged=int(want_html and html_path.exists())
-        + int(want_pdf and pdf_path.exists())
+    old_node = course_cache.get_old_node_for(ctx, node, log)
+    same_revision = _same_quiz_revision(node, old_node)
+    refresh = not same_revision
+    artifacts = {
+        kind: artifact_path
+        for kind, artifact_path, wanted in (
+            ("html", html_path, want_html),
+            ("pdf", pdf_path, want_pdf),
+        )
+        if wanted
+    }
+    existing = {
+        kind for kind, artifact_path in artifacts.items() if artifact_path.exists()
+    }
+    _initialize_quiz_artifact_hashes(node, old_node, same_revision)
+    known = _known_quiz_artifacts(node, old_node, artifacts) if same_revision else set()
+    if same_revision:
+        for kind in known:
+            digest = storage.file_sha256(artifacts[kind])
+            if digest is not None:
+                node.artifact_hashes.setdefault(kind, digest)
+    if same_revision and len(known) == len(artifacts):
+        return DownloadOutcome(unchanged=len(known))
+
+    unverified_existing = existing - known if same_revision else set()
+    modified = set(unverified_existing)
+    if refresh:
+        modified.update(_quiz_modified_artifacts(old_node, artifacts))
+    policy_outcome = _quiz_policy_outcome(
+        ctx,
+        node,
+        old_node,
+        same_revision=same_revision,
+        existing=existing,
+        known=known,
+        modified=modified,
     )
-    if html_done and pdf_done:
-        return outcome
+    if policy_outcome is not None:
+        return policy_outcome
 
     if ctx.config.dry_run:
-        return outcome.merge(
-            report_quiz_dry_run(
-                ctx,
-                html_path,
-                pdf_path,
-                want_html=want_html,
-                want_pdf=want_pdf,
-            )
+        return report_quiz_dry_run(
+            ctx,
+            html_path,
+            pdf_path,
+            want_html=want_html,
+            want_pdf=want_pdf,
+            refresh=refresh or bool(unverified_existing),
         )
 
-    # Only (re)build the snapshot when it is not already on disk. When just the
-    # PDF is missing (e.g. a "both"/"pdf" run that previously found no browser),
-    # we render from the existing snapshot rather than re-downloading the page
-    # and re-inlining every asset.
-    if not html_path.exists():
-        ctx.output.action("Downloading", html_path, "Quiz")
-        review_html = ctx.quiz_review_cache.get(node.url)
-        if review_html is None:
-            log.warning("No token-derived quiz review is available for %s", node.url)
-            return outcome.merge(FAILED_DOWNLOAD)
-
-        path.mkdir(parents=True, exist_ok=True)
-        html_path.write_text(
-            build_quiz_snapshot(
-                review_html,
-                ctx.require_session(),
-                node.url,
-                log,
-            ),
-            encoding="utf-8",
+    html_needed = want_html and (refresh or "html" not in known)
+    pdf_needed = want_pdf and (refresh or "pdf" not in known)
+    snapshot_needed = html_needed or (
+        pdf_needed and (refresh or not html_path.exists())
+    )
+    html_stage, pdf_stage, prepared = _prepare_quiz_artifacts(
+        ctx,
+        node,
+        html_path,
+        pdf_path,
+        snapshot_needed=snapshot_needed,
+        pdf_needed=pdf_needed,
+        log=log,
+    )
+    outcome = DownloadOutcome(unchanged=0 if refresh else len(known))
+    return outcome.merge(
+        _install_prepared_quiz_artifacts(
+            ctx,
+            node,
+            html_path,
+            pdf_path,
+            html_stage,
+            pdf_stage,
+            want_html=want_html,
+            pdf_needed=pdf_needed,
+            prepared=prepared,
+            modified=modified,
+            log=log,
         )
-        if want_html:
-            outcome = outcome.merge(completed_download(existed=False))
-
-    if not want_pdf or pdf_path.exists():
-        return outcome
-
-    return outcome.merge(render_quiz_pdf(ctx, node, html_path, pdf_path, mode, log))
+    )

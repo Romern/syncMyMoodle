@@ -1,5 +1,8 @@
+import hashlib
 import logging
 import math
+import urllib.parse
+from collections.abc import Iterator
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -8,6 +11,7 @@ from syncmymoodle import links, opencast
 from syncmymoodle.constants import COURSE_CACHE_FILENAME
 from syncmymoodle.context import LinkedResourceCacheEntry, SyncContext
 from syncmymoodle.http_utils import HTML_CONTENT_TYPES, normalized_http_origin
+from syncmymoodle.moodle_tokens import normalized_site
 from syncmymoodle.node import (
     NAME_CLASH_ID_UNSET,
     DownloadKind,
@@ -19,6 +23,7 @@ from syncmymoodle.storage import read_private_gzip_json, write_private_gzip_json
 
 logger = logging.getLogger(__name__)
 COURSE_CACHE_FORMAT = "syncmymoodle.course-cache.v1"
+COURSE_CACHE_DIRECTORY = ".syncmymoodle-cache"
 MODULE_CACHE_KEY = "module_data"
 CACHED_TEXT_CACHE_KEY = "cached_text"
 OPENCAST_EPISODES_CACHE_KEY = "opencast_episodes"
@@ -75,12 +80,224 @@ def _node_path(ctx: SyncContext, node: Node) -> Path:
     return get_sanitized_node_path(node, Path(ctx.config.sync_directory))
 
 
+def _node_artifact_paths(
+    ctx: SyncContext,
+    node: Node,
+    metadata_node: Node,
+) -> list[Path]:
+    node_path = _node_path(ctx, node)
+    if node.download_kind is not DownloadKind.QUIZ:
+        return [node_path]
+    return [
+        node_path.with_name(f"{node_path.name}.{suffix}")
+        for suffix in metadata_node.artifact_hashes
+    ]
+
+
 def _module_id(value: Any) -> int | None:
+    if isinstance(value, bool):
+        return None
     try:
         module_id = int(value)
     except (TypeError, ValueError):
         return None
     return module_id if module_id > 0 else None
+
+
+def course_cache_path(ctx: SyncContext, course_node: Node) -> Path:
+    """Return the stable, account-bound cache path for one Moodle course."""
+    identity = _cache_identity(ctx, course_node)
+    site_key = hashlib.sha256(str(identity["site"]).encode("utf-8")).hexdigest()
+    return (
+        Path(ctx.config.sync_directory).expanduser()
+        / COURSE_CACHE_DIRECTORY
+        / site_key
+        / str(identity["user_id"])
+        / str(identity["course_id"])
+        / COURSE_CACHE_FILENAME
+    )
+
+
+def _cache_identity(ctx: SyncContext, course_node: Node) -> dict[str, Any]:
+    account = ctx.require_moodle_account()
+    course_id = _module_id(course_node.id)
+    if course_id is None:
+        raise ValueError("course cache requires a positive Moodle course id")
+    return {
+        "site": normalized_site(account.tokens.site),
+        "user_id": account.user_id,
+        "course_id": course_id,
+    }
+
+
+def _read_course_cache_payload(
+    cache_path: Path,
+    log: logging.Logger,
+) -> dict[str, Any] | None:
+    payload = read_private_gzip_json(cache_path, "course cache")
+    if not isinstance(payload, dict):
+        return None
+    if payload.get("format") != COURSE_CACHE_FORMAT:
+        log.warning("Ignoring unsupported course cache format: %s", cache_path)
+        return None
+    return payload
+
+
+def _legacy_course_cache_paths(
+    ctx: SyncContext,
+    course_node: Node,
+) -> Iterator[Path]:
+    sync_directory = Path(ctx.config.sync_directory).expanduser()
+    direct_path = _node_path(ctx, course_node) / COURSE_CACHE_FILENAME
+    if direct_path.is_file():
+        yield direct_path
+    stable_directory = sync_directory / COURSE_CACHE_DIRECTORY
+    yield from (
+        path
+        for path in sync_directory.rglob(COURSE_CACHE_FILENAME)
+        if path != direct_path
+        and path.is_file()
+        and not path.is_relative_to(stable_directory)
+    )
+
+
+def _node_tree_has_site_url(course_root: Node, site: str) -> bool:
+    expected = urllib.parse.urlsplit(site)
+    expected_path = expected.path.rstrip("/") + "/"
+    pending = [course_root]
+    while pending:
+        node = pending.pop()
+        pending.extend(node.children)
+        if not node.url:
+            continue
+        actual = urllib.parse.urlsplit(node.url)
+        if (
+            actual.scheme.lower() == expected.scheme.lower()
+            and actual.netloc.lower() == expected.netloc.lower()
+            and actual.path.startswith(expected_path)
+        ):
+            return True
+    return False
+
+
+def _cached_download_kind(data: dict[str, Any]) -> DownloadKind | str | None:
+    value = data.get("download_kind")
+    if isinstance(value, str):
+        return value
+    node_type = data.get("type")
+    return LEGACY_DOWNLOAD_KINDS.get(node_type) if isinstance(node_type, str) else None
+
+
+def _shared_legacy_node_data(data: dict[str, Any]) -> dict[str, Any] | None:
+    node_type = data.get("type")
+    download_kind = _cached_download_kind(data)
+    if node_type == "Assignment File" or download_kind == DownloadKind.QUIZ:
+        return None
+
+    shared = dict(data)
+    children = data.get("children")
+    if isinstance(children, list):
+        shared["children"] = [
+            shared_child
+            for child in children
+            if isinstance(child, dict)
+            and (shared_child := _shared_legacy_node_data(child)) is not None
+        ]
+    return shared
+
+
+def _account_bound_legacy_payload(
+    ctx: SyncContext,
+    course_node: Node,
+    payload: dict[str, Any],
+) -> dict[str, Any] | None:
+    identity = _cache_identity(ctx, course_node)
+    course_data = payload.get("course")
+    if (
+        not isinstance(course_data, dict)
+        or _module_id(course_data.get("id")) != identity["course_id"]
+    ):
+        return None
+    try:
+        course_root = node_from_cache_data(course_data)
+    except (TypeError, ValueError):
+        return None
+
+    cached_identity = payload.get("identity")
+    if cached_identity is not None:
+        if not isinstance(cached_identity, dict) or (
+            cached_identity.get("site") != identity["site"]
+            or cached_identity.get("course_id") != identity["course_id"]
+        ):
+            return None
+        owner_matches = cached_identity.get("user_id") == identity["user_id"]
+    else:
+        if not _node_tree_has_site_url(course_root, str(identity["site"])):
+            return None
+        raw_module_cache = payload.get(MODULE_CACHE_KEY)
+        owner_matches = isinstance(raw_module_cache, dict) and (
+            raw_module_cache.get("owner_user_id") == identity["user_id"]
+        )
+
+    migrated = {**payload, "identity": identity}
+    if owner_matches:
+        return migrated
+
+    shared_course = _shared_legacy_node_data(course_data)
+    assert shared_course is not None
+    migrated["course"] = shared_course
+    raw_module_cache = payload.get(MODULE_CACHE_KEY)
+    cached_text = (
+        raw_module_cache.get(CACHED_TEXT_CACHE_KEY)
+        if isinstance(raw_module_cache, dict)
+        else None
+    )
+    if cached_text is None:
+        migrated.pop(MODULE_CACHE_KEY, None)
+    else:
+        migrated[MODULE_CACHE_KEY] = {CACHED_TEXT_CACHE_KEY: cached_text}
+    return migrated
+
+
+def _migrate_legacy_course_cache(
+    ctx: SyncContext,
+    course_node: Node,
+    cache_path: Path,
+    log: logging.Logger,
+) -> dict[str, Any] | None:
+    for legacy_path in _legacy_course_cache_paths(ctx, course_node):
+        payload = _read_course_cache_payload(legacy_path, log)
+        if payload is None:
+            continue
+        migrated = _account_bound_legacy_payload(ctx, course_node, payload)
+        if migrated is None:
+            continue
+        if ctx.config.dry_run:
+            log.info("Using legacy course cache for this dry run: %s", legacy_path)
+            return migrated
+        try:
+            write_private_gzip_json(cache_path, migrated)
+        except OSError as error:
+            log.warning(
+                "Could not move legacy course cache %s to %s: %s",
+                legacy_path,
+                cache_path,
+                error,
+            )
+            return migrated
+        try:
+            legacy_path.unlink()
+        except OSError as error:
+            log.warning(
+                "Moved legacy course cache to %s but could not remove %s: %s",
+                cache_path,
+                legacy_path,
+                error,
+            )
+        else:
+            log.info("Moved legacy course cache %s to %s", legacy_path, cache_path)
+        return migrated
+    return None
 
 
 def _cache_since(value: Any) -> int | None:
@@ -304,17 +521,15 @@ def _course_cache_state(
     if course_node in ctx.course_cache_states:
         return ctx.course_cache_states[course_node]
 
-    course_path = _node_path(ctx, course_node)
-    cache_path = course_path / COURSE_CACHE_FILENAME
-    payload = (
-        read_private_gzip_json(cache_path, "course cache")
-        if cache_path.exists()
-        else None
-    )
-    if not isinstance(payload, dict):
-        payload = None
-    elif payload.get("format") != COURSE_CACHE_FORMAT:
-        log.warning("Ignoring unsupported course cache format: %s", cache_path)
+    cache_path = course_cache_path(ctx, course_node)
+    cache_exists = cache_path.exists()
+    payload = _read_course_cache_payload(cache_path, log) if cache_exists else None
+    if not cache_exists:
+        payload = _migrate_legacy_course_cache(ctx, course_node, cache_path, log)
+    if payload is not None and payload.get("identity") != _cache_identity(
+        ctx, course_node
+    ):
+        log.warning("Ignoring course cache with mismatched identity: %s", cache_path)
         payload = None
 
     course_root = None
@@ -681,27 +896,41 @@ def node_to_cache_data(
     etag = node.etag
     etag_kind = node.etag_kind
     content_hash = node.content_hash
+    artifact_hashes = dict(node.artifact_hashes)
     remote_size = node.remote_size
     is_handled = node.is_handled
-    node_path = _node_path(ctx, node)
-    downloaded_this_run = node_path in ctx.downloaded_paths
+    is_verified = node.is_verified
+    node_paths = _node_artifact_paths(ctx, node, node)
+    verified_this_run = any(path in ctx.downloaded_paths for path in node_paths)
+    old_node_paths = (
+        _node_artifact_paths(ctx, node, old_node) if old_node is not None else []
+    )
     # If this file was not actually downloaded this run but a previously
     # downloaded version is still on disk, keep the previously cached version
     # markers. The node may still be marked as handled when download traversal
     # skipped an unchanged existing file; downloaded_paths tells us whether
-    # bytes were really replaced in this run.
+    # current remote bytes were installed or verified in this run.
     if (
-        not downloaded_this_run
+        not verified_this_run
         and old_node is not None
-        and old_node.is_handled
-        and node_path.exists()
+        and old_node.is_verified
+        and old_node_paths
+        and all(path.exists() for path in old_node_paths)
     ):
         timemodified = old_node.timemodified
         etag = old_node.etag
         etag_kind = old_node.etag_kind
         content_hash = old_node.content_hash
+        artifact_hashes = dict(old_node.artifact_hashes)
         remote_size = remote_size if remote_size is not None else old_node.remote_size
         is_handled = True
+        is_verified = True
+    elif is_handled and not is_verified:
+        timemodified = None
+        etag = None
+        etag_kind = None
+        content_hash = None
+        artifact_hashes = {}
     return {
         "name": node.name,
         "id": node.id,
@@ -712,10 +941,15 @@ def node_to_cache_data(
         "etag": etag,
         "etag_kind": str(etag_kind) if etag_kind else None,
         "content_hash": content_hash,
+        "artifact_hashes": artifact_hashes,
         "remote_size": remote_size,
         "name_clash_id": node.name_clash_id,
         "download_status": str(
-            DownloadStatus.HANDLED if is_handled else DownloadStatus.PENDING
+            DownloadStatus.HANDLED
+            if is_verified
+            else DownloadStatus.SKIPPED
+            if is_handled
+            else DownloadStatus.PENDING
         ),
         "children": [
             node_to_cache_data(ctx, child, match_old_cache_child(old_node, child))
@@ -736,7 +970,7 @@ def node_from_cache_data(data: dict[str, Any], parent: Node | None = None) -> No
         raise ValueError("course cache node has invalid children")
 
     download_status = data.get("download_status")
-    if download_status is None and data.get("is_downloaded"):
+    if download_status is None and data.get("is_downloaded") is True:
         download_status = DownloadStatus.HANDLED
     node = Node(
         name,
@@ -748,11 +982,11 @@ def node_from_cache_data(data: dict[str, Any], parent: Node | None = None) -> No
         etag=data.get("etag"),
         etag_kind=data.get("etag_kind"),
         content_hash=data.get("content_hash"),
+        artifact_hashes=data.get("artifact_hashes"),
         remote_size=data.get("remote_size"),
         name_clash_id=data.get("name_clash_id", NAME_CLASH_ID_UNSET),
         download_status=download_status,
-        download_kind=data.get("download_kind")
-        or LEGACY_DOWNLOAD_KINDS.get(node_type, DownloadKind.DIRECT),
+        download_kind=_cached_download_kind(data),
     )
     node.children = [node_from_cache_data(child, node) for child in children]
     return node
@@ -814,12 +1048,7 @@ def cache_root_node(
     ctx: SyncContext,
     log: logging.Logger = logger,
 ) -> None:
-    """Persist per-course caches into .syncmymoodle_cache files.
-
-    Each course directory beneath the sync directory receives its own cache file
-    containing the course subtree, which makes caching less brittle than
-    a single global root cache.
-    """
+    """Persist account-bound course caches under the stable cache directory."""
     if not ctx.root_node:
         return
 
@@ -829,12 +1058,14 @@ def cache_root_node(
         for course_node in semester_node.children:
             if course_node.type != "Course":
                 continue
-            course_path = _node_path(ctx, course_node)
             state = _course_cache_state(ctx, course_node, log)
-            course_path.mkdir(parents=True, exist_ok=True)
-            cache_path = course_path / COURSE_CACHE_FILENAME
+            if course_node.id in ctx.incomplete_course_ids:
+                continue
+            cache_path = course_cache_path(ctx, course_node)
+            cache_path.parent.mkdir(parents=True, exist_ok=True)
             payload: dict[str, Any] = {
                 "format": COURSE_CACHE_FORMAT,
+                "identity": _cache_identity(ctx, course_node),
                 "course": node_to_cache_data(ctx, course_node, state.course_root),
             }
             module_cache = _course_module_cache_data(ctx, state, course_node)

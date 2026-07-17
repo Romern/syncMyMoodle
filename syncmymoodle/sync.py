@@ -3,7 +3,7 @@ import time
 from dataclasses import dataclass
 from typing import Any, cast
 
-from syncmymoodle import course_cache, filters, sync_handlers
+from syncmymoodle import course_cache, filters, pathing, sync_handlers
 from syncmymoodle import moodle as moodle_api
 from syncmymoodle.context import SyncContext
 from syncmymoodle.http_utils import redact_url_secrets
@@ -268,15 +268,17 @@ def _course_updates(
 
 def _assignments_by_cmid(
     ctx: SyncContext,
-    course_id: int,
+    course: _PreparedCourse,
     module_names: set[Any],
 ) -> dict[Any, Any]:
     assignments = None
     if ctx.config.module_assignment and "assign" in module_names:
         account = ctx.require_moodle_account()
         assignments = moodle_api.get_assignment(
-            ctx.require_session(), account.wstoken, course_id
+            ctx.require_session(), account.wstoken, course.course_id
         )
+        if assignments is None:
+            ctx.mark_course_incomplete(course.node.id)
     return {
         assignment["cmid"]: assignment
         for assignment in ((assignments or {}).get("assignments") or [])
@@ -286,16 +288,18 @@ def _assignments_by_cmid(
 
 def _folders_by_coursemodule(
     ctx: SyncContext,
-    course_id: int,
+    course: _PreparedCourse,
     module_names: set[Any],
 ) -> dict[Any, Any]:
-    folders = []
+    folders: list[dict[str, Any]] | None = []
     if ctx.config.module_folder and "folder" in module_names:
         account = ctx.require_moodle_account()
         folders = moodle_api.get_folders_by_courses(
-            ctx.require_session(), account.wstoken, course_id
+            ctx.require_session(), account.wstoken, course.course_id
         )
-    return {folder.get("coursemodule"): folder for folder in folders}
+        if folders is None:
+            ctx.mark_course_incomplete(course.node.id)
+    return {folder.get("coursemodule"): folder for folder in folders or []}
 
 
 def _sync_module(
@@ -308,6 +312,7 @@ def _sync_module(
     module_kind = str(module.get("modname") or "unknown")
     run.update_progress(section_index, f"{module_name} [{module_kind}]")
     module_started_at = time.monotonic()
+    failed_before = run.ctx.stats.failed
     try:
         if not filters.should_skip_module(run.ctx, module, module_context.course_id):
             sync_handlers.handle_module(module_context, module)
@@ -318,6 +323,8 @@ def _sync_module(
             module.get("id"),
             module.get("modname"),
         )
+    if run.ctx.stats.failed > failed_before:
+        run.ctx.mark_course_incomplete(run.course.node.id)
     elapsed = time.monotonic() - module_started_at
     if elapsed >= SLOW_MODULE_SECONDS:
         logger.info(
@@ -336,9 +343,10 @@ def _sync_section(
     section: Any,
     section_index: int,
 ) -> None:
-    if isinstance(section, str):
+    if not isinstance(section, dict):
         logger.error("Moodle returned an invalid section for %s", run.course.name)
         run.ctx.stats.failed += 1
+        run.ctx.mark_course_incomplete(run.course.node.id)
         run.update_progress(section_index)
         return
 
@@ -395,12 +403,12 @@ def _sync_course(
     modules = _course_modules(course_sections)
     if _has_complete_module_inventory(course_sections):
         course_cache.retain_current_modules(ctx, course.node, modules, logger)
+    else:
+        ctx.mark_course_incomplete(course.node.id)
     module_names = {module.get("modname") for module in modules}
     run.course_updates = _course_updates(ctx, course, modules)
-    run.assignments_by_cmid = _assignments_by_cmid(ctx, course.course_id, module_names)
-    run.folders_by_coursemodule = _folders_by_coursemodule(
-        ctx, course.course_id, module_names
-    )
+    run.assignments_by_cmid = _assignments_by_cmid(ctx, course, module_names)
+    run.folders_by_coursemodule = _folders_by_coursemodule(ctx, course, module_names)
     for section_index, section in enumerate(course_sections, start=1):
         _sync_section(run, section, section_index)
     ctx.output.sync_progress.finish_course(course_index)
@@ -414,11 +422,11 @@ def sync(ctx: SyncContext) -> None:
     courses = _courses_after_role_filter(ctx, _locally_selected_courses(ctx))
 
     prepared_courses = _prepare_course_nodes(root_node, courses)
-    root_node.remove_children_nameclashes()
+    pathing.resolve_node_path_clashes(root_node)
     progress = ctx.output.sync_progress
     progress.begin_courses(len(prepared_courses))
     for course_index, course in enumerate(prepared_courses, start=1):
         ctx.stats.courses += 1
         progress.start_course(course_index, course.name)
         _sync_course(ctx, root_node, course, course_index)
-    root_node.remove_children_nameclashes()
+    pathing.resolve_node_path_clashes(root_node)

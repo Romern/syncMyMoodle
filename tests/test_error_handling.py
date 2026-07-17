@@ -6,17 +6,17 @@ import pytest
 import requests
 
 import syncmymoodle.cli as cli
-from syncmymoodle import moodle
+from syncmymoodle import moodle, sync_handlers
 from syncmymoodle.config import Config, ConfigValidationError
 from syncmymoodle.moodle import MOODLE_REST_URL
 from syncmymoodle.moodle_files import (
     add_moodle_content_file_node,
     add_moodle_file_node,
 )
-from syncmymoodle.node import Node
+from syncmymoodle.node import Node, RemoteMarkerKind
 from syncmymoodle.totp import hotp
 
-from .helpers import FakeResponse, FakeSession
+from .helpers import FakeResponse, FakeSession, make_context
 
 INVALID_TOKEN_PAYLOAD = {
     "exception": "moodle_exception",
@@ -208,9 +208,96 @@ def test_course_update_api_failure_is_silent_optional_cache_miss(caplog):
     assert "array_keys" not in caplog.text
 
 
-def test_get_folders_skips_course_on_api_error(caplog):
-    assert moodle.get_folders_by_courses(_error_session(), "token", 101) == []
+def test_get_folders_distinguishes_api_error_from_empty_course(caplog):
+    assert moodle.get_folders_by_courses(_error_session(), "token", 101) is None
     assert "invalidtoken" in caplog.text
+
+
+def test_course_module_inventory_rejects_malformed_items():
+    session = FakeSession()
+    session.add(
+        "POST",
+        MOODLE_REST_URL,
+        FakeResponse(json_payload={"quizzes": [None]}),
+    )
+
+    assert moodle.get_quizzes_by_course(session, "token", 101) is None
+
+
+def _module_context():
+    ctx = make_context()
+    ctx.session = FakeSession()
+    course_node = Node("Course", 1, "Course", None)
+    section_node = course_node.add_child("Section", 2, "Section")
+    assert section_node is not None
+    return ctx, sync_handlers.ModuleContext(
+        ctx,
+        1,
+        course_node,
+        section_node,
+        {},
+        {},
+    )
+
+
+def test_module_instance_fetches_a_successful_course_inventory_once():
+    ctx, module_context = _module_context()
+    calls = []
+
+    def fetch(session, wstoken, course_id):
+        calls.append(course_id)
+        return [{"coursemodule": 99, "id": 7}]
+
+    for module_id in (41, 42):
+        assert (
+            sync_handlers.module_instance(
+                module_context,
+                {"id": module_id},
+                ctx.quiz_instance_cache,
+                fetch,
+            )
+            is None
+        )
+
+    assert calls == [1]
+
+
+def test_module_instance_caches_course_inventory_failure():
+    ctx, module_context = _module_context()
+    calls = []
+
+    def fetch(session, wstoken, course_id):
+        calls.append(course_id)
+        return None
+
+    for module_id in (41, 42):
+        assert (
+            sync_handlers.module_instance(
+                module_context,
+                {"id": module_id},
+                ctx.quiz_instance_cache,
+                fetch,
+            )
+            is None
+        )
+
+    assert calls == [1]
+    assert ctx.incomplete_course_ids == {1}
+
+
+def test_module_instance_rejects_incomplete_course_inventory():
+    ctx, module_context = _module_context()
+
+    assert (
+        sync_handlers.module_instance(
+            module_context,
+            {"id": 41},
+            ctx.quiz_instance_cache,
+            lambda session, wstoken, course_id: [{}],
+        )
+        is None
+    )
+    assert ctx.incomplete_course_ids == {1}
 
 
 def test_submission_files_tolerate_null_fields():
@@ -322,3 +409,30 @@ def test_content_file_without_filename_gets_placeholder_name():
     )
     assert node is not None
     assert node.name == "file"
+
+
+def test_content_file_accepts_only_strong_moodle_content_hashes():
+    parent = Node("Section", 1, "Section", None)
+    valid = add_moodle_content_file_node(
+        parent,
+        {
+            "filename": "valid.pdf",
+            "fileurl": "https://moodle.rwth-aachen.de/pluginfile.php/1/valid.pdf",
+            "contenthash": "A" * 40,
+        },
+    )
+    invalid = add_moodle_content_file_node(
+        parent,
+        {
+            "filename": "invalid.pdf",
+            "fileurl": "https://moodle.rwth-aachen.de/pluginfile.php/1/invalid.pdf",
+            "contenthash": "opaque-revision",
+        },
+    )
+
+    assert valid is not None
+    assert valid.etag == "a" * 40
+    assert valid.etag_kind is RemoteMarkerKind.CONTENT_HASH
+    assert invalid is not None
+    assert invalid.etag is None
+    assert invalid.etag_kind is None
