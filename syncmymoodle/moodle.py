@@ -34,7 +34,7 @@ MOODLE_MOBILE_LAUNCH_URL = f"{MOODLE_URL}admin/tool/mobile/launch.php"
 MOODLE_MANAGE_TOKEN_URL = f"{MOODLE_URL}user/managetoken.php"
 MOBILE_URL_SCHEME = "syncmymoodle"
 MOODLE_MOBILE_USER_AGENT = "MoodleMobile syncMyMoodle"
-MOODLE_UPDATE_FUNCTION = "core_course_get_updates_since"
+MOODLE_UPDATE_FUNCTION = "core_course_check_updates"
 
 
 class MobileLaunchError(RuntimeError):
@@ -145,13 +145,15 @@ class TokenValidation:
 class CourseUpdates:
     """A conservative view of Moodle's per-module update feed."""
 
-    since: int
+    checked_since_by_module: dict[int, int]
     changed_module_ids: frozenset[int]
     unknown_module_ids: frozenset[int]
 
     def confirms_unchanged(self, module_id: int, cached_since: int) -> bool:
+        checked_since = self.checked_since_by_module.get(module_id)
         return (
-            cached_since >= self.since
+            checked_since is not None
+            and cached_since >= checked_since
             and module_id not in self.changed_module_ids
             and module_id not in self.unknown_module_ids
         )
@@ -575,19 +577,25 @@ def _unknown_module_ids(warnings: Any) -> frozenset[int] | None:
     return frozenset(unknown)
 
 
-def get_course_updates_since(
+def check_course_updates(
     session: requests.Session,
     wstoken: str,
     course_id: int,
-    since: int,
+    module_since: dict[int, int],
     log: logging.Logger = logger,
 ) -> CourseUpdates | None:
     """Return trustworthy module changes, or ``None`` when Moodle cannot tell."""
+    request_data: dict[str, Any] = {"courseid": course_id}
+    for index, (module_id, since) in enumerate(module_since.items()):
+        prefix = f"tocheck[{index}]"
+        request_data[f"{prefix}[contextlevel]"] = "module"
+        request_data[f"{prefix}[id]"] = module_id
+        request_data[f"{prefix}[since]"] = since
     payload = call_webservice(
         session,
         wstoken,
         MOODLE_UPDATE_FUNCTION,
-        {"courseid": course_id, "since": since},
+        request_data,
         log,
         warn_on_failure=False,
     )
@@ -597,7 +605,10 @@ def get_course_updates_since(
     unknown = _unknown_module_ids(payload.get("warnings"))
     if changed is None or unknown is None:
         return None
-    return CourseUpdates(since, changed, unknown)
+    requested = frozenset(module_since)
+    if not changed <= requested or not unknown <= requested:
+        return None
+    return CourseUpdates(dict(module_since), changed, unknown)
 
 
 def get_ltis_by_course(

@@ -5,7 +5,7 @@ import os
 import pytest
 import requests
 
-from syncmymoodle import course_cache, downloader, links, moodle, pathing
+from syncmymoodle import course_cache, downloader, links, moodle, opencast, pathing
 from syncmymoodle.constants import COURSE_CACHE_FILENAME, YOUTUBE_WATCH_URL
 from syncmymoodle.downloader import download_file
 from syncmymoodle.node import Node, RemoteMarkerKind
@@ -32,6 +32,8 @@ DUPLICATE_SECTION_URL_B = (
     "https://moodle.rwth-aachen.de/pluginfile.php/502/mod_resource/content/1/"
     "Case%20Study%20Sezen.pdf"
 )
+OPENCAST_VIDEO_URL = "https://video.example.test/opencast/presentation.mp4"
+OPENCAST_EPISODE_ID = "11111111-2222-4333-8444-555555555555"
 
 
 def sha1(data: bytes) -> str:
@@ -216,6 +218,23 @@ def make_run_syncer(config, *, timemodified, etag=None, remote_size=None):
         remote_size=remote_size,
     )
     return syncer, file_node
+
+
+def build_opencast_tree(etag):
+    root = Node("", -1, "Root", None)
+    semester = root.add_child("26ss", None, "Semester")
+    course = semester.add_child("Opencast Course", 301, "Course")
+    section = course.add_child("Recordings", 401, "Section")
+    video = section.add_child(
+        "Lecture (presentation).mp4",
+        OPENCAST_EPISODE_ID,
+        "Opencast",
+        url=OPENCAST_VIDEO_URL,
+        etag=etag,
+        etag_kind=RemoteMarkerKind.CONTENT_HASH,
+        remote_size=5,
+    )
+    return root, video
 
 
 def build_duplicate_section_file_tree():
@@ -984,6 +1003,156 @@ def test_unchanged_linked_file_etag_skips_download(tmp_path):
     assert download_file(syncer, file_node).is_handled
     assert syncer.session.calls == []
     assert download_path.read_bytes() == content
+
+
+def test_unchanged_opencast_file_does_not_authorize(tmp_path, monkeypatch):
+    config = {"paths.sync_directory": str(tmp_path), "downloads.update_files": True}
+    marker = "11111111111111111111111111111111"
+    cached = make_context(config)
+    cached.root_node, cached_video = build_opencast_tree(marker)
+    cached_video.mark_handled()
+    course_cache.cache_root_node(cached)
+
+    current = make_context(config)
+    current.session = FakeSession()
+    current.root_node, video = build_opencast_tree(marker)
+    download_path = node_path(current, video)
+    download_path.parent.mkdir(parents=True)
+    download_path.write_bytes(b"video")
+    monkeypatch.setattr(
+        opencast,
+        "authorize_course_for_episode",
+        lambda *args, **kwargs: pytest.fail("unchanged video was authorized"),
+    )
+
+    outcome = download_file(current, video)
+
+    assert outcome.unchanged == 1
+    assert current.session.calls == []
+
+
+def test_stale_opencast_metadata_cannot_replace_existing_file(tmp_path, monkeypatch):
+    marker = "11111111111111111111111111111111"
+    current = make_context(
+        {
+            "paths.sync_directory": str(tmp_path),
+            "downloads.update_files": True,
+        }
+    )
+    current.session = FakeSession()
+    current.root_node, video = build_opencast_tree(marker)
+    opencast.store_episode(
+        current,
+        301,
+        OPENCAST_EPISODE_ID,
+        opencast.OpencastEpisode(
+            (
+                opencast.OpencastTrack(
+                    OPENCAST_VIDEO_URL,
+                    checksum_type="md5",
+                    checksum=marker,
+                    flavor_type="presentation",
+                ),
+            )
+        ),
+        state=None,
+    )
+    monkeypatch.setattr(
+        opencast,
+        "authorize_course_for_episode",
+        lambda *args, **kwargs: True,
+    )
+    monkeypatch.setattr(
+        opencast,
+        "fetch_result_list",
+        lambda *args, **kwargs: [{"mediapackage": {"id": OPENCAST_EPISODE_ID}}],
+    )
+    assert (
+        opencast.resolve_tracks_from_episode(
+            current,
+            OPENCAST_EPISODE_ID,
+            course_id=301,
+        )
+        is not None
+    )
+    download_path = node_path(current, video)
+    download_path.parent.mkdir(parents=True)
+    download_path.write_bytes(b"existing video")
+
+    outcome = download_file(current, video)
+
+    assert not outcome.is_handled
+    assert current.session.calls == []
+    assert download_path.read_bytes() == b"existing video"
+
+
+def test_missing_opencast_file_authorizes_immediately_before_download(
+    tmp_path,
+    monkeypatch,
+):
+    current = make_context({"paths.sync_directory": str(tmp_path)})
+    current.session = FakeSession()
+    current.root_node, video = build_opencast_tree("11111111111111111111111111111111")
+    authorized = []
+    monkeypatch.setattr(
+        opencast,
+        "authorize_course_for_episode",
+        lambda ctx, course_id, episode_id, log: (
+            authorized.append((course_id, episode_id)) or True
+        ),
+    )
+    current.session.add(
+        "GET",
+        OPENCAST_VIDEO_URL,
+        FakeResponse(
+            headers={"Content-Type": "video/mp4", "Content-Length": "5"},
+            chunks=[b"video"],
+        ),
+    )
+
+    outcome = download_file(current, video)
+
+    assert outcome.downloaded == 1
+    assert authorized == [(301, OPENCAST_EPISODE_ID)]
+    assert node_path(current, video).read_bytes() == b"video"
+
+
+def test_checksumless_opencast_validation_authorizes_before_conditional_get(
+    tmp_path,
+    monkeypatch,
+):
+    config = {"paths.sync_directory": str(tmp_path), "downloads.update_files": True}
+    cached = make_context(config)
+    cached.root_node, cached_video = build_opencast_tree('"video-v1"')
+    cached_video.etag_kind = RemoteMarkerKind.OPAQUE
+    cached_video.mark_handled()
+    course_cache.cache_root_node(cached)
+
+    current = make_context(config)
+    current.session = FakeSession()
+    current.root_node, video = build_opencast_tree(None)
+    download_path = node_path(current, video)
+    download_path.parent.mkdir(parents=True)
+    download_path.write_bytes(b"video")
+    authorized = []
+    monkeypatch.setattr(
+        opencast,
+        "authorize_course_for_episode",
+        lambda ctx, course_id, episode_id, log: (
+            authorized.append((course_id, episode_id)) or True
+        ),
+    )
+    current.session.add(
+        "GET",
+        OPENCAST_VIDEO_URL,
+        FakeResponse(status_code=304, headers={"ETag": '"video-v1"'}),
+    )
+
+    outcome = download_file(current, video)
+
+    assert outcome.unchanged == 1
+    assert authorized == [(301, OPENCAST_EPISODE_ID)]
+    assert current.session.count("GET", OPENCAST_VIDEO_URL) == 1
 
 
 def test_get_only_etag_304_skips_download(tmp_path):

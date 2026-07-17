@@ -191,7 +191,7 @@ def sync(ctx: SyncContext) -> None:  # noqa: C901 - legacy sync awaiting decompo
             )
         module_names = {module.get("modname") for module in course_modules}
 
-        cached_update_times: list[int] = []
+        cached_module_updates: dict[int, int] = {}
         for module in course_modules:
             module_id = module.get("id")
             if not isinstance(module_id, int) or isinstance(module_id, bool):
@@ -201,34 +201,32 @@ def sync(ctx: SyncContext) -> None:  # noqa: C901 - legacy sync awaiting decompo
                     ctx, course_node, module_id, logger
                 )
                 if assignment_entry is not None:
-                    cached_update_times.append(assignment_entry.since)
+                    cached_module_updates[module_id] = assignment_entry.since
             elif config.quiz_mode != "off" and module.get("modname") == "quiz":
                 quiz_entry = course_cache.get_quiz_cache_entry(
                     ctx, course_node, module_id, logger
                 )
                 if quiz_entry is not None:
-                    cached_update_times.append(quiz_entry.since)
+                    cached_module_updates[module_id] = quiz_entry.since
 
         course_updates = None
         if (
-            cached_update_times
+            cached_module_updates
             and moodle_api.MOODLE_UPDATE_FUNCTION in ctx.moodle_functions
         ):
             progress.module_status("checking for Moodle updates")
-            course_updates = moodle_api.get_course_updates_since(
+            course_updates = moodle_api.check_course_updates(
                 session,
                 wstoken,
                 int(course_id),
-                min(cached_update_times),
+                cached_module_updates,
                 logger,
             )
             if course_updates is None:
-                ctx.moodle_functions = ctx.moodle_functions - {
-                    moodle_api.MOODLE_UPDATE_FUNCTION
-                }
                 logger.info(
-                    "Moodle incremental update checks are unavailable; using "
-                    "full module queries for this run"
+                    "Moodle incremental update check failed for %s; using "
+                    "full module queries for this course",
+                    course_name,
                 )
 
         assignments = None

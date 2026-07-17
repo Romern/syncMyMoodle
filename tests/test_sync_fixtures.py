@@ -1,6 +1,8 @@
 import io
 import logging
+import urllib.parse
 import zipfile
+from typing import Any
 
 import requests
 
@@ -35,6 +37,33 @@ PAGE_URL = "https://moodle.rwth-aachen.de/mod/page/view.php?id=123"
 PAGE_CONTENT_URL = (
     "https://moodle.rwth-aachen.de/pluginfile.php/1/mod_page/content/315/index.html"
 )
+
+
+def opencast_episode_entry(
+    episode_id: str,
+    url: str,
+    *,
+    series_id: str | None = None,
+    title: str | None = None,
+    checksum: str | None = None,
+) -> dict[str, Any]:
+    track: dict[str, Any] = {
+        "type": "presentation/delivery",
+        "mimetype": "video/mp4",
+        "url": url,
+        "video": {"resolution": "1920x1080"},
+    }
+    if checksum is not None:
+        track["checksum"] = {"type": "md5", "$": checksum}
+    mediapackage: dict[str, Any] = {
+        "id": episode_id,
+        "media": {"track": track},
+    }
+    if series_id is not None:
+        mediapackage["series"] = series_id
+    if title is not None:
+        mediapackage["title"] = title
+    return {"mediapackage": mediapackage}
 
 
 def run_page_handler(response):
@@ -536,14 +565,14 @@ def test_update_feed_reuses_and_refreshes_assignment_and_quiz_data(
         calls["review"] += 1
         return {"questions": [{"html": f"<p>Review v{state['version']}</p>"}]}
 
-    def course_updates(session, wstoken, course_id, since, log):
-        update_calls.append(since)
-        return moodle.CourseUpdates(since, state["changed"], frozenset())
+    def course_updates(session, wstoken, course_id, module_since, log):
+        update_calls.append(dict(module_since))
+        return moodle.CourseUpdates(dict(module_since), state["changed"], frozenset())
 
     monkeypatch.setattr(moodle, "get_assignment_submission_files", submission_files)
     monkeypatch.setattr(moodle, "get_quiz_attempts", quiz_attempts)
     monkeypatch.setattr(moodle, "get_quiz_attempt_review", quiz_review)
-    monkeypatch.setattr(moodle, "get_course_updates_since", course_updates)
+    monkeypatch.setattr(moodle, "check_course_updates", course_updates)
     monkeypatch.setattr(
         moodle,
         "get_quizzes_by_course",
@@ -578,7 +607,7 @@ def test_update_feed_reuses_and_refreshes_assignment_and_quiz_data(
     course_cache.cache_root_node(first)
     second = run_at(300)
 
-    assert update_calls == [200]
+    assert update_calls == [{42: 200, 43: 200}]
     assert calls == {"submission": 1, "attempts": 1, "review": 1}
     node_at_path(
         second.root_node,
@@ -598,7 +627,7 @@ def test_update_feed_reuses_and_refreshes_assignment_and_quiz_data(
     # A second account using the same sync directory must not reuse them.
     other_user = run_at(350, user_id=20002)
 
-    assert update_calls == [200]
+    assert update_calls == [{42: 200, 43: 200}]
     assert calls == {"submission": 2, "attempts": 2, "review": 2}
     assert "Review v1" in other_user.quiz_review_cache[review_url]
 
@@ -606,7 +635,7 @@ def test_update_feed_reuses_and_refreshes_assignment_and_quiz_data(
     state["changed"] = frozenset({42, 43})
     third = run_at(400)
 
-    assert update_calls == [200, 300]
+    assert update_calls == [{42: 200, 43: 200}, {42: 300, 43: 300}]
     assert calls == {"submission": 3, "attempts": 3, "review": 3}
     node_at_path(
         third.root_node,
@@ -628,7 +657,11 @@ def test_update_feed_reuses_and_refreshes_assignment_and_quiz_data(
     state["changed"] = frozenset()
     team_run = run_at(500)
 
-    assert update_calls == [200, 300, 400]
+    assert update_calls == [
+        {42: 200, 43: 200},
+        {42: 300, 43: 300},
+        {42: 400, 43: 400},
+    ]
     assert calls == {"submission": 4, "attempts": 3, "review": 3}
     node_at_path(
         team_run.root_node,
@@ -697,7 +730,7 @@ def test_quiz_cache_refreshes_at_review_phase_boundary(monkeypatch, tmp_path):
     first = run_at(100, None)
     course_cache.cache_root_node(first)
 
-    unchanged = moodle.CourseUpdates(95, frozenset(), frozenset())
+    unchanged = moodle.CourseUpdates({43: 95}, frozenset(), frozenset())
     before_boundary = run_at(160, unchanged)
     review_url = "https://moodle.rwth-aachen.de/mod/quiz/review.php?attempt=5"
 
@@ -713,14 +746,14 @@ def test_quiz_cache_refreshes_at_review_phase_boundary(monkeypatch, tmp_path):
     quiz_state["timeclose"] = 160
     after_override_change = run_at(
         180,
-        moodle.CourseUpdates(165, frozenset(), frozenset()),
+        moodle.CourseUpdates({43: 165}, frozenset(), frozenset()),
     )
 
     assert calls == {"attempts": 3, "review": 3}
     assert "Review 3" in after_override_change.quiz_review_cache[review_url]
 
 
-def test_failed_update_feed_is_tried_only_once_per_run(monkeypatch, caplog):
+def test_failed_course_update_check_does_not_disable_later_courses(monkeypatch, caplog):
     courses = [
         {"id": 901, "shortname": "First", "idnumber": "26ss-first"},
         {"id": 902, "shortname": "Second", "idnumber": "26ss-second"},
@@ -736,7 +769,13 @@ def test_failed_update_feed_is_tried_only_once_per_run(monkeypatch, caplog):
                         "instance": course_id,
                         "modname": "assign",
                         "name": "Assignment",
-                    }
+                    },
+                    {
+                        "id": course_id + 10_000,
+                        "instance": course_id + 10_000,
+                        "modname": "hsuforum",
+                        "name": "Open Forum",
+                    },
                 ],
             }
         ]
@@ -752,11 +791,13 @@ def test_failed_update_feed_is_tried_only_once_per_run(monkeypatch, caplog):
     )
     update_calls = []
 
-    def failed_update(session, wstoken, course_id, since, log):
-        update_calls.append(course_id)
-        return None
+    def course_update(session, wstoken, course_id, module_since, log):
+        update_calls.append((course_id, dict(module_since)))
+        if course_id == 901:
+            return None
+        return moodle.CourseUpdates(dict(module_since), frozenset(), frozenset())
 
-    monkeypatch.setattr(moodle, "get_course_updates_since", failed_update)
+    monkeypatch.setattr(moodle, "check_course_updates", course_update)
     context = make_context({"modules.assignment": True})
     context.session = FakeSession()
     context.moodle_functions = frozenset({moodle.MOODLE_UPDATE_FUNCTION})
@@ -764,12 +805,12 @@ def test_failed_update_feed_is_tried_only_once_per_run(monkeypatch, caplog):
 
     sync.sync(context)
 
-    assert update_calls == [901]
-    assert moodle.MOODLE_UPDATE_FUNCTION not in context.moodle_functions
+    assert update_calls == [(901, {901: 100}), (902, {902: 100})]
+    assert moodle.MOODLE_UPDATE_FUNCTION in context.moodle_functions
     assert (
         caplog.messages.count(
-            "Moodle incremental update checks are unavailable; using full module "
-            "queries for this run"
+            "Moodle incremental update check failed for First; using full module "
+            "queries for this course"
         )
         == 1
     )
@@ -790,51 +831,75 @@ def test_nested_moodle_folder_paths_are_preserved(monkeypatch):
     assert_snapshot("nested_folder_tree.txt", node_rows(syncer.root_node))
 
 
-def test_assignment_intro_opencast_embed_is_added_to_assignment_node(monkeypatch):
+def test_assignment_opencast_metadata_is_refreshed_between_runs(
+    monkeypatch,
+    tmp_path,
+):
     courses = [load_json_fixture("moodle", "courses.json")[1]]
-    syncer = make_context(
-        {
-            "modules.assignment": True,
-            "modules.resource": False,
-            "modules.folder": False,
-            "links.youtube": False,
-            "links.opencast": True,
-            "links.sciebo": False,
-        }
-    )
+    config = {
+        "paths.sync_directory": str(tmp_path),
+        "modules.assignment": True,
+        "modules.resource": False,
+        "modules.folder": False,
+        "links.youtube": False,
+        "links.opencast": True,
+        "links.sciebo": False,
+    }
     install_moodle_fixtures(
         monkeypatch,
         courses,
         {102: load_json_fixture("moodle", "assignment_opencast_course.json")},
         {102: load_json_fixture("moodle", "assignment_opencast_assignments.json")},
     )
-    syncer.session = FakeSession()
 
     authenticated = []
+    resolved = []
     monkeypatch.setattr(
         opencast,
-        "authenticate_episode",
+        "authorize_course_for_episode",
         lambda ctx, course_id, episode_id, *a, **k: (
             authenticated.append((course_id, episode_id)) or True
         ),
     )
-    monkeypatch.setattr(
-        opencast,
-        "resolve_tracks_from_episode",
-        lambda ctx, episode_id, *a, **k: (
-            opencast.OpencastTrack(
-                f"https://video.example.test/{episode_id}/presentation.mp4",
-                checksum_type="md5",
-                checksum="11111111111111111111111111111111",
-                flavor_type="presentation",
-            ),
-        ),
+    episode_id = "11111111-2222-4333-8444-555555555555"
+    series_id = "series-1111-2222"
+
+    def fetch_result_list(ctx, url, context, log):
+        resolved.append(url)
+        refreshed = len(resolved) == 2
+        return [
+            opencast_episode_entry(
+                episode_id,
+                "https://video.example.test/"
+                f"{episode_id}/presentation.mp4"
+                + ("?signature=refreshed" if refreshed else ""),
+                series_id=series_id,
+                checksum="2" * 32 if refreshed else "1" * 32,
+            )
+        ]
+
+    monkeypatch.setattr(opencast, "fetch_result_list", fetch_result_list)
+
+    first = make_context(config)
+    first.session = FakeSession()
+    sync.sync(first)
+    course_cache.cache_root_node(first)
+
+    second = make_context(config)
+    second.session = FakeSession()
+    sync.sync(second)
+
+    assert authenticated == [(102, episode_id), (102, episode_id)]
+    assert resolved == [
+        f"{opencast.OPENCAST_SEARCH_URL}?id={episode_id}",
+        f"{opencast.OPENCAST_SEARCH_URL}?limit=100&offset=0&sid={series_id}",
+    ]
+    assert_snapshot("assignment_opencast_tree.txt", node_rows(first.root_node))
+    assert node_rows(second.root_node) != node_rows(first.root_node)
+    assert any(
+        "?signature=refreshed" in row and "2" * 32 in row
+        for row in node_rows(second.root_node)
     )
-
-    sync.sync(syncer)
-
-    assert authenticated == [(102, "11111111-2222-4333-8444-555555555555")]
-    assert_snapshot("assignment_opencast_tree.txt", node_rows(syncer.root_node))
 
 
 def test_skip_rules_apply_to_sections_modules_links_and_domains(monkeypatch):
@@ -942,6 +1007,41 @@ def test_opencast_error_response_body_is_not_logged(caplog):
     assert opencast.fetch_result_list(syncer, url, "episode") is None
 
     assert "private-opencast-response" not in caplog.text
+
+
+def test_opencast_lti_authorization_is_reused_for_the_course():
+    syncer = make_context()
+    syncer.session = FakeSession()
+    syncer.browser_session = FakeSession()
+    syncer.browser_session_key = "browser-session-key"
+    episodes = (
+        (101, "11111111-2222-4333-8444-555555555555"),
+        (101, "22222222-3333-4444-8555-666666666666"),
+        (102, "33333333-4444-4555-8666-777777777777"),
+    )
+
+    def launch_url(course_id, episode_id):
+        query = urllib.parse.urlencode(
+            {
+                "courseid": course_id,
+                "episodeid": episode_id,
+                "sesskey": syncer.browser_session_key,
+                "ocinstanceid": 1,
+            }
+        )
+        return f"{opencast.MOODLE_URL}filter/opencast/ltilaunch.php?{query}"
+
+    form = FakeResponse(text='<input name="oauth_consumer_key" value="key">')
+    syncer.browser_session.add("GET", launch_url(*episodes[0]), form)
+    syncer.browser_session.add("GET", launch_url(*episodes[2]), form)
+    syncer.session.add("POST", opencast.OPENCAST_LTI_URL, FakeResponse(text="ok"))
+
+    assert opencast.authorize_course_for_episode(syncer, *episodes[0])
+    assert opencast.authorize_course_for_episode(syncer, *episodes[1])
+    assert opencast.authorize_course_for_episode(syncer, *episodes[2])
+
+    assert syncer.browser_session.count("GET") == 2
+    assert syncer.session.count("POST", opencast.OPENCAST_LTI_URL) == 2
 
 
 def test_opencast_repeated_503_opens_shared_service_circuit(caplog):
@@ -1441,7 +1541,7 @@ def test_opencast_series_fetches_every_page(monkeypatch):
         statuses.append,
     )
 
-    episodes = sync_handlers._opencast_series_episodes(
+    episodes = opencast.list_series_episodes(
         syncer,
         "series-123",
         logging.getLogger("test"),
@@ -1456,6 +1556,80 @@ def test_opencast_series_fetches_every_page(monkeypatch):
     assert statuses == [
         "listing Opencast episodes (0 found)",
         "listing Opencast episodes (100 found)",
+    ]
+
+
+def test_opencast_uses_refreshed_episode_from_partial_series(monkeypatch):
+    syncer = make_context()
+    course_id = 101
+    series_id = "series-123"
+    episode_id = "episode-0"
+    fallback_episode_id = "episode-missing"
+    for cached_episode_id in (episode_id, fallback_episode_id):
+        opencast.store_episode(
+            syncer,
+            course_id,
+            cached_episode_id,
+            opencast.OpencastEpisode(
+                (
+                    opencast.OpencastTrack(
+                        f"https://video.example.test/cached-{cached_episode_id}.mp4"
+                    ),
+                ),
+                series_id,
+            ),
+            state=None,
+        )
+    requested_urls = []
+
+    def fetch_result_list(ctx, url, context, log):
+        requested_urls.append(url)
+        if "?id=" in url:
+            return [
+                opencast_episode_entry(
+                    fallback_episode_id,
+                    "https://video.example.test/fallback.mp4",
+                    series_id=series_id,
+                )
+            ]
+        if "offset=100" in url:
+            return None
+        return [
+            opencast_episode_entry(
+                f"episode-{index}",
+                f"https://video.example.test/fresh-{index}.mp4",
+                series_id=series_id,
+                title=f"Episode {index}",
+            )
+            for index in range(100)
+        ]
+
+    monkeypatch.setattr(opencast, "fetch_result_list", fetch_result_list)
+    monkeypatch.setattr(
+        opencast,
+        "authorize_course_for_episode",
+        lambda *args, **kwargs: True,
+    )
+
+    series_tracks = opencast.resolve_tracks_from_episode(
+        syncer,
+        episode_id,
+        course_id=course_id,
+    )
+    fallback_tracks = opencast.resolve_tracks_from_episode(
+        syncer,
+        fallback_episode_id,
+        course_id=course_id,
+    )
+
+    assert series_tracks is not None
+    assert series_tracks[0].url == "https://video.example.test/fresh-0.mp4"
+    assert fallback_tracks is not None
+    assert fallback_tracks[0].url == "https://video.example.test/fallback.mp4"
+    assert requested_urls == [
+        f"{opencast.OPENCAST_SEARCH_URL}?limit=100&offset=0&sid={series_id}",
+        f"{opencast.OPENCAST_SEARCH_URL}?limit=100&offset=100&sid={series_id}",
+        f"{opencast.OPENCAST_SEARCH_URL}?id={fallback_episode_id}",
     ]
 
 
@@ -1480,20 +1654,79 @@ def test_opencast_series_stops_when_backend_repeats_page(monkeypatch, caplog):
 
     monkeypatch.setattr(opencast, "fetch_result_list", fetch_result_list)
 
-    episodes = sync_handlers._opencast_series_episodes(
+    episodes = opencast.list_series_episodes(
         syncer,
         "series-123",
         logging.getLogger("test"),
     )
 
-    assert episodes == [
+    assert episodes == tuple(
         (f"episode-{index}", f"Episode {index}") for index in range(100)
-    ]
+    )
     assert requested_urls == [
         f"{opencast.OPENCAST_SEARCH_URL}?limit=100&offset=0&sid=series-123",
         f"{opencast.OPENCAST_SEARCH_URL}?limit=100&offset=100&sid=series-123",
     ]
     assert "made no pagination progress at offset 100" in caplog.text
+
+
+def test_opencast_malformed_series_page_falls_back_to_episode_refresh(monkeypatch):
+    syncer = make_context()
+    course_id = 101
+    series_id = "series-123"
+    episode_id = "cached-episode"
+    opencast.store_episode(
+        syncer,
+        course_id,
+        episode_id,
+        opencast.OpencastEpisode(
+            (opencast.OpencastTrack("https://video.example.test/cached.mp4"),),
+            series_id,
+        ),
+        state=None,
+    )
+    requested_urls = []
+
+    def fetch_result_list(ctx, url, context, log):
+        requested_urls.append(url)
+        if "sid=" in url:
+            return [
+                opencast_episode_entry(
+                    "other-episode",
+                    "https://video.example.test/other.mp4",
+                    series_id=series_id,
+                    title="other-episode",
+                ),
+                {"mediapackage": {"title": "Missing id"}},
+            ]
+        return [
+            opencast_episode_entry(
+                episode_id,
+                "https://video.example.test/refreshed.mp4",
+                series_id=series_id,
+                title=episode_id,
+            )
+        ]
+
+    monkeypatch.setattr(opencast, "fetch_result_list", fetch_result_list)
+    monkeypatch.setattr(
+        opencast,
+        "authorize_course_for_episode",
+        lambda *args, **kwargs: True,
+    )
+
+    tracks = opencast.resolve_tracks_from_episode(
+        syncer,
+        episode_id,
+        course_id=course_id,
+    )
+
+    assert tracks is not None
+    assert tracks[0].url == "https://video.example.test/refreshed.mp4"
+    assert requested_urls == [
+        f"{opencast.OPENCAST_SEARCH_URL}?limit=100&offset=0&sid={series_id}",
+        f"{opencast.OPENCAST_SEARCH_URL}?id={episode_id}",
+    ]
 
 
 def test_mixed_course_sync_tree_covers_common_module_surfaces(monkeypatch):
@@ -1578,7 +1811,7 @@ def test_mixed_course_sync_tree_covers_common_module_surfaces(monkeypatch):
     syncer.session = session
     monkeypatch.setattr(
         opencast,
-        "authenticate_episode",
+        "authorize_course_for_episode",
         lambda ctx, course_id, episode_id, *a, **k: True,
     )
     monkeypatch.setattr(
@@ -1629,8 +1862,6 @@ def test_opencast_lti_single_and_series_use_lti_and_api_routes(monkeypatch):
     lti_submit_url = "https://engage.streaming.rwth-aachen.de/lti"
     single_episode = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee"
     series_id = "series-1111-2222"
-    series_episode_a = "bbbbbbbb-cccc-4ddd-8eee-ffffffffffff"
-    series_episode_b = "cccccccc-dddd-4eee-8fff-aaaaaaaaaaaa"
     series_url = (
         "https://engage.streaming.rwth-aachen.de/search/episode.json"
         f"?limit=100&offset=0&sid={series_id}"
@@ -1677,6 +1908,16 @@ def test_opencast_lti_single_and_series_use_lti_and_api_routes(monkeypatch):
         }
 
     monkeypatch.setattr("syncmymoodle.moodle.get_lti_launch_data", launch_data)
+    series_payload = load_json_fixture("opencast", "series.json")
+    for episode, fixture_name in zip(
+        series_payload["result"],
+        ("episode_series_a.json", "episode_series_b.json"),
+        strict=True,
+    ):
+        episode["mediapackage"]["media"] = load_json_fixture(
+            "opencast",
+            fixture_name,
+        )["result"][0]["mediapackage"]["media"]
     session = FakeSession()
     session.add("POST", lti_submit_url, FakeResponse(text="ok"))
     session.add(
@@ -1688,28 +1929,13 @@ def test_opencast_lti_single_and_series_use_lti_and_api_routes(monkeypatch):
     session.add(
         "GET",
         series_url,
-        FakeResponse(json_payload=load_json_fixture("opencast", "series.json")),
-    )
-    session.add(
-        "GET",
-        "https://engage.streaming.rwth-aachen.de/search/episode.json"
-        f"?id={series_episode_a}",
-        FakeResponse(
-            json_payload=load_json_fixture("opencast", "episode_series_a.json")
-        ),
-    )
-    session.add(
-        "GET",
-        "https://engage.streaming.rwth-aachen.de/search/episode.json"
-        f"?id={series_episode_b}",
-        FakeResponse(
-            json_payload=load_json_fixture("opencast", "episode_series_b.json")
-        ),
+        FakeResponse(json_payload=series_payload),
     )
     syncer.session = session
 
     sync.sync(syncer)
 
     assert launch_calls == [9001, 9002]
-    assert session.count("POST", lti_submit_url) == 2
+    assert session.count("POST", lti_submit_url) == 1
+    assert session.count("GET") == 2
     assert_snapshot("opencast_lti_tree.txt", node_rows(syncer.root_node))

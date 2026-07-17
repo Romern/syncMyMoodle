@@ -1,11 +1,13 @@
 import logging
+import math
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from syncmymoodle import links
+from syncmymoodle import links, opencast
 from syncmymoodle.constants import COURSE_CACHE_FILENAME
-from syncmymoodle.context import SyncContext
+from syncmymoodle.context import LinkedResourceCacheEntry, SyncContext
+from syncmymoodle.http_utils import HTML_CONTENT_TYPES, normalized_http_origin
 from syncmymoodle.node import (
     NAME_CLASH_ID_UNSET,
     DownloadStatus,
@@ -18,6 +20,10 @@ logger = logging.getLogger(__name__)
 COURSE_CACHE_FORMAT = "syncmymoodle.course-cache.v1"
 MODULE_CACHE_KEY = "module_data"
 CACHED_TEXT_CACHE_KEY = "cached_text"
+OPENCAST_EPISODES_CACHE_KEY = "opencast_episodes"
+OPENCAST_EPISODES_CACHE_FORMAT = "syncmymoodle.opencast-episodes.v1"
+LINKED_RESOURCES_CACHE_KEY = "linked_resources"
+LINKED_RESOURCES_CACHE_FORMAT = "syncmymoodle.linked-resources.v1"
 H5P_CONTENT_KIND = "h5p"
 PAGE_CONTENT_KIND = "page"
 CACHED_TEXT_KINDS = (H5P_CONTENT_KIND, PAGE_CONTENT_KIND)
@@ -53,6 +59,9 @@ class CourseCacheState:
     )
     assignments: dict[int, AssignmentCacheEntry] = field(default_factory=dict)
     quizzes: dict[int, QuizCacheEntry] = field(default_factory=dict)
+    opencast_episodes: dict[str, opencast.OpencastEpisode] = field(default_factory=dict)
+    linked_resources: dict[str, LinkedResourceCacheEntry] = field(default_factory=dict)
+    complete_module_inventory: bool = False
 
 
 def _node_path(ctx: SyncContext, node: Node) -> Path:
@@ -172,6 +181,114 @@ def _quiz_cache_entries(value: Any) -> dict[int, QuizCacheEntry]:
     return entries
 
 
+def _opencast_episode_entries(
+    value: Any,
+) -> dict[str, opencast.OpencastEpisode]:
+    entries: dict[str, opencast.OpencastEpisode] = {}
+    if (
+        not isinstance(value, dict)
+        or value.get("format") != OPENCAST_EPISODES_CACHE_FORMAT
+        or not isinstance(value.get("episodes"), dict)
+    ):
+        return entries
+    for episode_id, raw_episode in value["episodes"].items():
+        if not isinstance(episode_id, str) or not episode_id:
+            continue
+        episode = opencast.episode_from_cache_data(raw_episode)
+        if episode is not None:
+            entries[episode_id] = episode
+    return entries
+
+
+def _linked_resource_entries(value: Any) -> dict[str, LinkedResourceCacheEntry]:
+    entries: dict[str, LinkedResourceCacheEntry] = {}
+    if (
+        not isinstance(value, dict)
+        or value.get("format") != LINKED_RESOURCES_CACHE_FORMAT
+        or not isinstance(value.get("resources"), dict)
+    ):
+        return entries
+    for requested_url, raw_entry in value["resources"].items():
+        if (
+            not isinstance(requested_url, str)
+            or normalized_http_origin(requested_url) is None
+        ):
+            continue
+        if not isinstance(raw_entry, dict):
+            continue
+        final_url = raw_entry.get("final_url")
+        content_type = raw_entry.get("content_type")
+        html = raw_entry.get("html")
+        etag = raw_entry.get("etag")
+        last_modified = raw_entry.get("last_modified")
+        fresh_until = raw_entry.get("fresh_until")
+        remote_size = raw_entry.get("remote_size")
+        if (
+            not isinstance(final_url, str)
+            or normalized_http_origin(final_url) is None
+            or not isinstance(content_type, str)
+            or not content_type
+            or (html is not None and not isinstance(html, str))
+            or ((content_type in HTML_CONTENT_TYPES) != isinstance(html, str))
+            or (etag is not None and (not isinstance(etag, str) or not etag))
+            or (
+                last_modified is not None
+                and (not isinstance(last_modified, str) or not last_modified)
+            )
+            or (
+                fresh_until is not None
+                and (
+                    not isinstance(fresh_until, (int, float))
+                    or isinstance(fresh_until, bool)
+                    or not math.isfinite(fresh_until)
+                    or fresh_until < 0
+                )
+            )
+            or (
+                remote_size is not None
+                and (
+                    not isinstance(remote_size, int)
+                    or isinstance(remote_size, bool)
+                    or remote_size < 0
+                )
+            )
+        ):
+            continue
+        entries[requested_url] = LinkedResourceCacheEntry(
+            final_url,
+            content_type,
+            html,
+            etag,
+            last_modified,
+            float(fresh_until) if fresh_until is not None else None,
+            remote_size,
+        )
+    return entries
+
+
+def _course_linked_resources(
+    ctx: SyncContext,
+    course_id: int | None,
+    raw_cache: dict[str, Any],
+    personal_cache_matches: bool,
+) -> dict[str, LinkedResourceCacheEntry]:
+    linked_resources = (
+        _linked_resource_entries(raw_cache.get(LINKED_RESOURCES_CACHE_KEY))
+        if personal_cache_matches
+        else {}
+    )
+    if course_id is None:
+        return linked_resources
+    course_key = str(course_id)
+    runtime_resources = ctx.linked_resources_by_course.get(course_key)
+    if runtime_resources is None:
+        ctx.linked_resources_by_course[course_key] = linked_resources
+        return linked_resources
+    for requested_url, entry in linked_resources.items():
+        runtime_resources.setdefault(requested_url, entry)
+    return runtime_resources
+
+
 def _course_cache_state(
     ctx: SyncContext,
     course_node: Node,
@@ -212,6 +329,13 @@ def _course_cache_state(
         current_user_id is not None
         and raw_cache.get("owner_user_id") == current_user_id
     )
+    course_id = _module_id(course_node.id)
+    linked_resources = _course_linked_resources(
+        ctx,
+        course_id,
+        raw_cache,
+        personal_cache_matches,
+    )
     state = CourseCacheState(
         course_root=course_root,
         cached_text={
@@ -228,7 +352,19 @@ def _course_cache_state(
             if personal_cache_matches
             else {}
         ),
+        opencast_episodes=(
+            _opencast_episode_entries(raw_cache.get(OPENCAST_EPISODES_CACHE_KEY))
+            if personal_cache_matches
+            else {}
+        ),
+        linked_resources=linked_resources,
     )
+    if course_id is not None:
+        for episode_id, episode in state.opencast_episodes.items():
+            ctx.opencast_episode_cache.setdefault(
+                (str(course_id), episode_id),
+                episode,
+            )
     ctx.course_cache_states[course_node] = state
     return state
 
@@ -355,6 +491,7 @@ def retain_current_modules(
             module_ids[modname].add(module_id)
 
     state = _course_cache_state(ctx, course_node, log)
+    state.complete_module_inventory = True
     caches = (
         (state.cached_text[H5P_CONTENT_KIND], module_ids["h5pactivity"]),
         (state.cached_text[PAGE_CONTENT_KIND], module_ids["page"]),
@@ -380,11 +517,80 @@ def _cached_text_data(
     }
 
 
+def _opencast_episodes_data(
+    entries: dict[str, opencast.OpencastEpisode],
+) -> dict[str, Any]:
+    return {
+        "format": OPENCAST_EPISODES_CACHE_FORMAT,
+        "episodes": {
+            episode_id: opencast.episode_cache_data(episode)
+            for episode_id, episode in sorted(entries.items())
+        },
+    }
+
+
+def _linked_resources_data(
+    entries: dict[str, LinkedResourceCacheEntry],
+) -> dict[str, Any]:
+    return {
+        "format": LINKED_RESOURCES_CACHE_FORMAT,
+        "resources": {
+            requested_url: {
+                "final_url": entry.final_url,
+                "content_type": entry.content_type,
+                **({"html": entry.html} if entry.html is not None else {}),
+                **({"etag": entry.etag} if entry.etag is not None else {}),
+                **(
+                    {"last_modified": entry.last_modified}
+                    if entry.last_modified is not None
+                    else {}
+                ),
+                **(
+                    {"fresh_until": entry.fresh_until}
+                    if entry.fresh_until is not None
+                    else {}
+                ),
+                **(
+                    {"remote_size": entry.remote_size}
+                    if entry.remote_size is not None
+                    else {}
+                ),
+            }
+            for requested_url, entry in sorted(entries.items())
+        },
+    }
+
+
 def _course_module_cache_data(
     ctx: SyncContext,
     state: CourseCacheState,
+    course_node: Node,
 ) -> dict[str, Any]:
     data: dict[str, Any] = {}
+    course_id = _module_id(course_node.id)
+    if course_id is not None:
+        course_key = str(course_id)
+        state.opencast_episodes = {
+            episode_id: episode
+            for (
+                cached_course_id,
+                episode_id,
+            ), episode in ctx.opencast_episode_cache.items()
+            if cached_course_id == course_key
+            and (course_key, episode_id) in ctx.opencast_seen_episodes
+        }
+        if state.complete_module_inventory:
+            seen_urls = {
+                requested_url
+                for seen_course, requested_url in ctx.seen_linked_resources
+                if seen_course == course_key
+            }
+            state.linked_resources = {
+                requested_url: entry
+                for requested_url, entry in state.linked_resources.items()
+                if requested_url in seen_urls
+            }
+            ctx.linked_resources_by_course[course_key] = state.linked_resources
     cached_text = {
         kind: _cached_text_data(state.cached_text[kind], kind)
         for kind in CACHED_TEXT_KINDS
@@ -392,7 +598,12 @@ def _course_module_cache_data(
     }
     if cached_text:
         data[CACHED_TEXT_CACHE_KEY] = cached_text
-    if state.assignments or state.quizzes:
+    if (
+        state.assignments
+        or state.quizzes
+        or state.opencast_episodes
+        or state.linked_resources
+    ):
         if ctx.moodle_account is None:
             return data
         data["owner_user_id"] = ctx.moodle_account.user_id
@@ -415,6 +626,14 @@ def _course_module_cache_data(
             }
             for module_id, entry in sorted(state.quizzes.items())
         }
+    if state.opencast_episodes:
+        data[OPENCAST_EPISODES_CACHE_KEY] = _opencast_episodes_data(
+            state.opencast_episodes
+        )
+    if state.linked_resources:
+        data[LINKED_RESOURCES_CACHE_KEY] = _linked_resources_data(
+            state.linked_resources
+        )
     return data
 
 
@@ -608,7 +827,7 @@ def cache_root_node(
                 "format": COURSE_CACHE_FORMAT,
                 "course": node_to_cache_data(ctx, course_node, state.course_root),
             }
-            module_cache = _course_module_cache_data(ctx, state)
+            module_cache = _course_module_cache_data(ctx, state, course_node)
             if module_cache:
                 payload[MODULE_CACHE_KEY] = module_cache
             write_private_gzip_json(cache_path, payload)

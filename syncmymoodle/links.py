@@ -1,5 +1,7 @@
 import logging
+import time
 import urllib.parse
+from collections.abc import Callable
 from contextlib import closing
 from typing import Any, cast
 
@@ -18,7 +20,7 @@ from syncmymoodle.constants import (
     YOUTUBE_LINK_RE,
     YOUTUBE_WATCH_URL,
 )
-from syncmymoodle.context import SyncContext
+from syncmymoodle.context import LinkedResourceCacheEntry, SyncContext
 from syncmymoodle.http_utils import (
     HTML_CONTENT_TYPES,
     HttpFailureKind,
@@ -37,6 +39,361 @@ from syncmymoodle.http_utils import (
 from syncmymoodle.node import Node, RemoteMarkerKind
 
 logger = logging.getLogger(__name__)
+
+
+def _response_header(response: Any, name: str) -> str | None:
+    for header_name, value in response.headers.items():
+        if str(header_name).lower() == name.lower() and value:
+            return str(value)
+    return None
+
+
+def _cache_policy(response: Any) -> tuple[bool, float | None]:
+    directives: dict[str, str | None] = {}
+    for directive in (_response_header(response, "Cache-Control") or "").split(","):
+        name, separator, value = directive.strip().partition("=")
+        name = name.strip().lower()
+        if name:
+            directives[name] = value.strip().strip('"') if separator else None
+    if "no-store" in directives:
+        return False, None
+    if "no-cache" in directives or "max-age" not in directives:
+        return True, None
+    try:
+        max_age = int(directives["max-age"] or "")
+        age = max(0, int(_response_header(response, "Age") or "0"))
+    except ValueError:
+        return True, None
+    if max_age < 0:
+        return True, None
+    return True, time.time() + max(0, max_age - age)
+
+
+def _response_cache_entry(
+    response: Any,
+    html: str | None,
+) -> tuple[LinkedResourceCacheEntry, bool]:
+    cacheable, fresh_until = _cache_policy(response)
+    content_type = content_type_without_parameters(response)
+    if not content_type:
+        content_type = "text/html" if html is not None else "application/octet-stream"
+    return (
+        LinkedResourceCacheEntry(
+            final_url=str(response.url),
+            content_type=content_type,
+            html=html,
+            etag=_response_header(response, "ETag"),
+            last_modified=_response_header(response, "Last-Modified"),
+            fresh_until=fresh_until,
+            remote_size=content_length(response),
+        ),
+        cacheable,
+    )
+
+
+def _revalidated_cache_entry(
+    cached: LinkedResourceCacheEntry,
+    response: Any,
+) -> tuple[LinkedResourceCacheEntry, bool]:
+    cacheable, fresh_until = _cache_policy(response)
+    remote_size = content_length(response)
+    return (
+        LinkedResourceCacheEntry(
+            final_url=cached.final_url,
+            content_type=cached.content_type,
+            html=cached.html,
+            etag=_response_header(response, "ETag") or cached.etag,
+            last_modified=(
+                _response_header(response, "Last-Modified") or cached.last_modified
+            ),
+            fresh_until=fresh_until,
+            remote_size=(
+                remote_size if remote_size is not None else cached.remote_size
+            ),
+        ),
+        cacheable,
+    )
+
+
+def _conditional_headers(cached: LinkedResourceCacheEntry | None) -> dict[str, str]:
+    if cached is None:
+        return {}
+    headers = {}
+    if cached.etag:
+        headers["If-None-Match"] = cached.etag
+    if cached.last_modified:
+        headers["If-Modified-Since"] = cached.last_modified
+    return headers
+
+
+def _head_linked_resource(
+    ctx: SyncContext,
+    url: str,
+    cached: LinkedResourceCacheEntry | None,
+    url_allowed: Callable[[str], bool],
+) -> tuple[LinkedResourceCacheEntry | None, str, str | None, bool]:
+    headers = _conditional_headers(cached)
+    conditional = bool(headers)
+    while True:
+        response = request_following_safe_redirects(
+            ctx.require_session(),
+            "HEAD",
+            url,
+            url_allowed,
+            headers=headers,
+            timeout=HTTP_TIMEOUT_SECONDS,
+        )
+        with closing(response):
+            final_url = str(response.url or url)
+            request_origin = normalized_http_origin(final_url)
+            if (
+                response.status_code == 304
+                and conditional
+                and cached is not None
+                and final_url == cached.final_url
+            ):
+                entry, cacheable = _revalidated_cache_entry(cached, response)
+                return entry, final_url, request_origin, cacheable
+            if response.status_code == 304 and conditional:
+                headers = {}
+                conditional = False
+                continue
+            content_type = content_type_without_parameters(response)
+            if (
+                200 <= response.status_code < 300
+                and content_type
+                and content_type not in HTML_CONTENT_TYPES
+            ):
+                entry, cacheable = _response_cache_entry(response, None)
+                return entry, final_url, request_origin, cacheable
+            return None, final_url, request_origin, True
+
+
+def _get_linked_resource(
+    ctx: SyncContext,
+    url: str,
+    cached: LinkedResourceCacheEntry | None,
+    url_allowed: Callable[[str], bool],
+    request_origin: str | None,
+    log: logging.Logger,
+) -> tuple[LinkedResourceCacheEntry | None, bool]:
+    headers = _conditional_headers(cached)
+    conditional = bool(headers)
+    while True:
+        response = request_following_safe_redirects(
+            ctx.require_session(),
+            "GET",
+            url,
+            url_allowed,
+            headers=headers,
+            stream=True,
+            timeout=HTTP_TIMEOUT_SECONDS,
+        )
+        with closing(response):
+            final_url = str(response.url or url)
+            response_origin = normalized_http_origin(final_url) or request_origin
+            if request_origin and response_origin != request_origin:
+                ctx.service_outages.record_available(request_origin)
+            if (
+                response.status_code == 304
+                and conditional
+                and cached is not None
+                and final_url == cached.final_url
+            ):
+                if response_origin:
+                    ctx.service_outages.record_available(response_origin)
+                return _revalidated_cache_entry(cached, response)
+            if response.status_code == 304 and conditional:
+                headers = {}
+                conditional = False
+                continue
+
+            failure_kind = classify_http_failure(response.status_code)
+            if failure_kind is not None:
+                if response_origin:
+                    record_service_failure(
+                        ctx.service_outages,
+                        response_origin,
+                        f"Link origin {response_origin}",
+                        failure_kind,
+                        f"GET {redact_url_secrets(final_url)} returned HTTP "
+                        f"{response.status_code}",
+                        log,
+                    )
+                return None, True
+
+            if response_origin:
+                ctx.service_outages.record_available(response_origin)
+            content_type = content_type_without_parameters(response)
+            html = (
+                None
+                if content_type and content_type not in HTML_CONTENT_TYPES
+                else response.text
+            )
+            return _response_cache_entry(response, html)
+
+
+def _fresh_cached_resource(
+    ctx: SyncContext,
+    cached: LinkedResourceCacheEntry | None,
+) -> tuple[bool, LinkedResourceCacheEntry | None]:
+    if (
+        cached is None
+        or cached.fresh_until is None
+        or time.time() >= cached.fresh_until
+    ):
+        return False, None
+    if filters.should_skip_url(ctx, cached.final_url, "cached linked resource"):
+        return True, None
+    return True, cached
+
+
+def _handle_link_request_error(
+    ctx: SyncContext,
+    url: str,
+    request_origin: str | None,
+    error: requests.RequestException,
+    log: logging.Logger,
+) -> tuple[None, bool]:
+    reason = (
+        f"request for {redact_url_secrets(url)} failed: {safe_request_error(error)}"
+    )
+    failure_kind = classify_request_failure(error)
+    if request_origin:
+        record_service_failure(
+            ctx.service_outages,
+            request_origin,
+            f"Link origin {request_origin}",
+            failure_kind,
+            reason,
+            log,
+        )
+    if failure_kind is not HttpFailureKind.TRANSIENT and not isinstance(
+        error, filters.FilteredRequestError
+    ):
+        log.warning("Skipping link request: %s", reason)
+    return None, True
+
+
+def _resolve_linked_resource(
+    ctx: SyncContext,
+    url: str,
+    cached: LinkedResourceCacheEntry | None,
+    log: logging.Logger,
+) -> tuple[LinkedResourceCacheEntry | None, bool]:
+    link_origin = normalized_http_origin(url)
+    request_origin = link_origin
+    use_cached, fresh_resource = _fresh_cached_resource(ctx, cached)
+    if use_cached:
+        return fresh_resource, True
+    if link_origin and ctx.service_outages.should_skip(link_origin):
+        return None, True
+
+    def url_allowed(candidate: str) -> bool:
+        return filters.require_url_allowed(ctx, candidate, "redirected link")
+
+    try:
+        if cached is not None and cached.html is not None and ctx.config.follow_links:
+            ctx.output.sync_progress.module_status("revalidating linked page")
+            return _get_linked_resource(
+                ctx,
+                url,
+                cached,
+                url_allowed,
+                request_origin,
+                log,
+            )
+
+        ctx.output.sync_progress.module_status("checking linked resource")
+        resource, final_url, final_origin, cacheable = _head_linked_resource(
+            ctx,
+            url,
+            cached,
+            url_allowed,
+        )
+        request_origin = final_origin or request_origin
+        if resource is not None:
+            if request_origin:
+                ctx.service_outages.record_available(request_origin)
+            return resource, cacheable
+
+        if not ctx.config.follow_links or (
+            request_origin and ctx.service_outages.should_skip(request_origin)
+        ):
+            return None, True
+        ctx.output.sync_progress.module_status("loading linked page")
+        return _get_linked_resource(
+            ctx,
+            final_url,
+            None,
+            url_allowed,
+            request_origin,
+            log,
+        )
+    except requests.RequestException as error:
+        return _handle_link_request_error(ctx, url, request_origin, error, log)
+
+
+def _known_provider_link(url: str) -> bool:
+    return bool(
+        YOUTUBE_LINK_RE.match(url)
+        or OPENCAST_LINK_RE.match(url)
+        or SCIEBO_LINK_RE.match(url)
+        or EMEDIA_LINK_RE.match(url)
+    )
+
+
+def _scan_single_link(
+    ctx: SyncContext,
+    url: str,
+    parent_node: Node,
+    course_id: Any,
+    module_title: Any,
+    log: logging.Logger,
+) -> bool:
+    """Resolve one generic link and return whether it is a direct file."""
+    if filters.should_skip_url(ctx, url, "link"):
+        return False
+    course_key = str(course_id)
+    cache = ctx.linked_resources_by_course.setdefault(course_key, {})
+    ctx.seen_linked_resources.add((course_key, url))
+    if url in ctx.linked_resource_results:
+        resource = ctx.linked_resource_results[url]
+        if resource is not None:
+            cache[url] = resource
+    else:
+        resource, cacheable = _resolve_linked_resource(ctx, url, cache.get(url), log)
+        if cacheable:
+            if resource is not None:
+                cache[url] = resource
+            ctx.linked_resource_results[url] = resource
+        else:
+            cache.pop(url, None)
+
+    if resource is None:
+        return False
+    if resource.html is None:
+        parent_node.add_child(
+            filename_from_url(resource.final_url),
+            None,
+            f"Linked file [{resource.content_type}]",
+            url=resource.final_url,
+            etag=resource.etag,
+            etag_kind=(RemoteMarkerKind.OPAQUE if resource.etag else None),
+            remote_size=resource.remote_size,
+        )
+        return True
+    if ctx.config.follow_links:
+        scan_html_text_for_links(
+            ctx,
+            resource.html,
+            resource.final_url,
+            parent_node,
+            course_id,
+            module_title=module_title,
+            log=log,
+        )
+    return False
 
 
 def youtube_video_id(link: str) -> str | None:
@@ -96,6 +453,7 @@ def scan_html_text_for_links(
         course_id,
         module_title=module_title,
         single=False,
+        log=log,
     )
 
 
@@ -109,141 +467,17 @@ def scan_for_links(  # noqa: C901 - legacy parser awaiting decomposition
     log: logging.Logger = logger,
 ) -> None:
     # A single link is supplied and the contents of it are checked
-    link_origin = normalized_http_origin(text) if single else None
-    is_sciebo_share = (
-        ctx.config.link_source_enabled("sciebo")
-        and SCIEBO_LINK_RE.fullmatch(text.split("?", 1)[0].split("#", 1)[0].rstrip("/"))
-        is not None
-    )
-    is_emedia_video = (
-        ctx.config.link_source_enabled("emedia")
-        and emedia_api.extract_video_id(text) is not None
-    )
-    origin_is_unavailable = bool(
-        link_origin and ctx.service_outages.should_skip(link_origin)
-    )
-    request_origin = link_origin
-    if (
-        single
-        and not is_sciebo_share
-        and not is_emedia_video
-        and not origin_is_unavailable
-    ):
-        try:
-            text = text.replace("webservice/pluginfile.php", "pluginfile.php")
-            if filters.should_skip_url(ctx, text, "link"):
-                return
-
-            ctx.output.sync_progress.module_status("checking linked resource")
-
-            def url_allowed(url: str) -> bool:
-                return filters.require_url_allowed(
-                    ctx,
-                    url,
-                    "redirected link",
-                )
-
-            response = request_following_safe_redirects(
-                ctx.require_session(),
-                "HEAD",
-                text,
-                url_allowed,
-                timeout=HTTP_TIMEOUT_SECONDS,
-            )
-            with closing(response):
-                final_url = response.url or text
-                request_origin = normalized_http_origin(final_url) or link_origin
-                content_type = content_type_without_parameters(response)
-                if "youtube.com" in text or "youtu.be" in text:
-                    # workaround for youtube providing bad headers when using HEAD
-                    pass
-                elif (
-                    200 <= response.status_code < 300
-                    and content_type
-                    and content_type not in HTML_CONTENT_TYPES
-                ):
-                    if request_origin:
-                        ctx.service_outages.record_available(request_origin)
-                    # non html links, assume the filename is in the path
-                    filename = filename_from_url(final_url)
-                    parent_node.add_child(
-                        filename,
-                        None,
-                        f"Linked file [{content_type}]",
-                        url=final_url,
-                        etag=response.headers.get("ETag"),
-                        etag_kind=(
-                            RemoteMarkerKind.OPAQUE
-                            if response.headers.get("ETag")
-                            else None
-                        ),
-                        remote_size=content_length(response),
-                    )
-                    # instantly return as it was a direct link
-                    return
-            target_is_unavailable = bool(
-                request_origin and ctx.service_outages.should_skip(request_origin)
-            )
-            if ctx.config.follow_links and not target_is_unavailable:
-                ctx.output.sync_progress.module_status("loading linked page")
-                response = request_following_safe_redirects(
-                    ctx.require_session(),
-                    "GET",
-                    final_url,
-                    url_allowed,
-                    timeout=HTTP_TIMEOUT_SECONDS,
-                )
-                with closing(response):
-                    response_origin = (
-                        normalized_http_origin(response.url or final_url)
-                        or request_origin
-                    )
-                    if request_origin and response_origin != request_origin:
-                        ctx.service_outages.record_available(request_origin)
-                    request_origin = response_origin
-                    failure_kind = classify_http_failure(response.status_code)
-                    if failure_kind is None:
-                        if request_origin:
-                            ctx.service_outages.record_available(request_origin)
-                        scan_html_text_for_links(
-                            ctx,
-                            response.text,
-                            response.url or final_url,
-                            parent_node,
-                            course_id,
-                            module_title=module_title,
-                        )
-                    else:
-                        if request_origin:
-                            assert failure_kind is not None
-                            record_service_failure(
-                                ctx.service_outages,
-                                request_origin,
-                                f"Link origin {request_origin}",
-                                failure_kind,
-                                f"GET {redact_url_secrets(response.url or final_url)} "
-                                f"returned HTTP {response.status_code}",
-                                log,
-                            )
-        except requests.RequestException as error:
-            reason = (
-                f"request for {redact_url_secrets(text)} failed: "
-                f"{safe_request_error(error)}"
-            )
-            failure_kind = classify_request_failure(error)
-            if request_origin:
-                record_service_failure(
-                    ctx.service_outages,
-                    request_origin,
-                    f"Link origin {request_origin}",
-                    failure_kind,
-                    reason,
-                    log,
-                )
-            if failure_kind is not HttpFailureKind.TRANSIENT and not isinstance(
-                error, filters.FilteredRequestError
-            ):
-                log.warning("Skipping link request: %s", reason)
+    if single:
+        text = text.replace("webservice/pluginfile.php", "pluginfile.php")
+        if not _known_provider_link(text) and _scan_single_link(
+            ctx,
+            text,
+            parent_node,
+            course_id,
+            module_title,
+            log,
+        ):
+            return
     if not ctx.config.follow_links:
         return
 
@@ -278,16 +512,13 @@ def scan_for_links(  # noqa: C901 - legacy parser awaiting decomposition
             if not vid_id:
                 log.warning(f"Opencast: could not extract episode id from url {vid}")
                 continue
-            ctx.output.sync_progress.module_status("authenticating Opencast video")
-            if not opencast_api.authenticate_episode(ctx, course_id, vid_id, log):
-                continue
-            ctx.output.sync_progress.module_status("resolving Opencast video")
             opencast_api.add_episode_nodes(
                 ctx,
                 parent_node,
                 module_title,
                 vid_id,
                 log,
+                course_id=course_id,
             )
 
     # VEIRA videos on the separate emedia Medizin Moodle service

@@ -1,4 +1,4 @@
-from syncmymoodle import course_cache, moodle, sync
+from syncmymoodle import course_cache, moodle, opencast, sync
 from syncmymoodle.constants import COURSE_CACHE_FILENAME
 from syncmymoodle.node import Node
 from syncmymoodle.storage import write_private_gzip_json
@@ -129,6 +129,83 @@ def test_cached_module_data_survives_course_name_disambiguation(tmp_path):
         ).content
         == "second"
     )
+
+
+def test_persisted_opencast_series_refreshes_in_one_request(tmp_path, monkeypatch):
+    config = {"paths.sync_directory": str(tmp_path)}
+    seeded = make_context(config)
+    seeded.root_node, course_node = course_tree()
+    series_id = "series-1111-2222"
+    episode_ids = (
+        "11111111-2222-4333-8444-555555555555",
+        "66666666-7777-4888-8999-000000000000",
+    )
+    for episode_id in episode_ids:
+        opencast.store_episode(
+            seeded,
+            course_node.id,
+            episode_id,
+            opencast.OpencastEpisode(
+                (
+                    opencast.OpencastTrack(
+                        f"https://video.example.test/{episode_id}.mp4"
+                    ),
+                ),
+                series_id,
+            ),
+        )
+    course_cache.cache_root_node(seeded)
+
+    loaded = make_context(config)
+    _, loaded_course = course_tree()
+    course_cache.get_course_cache_root(loaded, loaded_course)
+    requested_urls = []
+
+    monkeypatch.setattr(
+        opencast,
+        "authorize_course_for_episode",
+        lambda *args, **kwargs: True,
+    )
+
+    def fetch_result_list(ctx, url, context, log):
+        requested_urls.append(url)
+        return [
+            {
+                "mediapackage": {
+                    "id": episode_id,
+                    "series": series_id,
+                    "title": episode_id,
+                    "media": {
+                        "track": {
+                            "type": "presentation/delivery",
+                            "mimetype": "video/mp4",
+                            "url": f"https://video.example.test/fresh-{episode_id}.mp4",
+                            "video": {"resolution": "1920x1080"},
+                        }
+                    },
+                }
+            }
+            for episode_id in episode_ids
+        ]
+
+    monkeypatch.setattr(opencast, "fetch_result_list", fetch_result_list)
+
+    tracks = [
+        opencast.resolve_tracks_from_episode(
+            loaded,
+            episode_id,
+            course_id=loaded_course.id,
+        )
+        for episode_id in episode_ids
+    ]
+
+    assert requested_urls == [
+        f"{opencast.OPENCAST_SEARCH_URL}?limit=100&offset=0&sid={series_id}"
+    ]
+    assert [resolved[0].url for resolved in tracks if resolved is not None] == [
+        f"https://video.example.test/fresh-{episode_id}.mp4"
+        for episode_id in episode_ids
+    ]
 
 
 def test_sync_prunes_cache_entries_for_removed_modules(tmp_path, monkeypatch):

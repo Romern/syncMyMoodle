@@ -19,7 +19,14 @@ from syncmymoodle.constants import DEFAULT_BLOCK_SIZE
 HTML_CONTENT_TYPES = frozenset({"text/html", "application/xhtml+xml"})
 _REDIRECT_STATUS_CODES = frozenset({301, 302, 303, 307, 308})
 _SENSITIVE_REDIRECT_HEADERS = frozenset(
-    {"authorization", "cookie", "proxy-authorization", "requesttoken"}
+    {
+        "authorization",
+        "cookie",
+        "if-modified-since",
+        "if-none-match",
+        "proxy-authorization",
+        "requesttoken",
+    }
 )
 _SENSITIVE_QUERY_PARAMETER_NAMES = frozenset(
     {

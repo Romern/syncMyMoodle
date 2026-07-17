@@ -64,7 +64,6 @@ Handler = Callable[[ModuleContext, dict[str, Any]], None]
 # Handlers register themselves here via @register_handler and run, per module,
 # in registration (definition) order.
 MODULE_HANDLERS: list[Handler] = []
-OPENCAST_SERIES_PAGE_SIZE = 100
 
 
 def register_handler(handler: Handler) -> Handler:
@@ -120,73 +119,6 @@ def _page_response_cacheable(response: Any, requested_url: str) -> bool:
         and requested.netloc.lower() == final.netloc.lower()
         and moodle_file_path(requested.path) == moodle_file_path(final.path)
     )
-
-
-def _opencast_series_episodes(
-    ctx: SyncContext,
-    series_id: str,
-    log: logging.Logger,
-) -> list[tuple[str, str]] | None:
-    episodes: list[tuple[str, str]] = []
-    seen_episode_ids: set[str] = set()
-    offset = 0
-    while True:
-        ctx.output.sync_progress.module_status(
-            f"listing Opencast episodes ({len(episodes)} found)"
-        )
-        query = urllib.parse.urlencode(
-            {
-                "limit": OPENCAST_SERIES_PAGE_SIZE,
-                "offset": offset,
-                "sid": series_id,
-            }
-        )
-        page = opencast_api.fetch_result_list(
-            ctx,
-            f"{opencast_api.OPENCAST_SEARCH_URL}?{query}",
-            f"series {series_id}",
-            log,
-        )
-        if page is None:
-            return None
-        new_episodes: list[tuple[str, str]] = []
-        for episode in page:
-            mediapackage = (
-                episode.get("mediapackage") if isinstance(episode, dict) else None
-            )
-            if not isinstance(mediapackage, dict):
-                log.warning(
-                    "Opencast: series %s contains episode without id",
-                    series_id,
-                )
-                continue
-            episode_id = mediapackage.get("id")
-            if not isinstance(episode_id, str) or not episode_id:
-                log.warning(
-                    "Opencast: series %s contains episode without id",
-                    series_id,
-                )
-                continue
-            if episode_id in seen_episode_ids:
-                continue
-            seen_episode_ids.add(episode_id)
-            raw_title = mediapackage.get("title")
-            title = (
-                raw_title if isinstance(raw_title, str) and raw_title else episode_id
-            )
-            new_episodes.append((episode_id, title))
-        if page and not new_episodes:
-            log.warning(
-                "Opencast: series %s made no pagination progress at offset %s; "
-                "stopping",
-                series_id,
-                offset,
-            )
-            return episodes
-        episodes.extend(new_episodes)
-        if len(page) < OPENCAST_SERIES_PAGE_SIZE:
-            return episodes
-        offset += OPENCAST_SERIES_PAGE_SIZE
 
 
 class _H5PRangeUnavailable(Exception):
@@ -746,18 +678,13 @@ def handle_embedded_link_module(  # noqa: C901 - legacy handler awaiting decompo
                         vid_id = opencast_api.extract_episode_id(iframe_src)
                         if not vid_id:
                             continue
-                        module_context.status("authenticating embedded Opencast video")
-                        if not opencast_api.authenticate_episode(
-                            ctx, course_id, vid_id, log
-                        ):
-                            continue
-                        module_context.status("resolving embedded Opencast video")
                         opencast_api.add_episode_nodes(
                             ctx,
                             section_node,
                             module["name"],
                             vid_id,
                             log,
+                            course_id=course_id,
                         )
 
                 if scan_page_links:
@@ -923,17 +850,28 @@ def handle_opencast_lti_module(  # noqa: C901 - legacy handler awaiting decompos
         # Found an Opencast "series" page
         series_id = engage_series_id
 
-        module_context.status("authenticating Opencast series")
-        if not opencast_api.submit_lti_form(
+        if not opencast_api.course_is_authorized(
             ctx,
-            engage_data,
-            f"LTI series module {module['id']}",
-            log,
-            endpoint=endpoint,
+            module_context.course_id,
+            endpoint,
         ):
-            return
+            module_context.status("authorizing Opencast course")
+            if not opencast_api.submit_lti_form(
+                ctx,
+                engage_data,
+                f"LTI series module {module['id']}",
+                log,
+                endpoint=endpoint,
+                course_id=module_context.course_id,
+            ):
+                return
 
-        episodes = _opencast_series_episodes(ctx, series_id, log)
+        episodes = opencast_api.list_series_episodes(
+            ctx,
+            series_id,
+            log,
+            module_context.course_id,
+        )
         if episodes is None:
             return
         series_node = cast(Node, course_node.add_child(name, series_id, "Section"))
@@ -946,6 +884,7 @@ def handle_opencast_lti_module(  # noqa: C901 - legacy handler awaiting decompos
                 episode_title,
                 episode_id,
                 log,
+                course_id=module_context.course_id,
             )
     else:
         if not engage_single_id:
@@ -954,22 +893,28 @@ def handle_opencast_lti_module(  # noqa: C901 - legacy handler awaiting decompos
                 module["id"],
             )
         else:
-            module_context.status("authenticating Opencast video")
-            if not opencast_api.submit_lti_form(
+            if not opencast_api.course_is_authorized(
                 ctx,
-                engage_data,
-                f"LTI module {module['id']}",
-                log,
-                endpoint=endpoint,
+                module_context.course_id,
+                endpoint,
             ):
-                return
-            module_context.status("resolving Opencast video")
+                module_context.status("authorizing Opencast course")
+                if not opencast_api.submit_lti_form(
+                    ctx,
+                    engage_data,
+                    f"LTI module {module['id']}",
+                    log,
+                    endpoint=endpoint,
+                    course_id=module_context.course_id,
+                ):
+                    return
             opencast_api.add_episode_nodes(
                 ctx,
                 section_node,
                 name,
                 engage_single_id,
                 log,
+                course_id=module_context.course_id,
             )
 
 

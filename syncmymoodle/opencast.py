@@ -3,6 +3,7 @@ import logging
 import re
 import urllib.parse
 from dataclasses import dataclass
+from enum import Enum
 from typing import Any, Iterator, cast
 
 import requests
@@ -20,6 +21,7 @@ from syncmymoodle.context import BrowserSessionUnavailable, SyncContext
 from syncmymoodle.http_utils import (
     HttpFailureKind,
     classify_http_failure,
+    normalized_http_origin,
     parse_html,
     record_service_failure,
     redact_url_secrets,
@@ -31,6 +33,7 @@ logger = logging.getLogger(__name__)
 
 OPENCAST_LTI_URL = f"{OPENCAST_URL}/lti"
 OPENCAST_SEARCH_URL = f"{OPENCAST_URL}/search/episode.json"
+OPENCAST_SERIES_PAGE_SIZE = 100
 
 
 @dataclass(frozen=True)
@@ -55,6 +58,23 @@ class OpencastTrack:
         return RemoteMarkerKind.CONTENT_HASH if self.checksum else None
 
 
+@dataclass(frozen=True)
+class OpencastEpisode:
+    """Last known tracks plus the remote scope used to refresh them."""
+
+    tracks: tuple[OpencastTrack, ...]
+    series_id: str | None = None
+
+
+class OpencastMetadataState(Enum):
+    """Authoritative state for this run; no entry means not validated yet."""
+
+    # FRESH also represents an authoritative response with no usable track.
+    FRESH = "fresh"
+    # STALE metadata may preserve local files but must not drive a transfer.
+    STALE = "stale"
+
+
 def _track_node_name(
     name: Any,
     track: OpencastTrack,
@@ -77,8 +97,15 @@ def add_episode_nodes(
     name: Any,
     episode_id: str,
     log: logging.Logger = logger,
+    *,
+    course_id: Any = None,
 ) -> None:
-    tracks = resolve_tracks_from_episode(ctx, episode_id, log)
+    tracks = resolve_tracks_from_episode(
+        ctx,
+        episode_id,
+        log,
+        course_id=course_id,
+    )
     if tracks is None:
         return
 
@@ -166,6 +193,7 @@ def submit_lti_form(
     log: logging.Logger = logger,
     *,
     endpoint: str = OPENCAST_LTI_URL,
+    course_id: Any = None,
 ) -> bool:
     if ctx.service_outages.should_skip(OPENCAST_URL):
         return False
@@ -197,6 +225,7 @@ def submit_lti_form(
         return False
 
     ctx.service_outages.record_available(OPENCAST_URL)
+    record_course_authorized(ctx, endpoint, course_id)
     return True
 
 
@@ -238,7 +267,44 @@ def fetch_lti_form_data(
     return engage_data
 
 
-def authenticate_episode(
+def _course_id_key(course_id: Any) -> str | None:
+    if course_id is None or isinstance(course_id, bool):
+        return None
+    try:
+        parsed = int(course_id)
+    except (TypeError, ValueError):
+        return None
+    return str(parsed) if parsed > 0 else None
+
+
+def _course_auth_key(endpoint: str, course_id: Any) -> tuple[str, str] | None:
+    origin = normalized_http_origin(endpoint)
+    course_key = _course_id_key(course_id)
+    return (
+        (origin, course_key) if origin is not None and course_key is not None else None
+    )
+
+
+def record_course_authorized(
+    ctx: SyncContext,
+    endpoint: str,
+    course_id: Any,
+) -> None:
+    cache_key = _course_auth_key(endpoint, course_id)
+    if cache_key is not None:
+        ctx.opencast_course_auth_cache.add(cache_key)
+
+
+def course_is_authorized(
+    ctx: SyncContext,
+    course_id: Any,
+    endpoint: str = OPENCAST_URL,
+) -> bool:
+    cache_key = _course_auth_key(endpoint, course_id)
+    return cache_key is not None and cache_key in ctx.opencast_course_auth_cache
+
+
+def authorize_course_for_episode(
     ctx: SyncContext,
     course_id: Any,
     episode_id: str,
@@ -246,6 +312,8 @@ def authenticate_episode(
 ) -> bool:
     if ctx.service_outages.should_skip(OPENCAST_URL):
         return False
+    if course_is_authorized(ctx, course_id):
+        return True
     try:
         ctx.require_browser_session()
     except BrowserSessionUnavailable as error:
@@ -256,10 +324,6 @@ def authenticate_episode(
     if not ctx.browser_session_key:
         log.warning("Opencast: cannot launch episode without Moodle sesskey")
         return False
-
-    cache_key = (course_id, episode_id)
-    if cache_key in ctx.opencast_episode_auth_cache:
-        return True
 
     params = urllib.parse.urlencode(
         {
@@ -274,9 +338,8 @@ def authenticate_episode(
     engage_data = fetch_lti_form_data(ctx, info_url, context, log)
     if engage_data is None:
         return False
-    if not submit_lti_form(ctx, engage_data, context, log):
+    if not submit_lti_form(ctx, engage_data, context, log, course_id=course_id):
         return False
-    ctx.opencast_episode_auth_cache.add(cache_key)
     return True
 
 
@@ -362,6 +425,107 @@ def optional_int(value: Any) -> int | None:
         return None
 
 
+def _validated_checksum(
+    checksum_type: Any,
+    checksum_value: Any,
+) -> tuple[str | None, str | None]:
+    if not isinstance(checksum_value, str) or not checksum_value.strip():
+        return None, None
+    checksum = checksum_value.strip().lower()
+    parsed_type = (
+        checksum_type.strip().lower()
+        if isinstance(checksum_type, str) and checksum_type.strip()
+        else infer_checksum_type(checksum)
+    )
+    expected_length = CHECKSUM_LENGTHS_BY_ALGO.get(parsed_type) if parsed_type else None
+    if (
+        expected_length is None
+        or len(checksum) != expected_length
+        or re.fullmatch(r"[0-9a-f]+", checksum) is None
+    ):
+        return None, None
+    return parsed_type, checksum
+
+
+def track_cache_data(track: OpencastTrack) -> dict[str, Any]:
+    return {
+        "url": track.url,
+        **(
+            {
+                "checksum_type": track.checksum_type,
+                "checksum": track.checksum,
+            }
+            if track.checksum_type is not None and track.checksum is not None
+            else {}
+        ),
+        **({"size": track.size} if track.size is not None else {}),
+        **({"duration": track.duration} if track.duration is not None else {}),
+        **({"flavor_type": track.flavor_type} if track.flavor_type is not None else {}),
+    }
+
+
+def track_from_cache_data(value: Any) -> OpencastTrack | None:
+    if not isinstance(value, dict):
+        return None
+    url = value.get("url")
+    if not isinstance(url, str) or not url:
+        return None
+
+    checksum = value.get("checksum")
+    checksum_type = value.get("checksum_type")
+    if checksum is None and checksum_type is None:
+        parsed_checksum = None
+        parsed_checksum_type = None
+    else:
+        parsed_checksum_type, parsed_checksum = _validated_checksum(
+            checksum_type,
+            checksum,
+        )
+        if parsed_checksum is None:
+            return None
+
+    flavor = value.get("flavor_type")
+    if flavor is not None and (not isinstance(flavor, str) or not flavor):
+        return None
+    return OpencastTrack(
+        url=url,
+        checksum_type=parsed_checksum_type,
+        checksum=parsed_checksum,
+        size=optional_int(value.get("size")),
+        duration=optional_int(value.get("duration")),
+        flavor_type=flavor,
+    )
+
+
+def episode_cache_data(episode: OpencastEpisode) -> dict[str, Any]:
+    return {
+        "tracks": [track_cache_data(track) for track in episode.tracks],
+        **({"series_id": episode.series_id} if episode.series_id is not None else {}),
+    }
+
+
+def episode_from_cache_data(value: Any) -> OpencastEpisode | None:
+    if not isinstance(value, dict) or not isinstance(value.get("tracks"), list):
+        return None
+    raw_tracks = value["tracks"]
+    tracks = tuple(
+        track
+        for raw_track in raw_tracks
+        if (track := track_from_cache_data(raw_track)) is not None
+    )
+    if not tracks or len(tracks) != len(raw_tracks):
+        return None
+    series_id = value.get("series_id")
+    if series_id is not None and (
+        not isinstance(series_id, str) or not series_id.strip()
+    ):
+        return None
+    return OpencastEpisode(
+        tracks,
+        series_id.strip() if isinstance(series_id, str) else None,
+    )
+
+
 def infer_checksum_type(checksum: str) -> str | None:
     for checksum_type, expected_length in CHECKSUM_LENGTHS_BY_ALGO.items():
         if len(checksum) == expected_length:
@@ -386,21 +550,7 @@ def extract_checksum(track: dict[str, Any]) -> tuple[str | None, str | None]:
     elif isinstance(checksum_data, str):
         checksum_value = checksum_data.strip()
 
-    if not checksum_value:
-        return None, None
-
-    checksum = checksum_value.lower()
-    checksum_type = checksum_type or infer_checksum_type(checksum)
-    expected_length = (
-        CHECKSUM_LENGTHS_BY_ALGO.get(checksum_type) if checksum_type else None
-    )
-    if expected_length is None:
-        return None, None
-    if len(checksum) != expected_length:
-        return None, None
-    if not re.fullmatch(r"[0-9a-f]+", checksum):
-        return None, None
-    return checksum_type, checksum
+    return _validated_checksum(checksum_type, checksum_value)
 
 
 def opencast_track_from_api(track: dict[str, Any]) -> OpencastTrack | None:
@@ -432,12 +582,18 @@ def opencast_track_from_api(track: dict[str, Any]) -> OpencastTrack | None:
     )
 
 
+def _mediapackage(entry: Any) -> dict[str, Any] | None:
+    if not isinstance(entry, dict) or not isinstance(entry.get("mediapackage"), dict):
+        return None
+    return cast(dict[str, Any], entry["mediapackage"])
+
+
 def _episode_track_data(entries: list[Any]) -> Iterator[dict[str, Any]]:
     for entry in entries:
-        if not isinstance(entry, dict):
+        mediapackage = _mediapackage(entry)
+        if mediapackage is None:
             continue
-        mediapackage = entry.get("mediapackage")
-        media = mediapackage.get("media") if isinstance(mediapackage, dict) else None
+        media = mediapackage.get("media")
         track_data = media.get("track") if isinstance(media, dict) else None
         if isinstance(track_data, dict):
             yield track_data
@@ -445,21 +601,84 @@ def _episode_track_data(entries: list[Any]) -> Iterator[dict[str, Any]]:
             yield from (track for track in track_data if isinstance(track, dict))
 
 
-def resolve_tracks_from_episode(
-    ctx: SyncContext,
+def _episode_cache_key(
+    course_id: Any,
     episode_id: str,
-    log: logging.Logger = logger,
-) -> tuple[OpencastTrack, ...] | None:
-    if episode_id in ctx.opencast_track_cache:
-        return ctx.opencast_track_cache[episode_id]
+) -> tuple[str | None, str]:
+    return _course_id_key(course_id), episode_id
 
-    episode_url = f"{OPENCAST_SEARCH_URL}?id={episode_id}"
+
+def _series_cache_key(
+    course_id: Any,
+    series_id: str,
+) -> tuple[str | None, str]:
+    return _course_id_key(course_id), series_id
+
+
+def _cached_episode(
+    ctx: SyncContext,
+    course_id: Any,
+    episode_id: str,
+) -> OpencastEpisode | None:
+    cache_key = _episode_cache_key(course_id, episode_id)
+    if cache_key[0] is not None:
+        ctx.opencast_seen_episodes.add((cache_key[0], episode_id))
+    return ctx.opencast_episode_cache.get(cache_key)
+
+
+def store_episode(
+    ctx: SyncContext,
+    course_id: Any,
+    episode_id: str,
+    episode: OpencastEpisode,
+    *,
+    state: OpencastMetadataState | None = OpencastMetadataState.FRESH,
+    seen: bool = True,
+) -> None:
+    """Store an episode, leaving it unvalidated when ``state`` is ``None``."""
+    cache_key = _episode_cache_key(course_id, episode_id)
+    ctx.opencast_episode_cache[cache_key] = episode
+    if state is None:
+        ctx.opencast_metadata_states.pop(cache_key, None)
+    else:
+        ctx.opencast_metadata_states[cache_key] = state
+    if seen and cache_key[0] is not None:
+        ctx.opencast_seen_episodes.add((cache_key[0], episode_id))
+
+
+def invalidate_episode(
+    ctx: SyncContext,
+    course_id: Any,
+    episode_id: str,
+    *,
+    state: OpencastMetadataState | None = None,
+) -> None:
+    """Drop cached tracks and optionally record a terminal state for this run."""
+    cache_key = _episode_cache_key(course_id, episode_id)
+    ctx.opencast_episode_cache.pop(cache_key, None)
+    if state is not None:
+        ctx.opencast_metadata_states[cache_key] = state
+    else:
+        ctx.opencast_metadata_states.pop(cache_key, None)
+    if cache_key[0] is not None:
+        ctx.opencast_seen_episodes.discard((cache_key[0], episode_id))
+
+
+def episode_metadata_is_stale(
+    ctx: SyncContext,
+    course_id: Any,
+    episode_id: str,
+) -> bool:
+    return (
+        ctx.opencast_metadata_states.get(_episode_cache_key(course_id, episode_id))
+        is OpencastMetadataState.STALE
+    )
+
+
+def tracks_from_entries(entries: list[Any]) -> tuple[OpencastTrack, ...]:
     selected: dict[
         tuple[str, str], tuple[tuple[int, int, int, str], OpencastTrack]
     ] = {}
-    entries = fetch_result_list(ctx, episode_url, f"episode {episode_id}", log)
-    if entries is None:
-        return None
     for track_data in _episode_track_data(entries):
         track = opencast_track_from_api(track_data)
         if track is None:
@@ -483,12 +702,288 @@ def resolve_tracks_from_episode(
         if current is None or quality > current[0]:
             selected[track_key] = (quality, track)
 
-    if not selected:
+    return tuple(selected[track_key][1] for track_key in sorted(selected))
+
+
+def _series_id_from_entries(
+    entries: list[Any],
+    fallback: str | None = None,
+) -> str | None:
+    for entry in entries:
+        mediapackage = _mediapackage(entry)
+        series_id = mediapackage.get("series") if mediapackage is not None else None
+        if isinstance(series_id, str) and series_id.strip():
+            return series_id.strip()
+    return fallback
+
+
+def _entries_include_media(entries: list[Any]) -> bool:
+    return any(
+        (mediapackage := _mediapackage(entry)) is not None and "media" in mediapackage
+        for entry in entries
+    )
+
+
+def _cache_episode_entries(
+    ctx: SyncContext,
+    course_id: Any,
+    episode_id: str,
+    entries: list[Any],
+    *,
+    series_id: str | None = None,
+    seen: bool = True,
+) -> bool:
+    if not _entries_include_media(entries):
+        cache_key = _episode_cache_key(course_id, episode_id)
+        ctx.opencast_metadata_states.pop(cache_key, None)
+        cached = ctx.opencast_episode_cache.get(cache_key)
+        if cached is not None and cached.series_id is None and series_id is not None:
+            store_episode(
+                ctx,
+                course_id,
+                episode_id,
+                OpencastEpisode(cached.tracks, series_id),
+                state=None,
+                seen=seen,
+            )
+        return False
+
+    tracks = tracks_from_entries(entries)
+    if not tracks:
+        invalidate_episode(
+            ctx,
+            course_id,
+            episode_id,
+            state=OpencastMetadataState.FRESH,
+        )
+        return False
+    store_episode(
+        ctx,
+        course_id,
+        episode_id,
+        OpencastEpisode(
+            tracks,
+            _series_id_from_entries(entries, series_id),
+        ),
+        seen=seen,
+    )
+    return True
+
+
+def _new_series_entries(
+    series_id: str,
+    page: list[Any],
+    seen_episode_ids: set[str],
+    log: logging.Logger,
+) -> list[tuple[str, str, Any]]:
+    entries: list[tuple[str, str, Any]] = []
+    for entry in page:
+        mediapackage = _mediapackage(entry)
+        if mediapackage is None:
+            log.warning(
+                "Opencast: series %s contains episode without id",
+                series_id,
+            )
+            continue
+        episode_id = mediapackage.get("id")
+        if not isinstance(episode_id, str) or not episode_id:
+            log.warning(
+                "Opencast: series %s contains episode without id",
+                series_id,
+            )
+            continue
+        if episode_id in seen_episode_ids:
+            continue
+        seen_episode_ids.add(episode_id)
+        raw_title = mediapackage.get("title")
+        title = raw_title if isinstance(raw_title, str) and raw_title else episode_id
+        entries.append((episode_id, title, entry))
+    return entries
+
+
+def _cache_series_entries(
+    ctx: SyncContext,
+    course_id: Any,
+    series_id: str,
+    entries: list[tuple[str, str, Any]],
+    complete: bool,
+) -> None:
+    episode_ids = {episode_id for episode_id, _, _ in entries}
+    for episode_id, _, entry in entries:
+        _cache_episode_entries(
+            ctx,
+            course_id,
+            episode_id,
+            [entry],
+            series_id=series_id,
+            seen=False,
+        )
+
+    if not complete:
+        return
+    cache_key = _series_cache_key(course_id, series_id)
+    for episode_key, episode in list(ctx.opencast_episode_cache.items()):
+        if (
+            episode_key[0] == cache_key[0]
+            and episode.series_id == series_id
+            and episode_key[1] not in episode_ids
+        ):
+            invalidate_episode(
+                ctx,
+                episode_key[0],
+                episode_key[1],
+                state=OpencastMetadataState.FRESH,
+            )
+
+
+def list_series_episodes(
+    ctx: SyncContext,
+    series_id: str,
+    log: logging.Logger = logger,
+    course_id: Any = None,
+) -> tuple[tuple[str, str], ...] | None:
+    """Fetch a series once per course and cache all usable episode metadata."""
+    cache_key = _series_cache_key(course_id, series_id)
+    if cache_key in ctx.opencast_series_cache:
+        return ctx.opencast_series_cache[cache_key]
+
+    entries: list[tuple[str, str, Any]] = []
+    seen_episode_ids: set[str] = set()
+    offset = 0
+    complete = False
+    can_prove_complete = True
+    while True:
+        ctx.output.sync_progress.module_status(
+            f"listing Opencast episodes ({len(entries)} found)"
+        )
+        query = urllib.parse.urlencode(
+            {
+                "limit": OPENCAST_SERIES_PAGE_SIZE,
+                "offset": offset,
+                "sid": series_id,
+            }
+        )
+        page = fetch_result_list(
+            ctx,
+            f"{OPENCAST_SEARCH_URL}?{query}",
+            f"series {series_id}",
+            log,
+        )
+        if page is None:
+            _cache_series_entries(ctx, course_id, series_id, entries, False)
+            ctx.opencast_series_cache[cache_key] = None
+            return None
+
+        new_entries = _new_series_entries(series_id, page, seen_episode_ids, log)
+        can_prove_complete &= len(new_entries) == len(page)
+        if page and not new_entries:
+            log.warning(
+                "Opencast: series %s made no pagination progress at offset %s; "
+                "stopping",
+                series_id,
+                offset,
+            )
+            break
+        entries.extend(new_entries)
+        if len(page) < OPENCAST_SERIES_PAGE_SIZE:
+            complete = can_prove_complete
+            break
+        offset += OPENCAST_SERIES_PAGE_SIZE
+
+    _cache_series_entries(ctx, course_id, series_id, entries, complete)
+    result = tuple((episode_id, title) for episode_id, title, _ in entries)
+    ctx.opencast_series_cache[cache_key] = result
+    return result
+
+
+def _authorize_episode_refresh(
+    ctx: SyncContext,
+    course_id: Any,
+    episode_id: str,
+    log: logging.Logger,
+) -> bool:
+    if course_id is None:
+        return True
+    if not course_is_authorized(ctx, course_id):
+        ctx.output.sync_progress.module_status("authorizing Opencast course")
+    return authorize_course_for_episode(ctx, course_id, episode_id, log)
+
+
+def _stale_episode(
+    ctx: SyncContext,
+    course_id: Any,
+    episode_id: str,
+    cached: OpencastEpisode | None,
+    log: logging.Logger,
+) -> OpencastEpisode | None:
+    cache_key = _episode_cache_key(course_id, episode_id)
+    if ctx.opencast_metadata_states.get(cache_key) is OpencastMetadataState.STALE:
+        return cached
+    ctx.opencast_metadata_states[cache_key] = OpencastMetadataState.STALE
+    if cached is not None:
+        log.warning(
+            "Opencast: could not refresh metadata for %s; cached metadata will "
+            "only be used to preserve existing files",
+            episode_id,
+        )
+    return cached
+
+
+def _refresh_episode(
+    ctx: SyncContext,
+    course_id: Any,
+    episode_id: str,
+    cached: OpencastEpisode | None,
+    log: logging.Logger,
+) -> OpencastEpisode | None:
+    ctx.output.sync_progress.module_status("resolving Opencast video")
+    entries = fetch_result_list(
+        ctx,
+        f"{OPENCAST_SEARCH_URL}?id={episode_id}",
+        f"episode {episode_id}",
+        log,
+    )
+    if entries is None:
+        return _stale_episode(ctx, course_id, episode_id, cached, log)
+    if not entries:
+        invalidate_episode(
+            ctx,
+            course_id,
+            episode_id,
+            state=OpencastMetadataState.FRESH,
+        )
         log.warning("Opencast: no downloadable mp4 track found for %s", episode_id)
         return None
+    if not _entries_include_media(entries):
+        log.warning("Opencast: metadata for %s did not include media", episode_id)
+        return _stale_episode(ctx, course_id, episode_id, cached, log)
+    if not _cache_episode_entries(ctx, course_id, episode_id, entries):
+        log.warning("Opencast: no downloadable mp4 track found for %s", episode_id)
+        return None
+    return _cached_episode(ctx, course_id, episode_id)
 
-    # Select the best plain MP4 rendition per known logical flavor and keep
-    # untyped tracks distinct. Sorting makes node order independent of the API.
-    tracks = tuple(selected[track_key][1] for track_key in sorted(selected))
-    ctx.opencast_track_cache[episode_id] = tracks
-    return tracks
+
+def resolve_tracks_from_episode(
+    ctx: SyncContext,
+    episode_id: str,
+    log: logging.Logger = logger,
+    *,
+    course_id: Any = None,
+) -> tuple[OpencastTrack, ...] | None:
+    """Return tracks after one authoritative refresh for their mutable scope."""
+    cache_key = _episode_cache_key(course_id, episode_id)
+    cached = _cached_episode(ctx, course_id, episode_id)
+    if cache_key in ctx.opencast_metadata_states:
+        return cached.tracks if cached is not None else None
+    if not _authorize_episode_refresh(ctx, course_id, episode_id, log):
+        stale = _stale_episode(ctx, course_id, episode_id, cached, log)
+        return stale.tracks if stale is not None else None
+
+    if cached is not None and cached.series_id is not None:
+        list_series_episodes(ctx, cached.series_id, log, course_id)
+        cached = _cached_episode(ctx, course_id, episode_id)
+        if cache_key in ctx.opencast_metadata_states:
+            return cached.tracks if cached is not None else None
+
+    refreshed = _refresh_episode(ctx, course_id, episode_id, cached, log)
+    return refreshed.tracks if refreshed is not None else None

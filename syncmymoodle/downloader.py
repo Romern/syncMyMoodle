@@ -14,7 +14,7 @@ from typing import Any
 import requests
 import yt_dlp
 
-from syncmymoodle import course_cache, filters, links, pathing, quiz
+from syncmymoodle import course_cache, filters, links, opencast, pathing, quiz
 from syncmymoodle.constants import (
     DEFAULT_BLOCK_SIZE,
     HASH_ALGOS_BY_LENGTH,
@@ -294,6 +294,12 @@ def conditional_get_confirms_unchanged(
     download_origin = normalized_http_origin(node.url)
     if download_origin and ctx.service_outages.should_skip(download_origin):
         return False
+    if node.type == "Opencast":
+        if ctx.config.dry_run:
+            return False
+        authorized, _ = authorize_opencast_download(ctx, node, log)
+        if not authorized:
+            return False
 
     headers: dict[str, str] = {"If-None-Match": old_etag}
     if node.download_headers:
@@ -584,6 +590,13 @@ def download_violates_size_limits(
     return record_size_limit_filter(ctx, str(downloadpath), total_size, "size")
 
 
+def _opencast_course_node(node: Node) -> Node | None:
+    try:
+        return course_cache.get_course_node(node)
+    except Exception:
+        return None
+
+
 def planned_download_action(
     ctx: SyncContext,
     node: Node,
@@ -594,6 +607,22 @@ def planned_download_action(
     early_outcome = should_skip_before_decision(ctx, node, downloadpath)
     if early_outcome is not None:
         return early_outcome
+    if node.type == "Opencast":
+        course_node = _opencast_course_node(node)
+        course_id = course_node.id if course_node is not None else None
+        if opencast.episode_metadata_is_stale(
+            ctx,
+            course_id,
+            str(node.id or ""),
+        ):
+            if downloadpath.exists() and not ctx.config.update_files:
+                return UNCHANGED_DOWNLOAD
+            log.warning(
+                "Skipping Opencast download %s because its metadata could not be "
+                "refreshed",
+                downloadpath,
+            )
+            return FAILED_DOWNLOAD
     if known_remote_size_violates_limit(ctx, node, downloadpath):
         return HANDLED_DOWNLOAD
 
@@ -861,6 +890,32 @@ def _classify_download_response(
     return failure_kind
 
 
+def authorize_opencast_download(
+    ctx: SyncContext,
+    node: Node,
+    log: logging.Logger,
+) -> tuple[bool, Any]:
+    course_node = _opencast_course_node(node)
+    if course_node is None:
+        log.warning("Cannot authorize Opencast download outside a course")
+        return False, None
+    episode_id = str(node.id or "")
+    if not episode_id:
+        log.warning("Cannot authorize Opencast download without an episode id")
+        return False, course_node.id
+    if not opencast.course_is_authorized(ctx, course_node.id):
+        ctx.output.action("Authorizing", course_node.name, "Opencast")
+    return (
+        opencast.authorize_course_for_episode(
+            ctx,
+            course_node.id,
+            episode_id,
+            log,
+        ),
+        course_node.id,
+    )
+
+
 def download_file(
     ctx: SyncContext,
     node: Node,
@@ -882,8 +937,16 @@ def download_file(
         return action_or_outcome
     action = action_or_outcome
 
-    if ctx.config.dry_run and not size_limits_configured(ctx):
+    if ctx.config.dry_run and (
+        node.type == "Opencast" or not size_limits_configured(ctx)
+    ):
         return report_planned_download(ctx, downloadpath, node.type)
+
+    opencast_course_id: Any = None
+    if node.type == "Opencast":
+        authorized, opencast_course_id = authorize_opencast_download(ctx, node, log)
+        if not authorized:
+            return FAILED_DOWNLOAD
 
     transfer = None if ctx.config.dry_run else prepare_transfer_plan(node, downloadpath)
     headers = (
@@ -918,7 +981,7 @@ def download_file(
         )
         if failure_kind is HttpFailureKind.TRANSIENT:
             return FAILED_DOWNLOAD
-        return process_download_response(
+        outcome = process_download_response(
             ctx,
             node,
             response,
@@ -927,6 +990,20 @@ def download_file(
             action,
             log,
         )
+        if (
+            node.type == "Opencast"
+            and not outcome.is_handled
+            and (
+                response.status_code in {401, 403, 404, 410}
+                or content_type_without_parameters(response) in HTML_CONTENT_TYPES
+            )
+        ):
+            opencast.invalidate_episode(
+                ctx,
+                opencast_course_id,
+                str(node.id or ""),
+            )
+        return outcome
 
 
 def download_all_files(

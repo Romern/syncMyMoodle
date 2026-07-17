@@ -114,10 +114,26 @@ def test_get_assignment_skips_course_on_api_error(caplog):
 
 def test_course_updates_distinguish_changed_unknown_and_unchanged_modules():
     session = FakeSession()
+    module_since = {42: 500, 43: 501, 44: 502, 99: 503}
 
     def update_response(url, kwargs):
-        assert kwargs["data"]["courseid"] == 101
-        assert kwargs["data"]["since"] == 500
+        assert kwargs["data"] == {
+            "wstoken": "token",
+            "wsfunction": moodle.MOODLE_UPDATE_FUNCTION,
+            "courseid": 101,
+            "tocheck[0][contextlevel]": "module",
+            "tocheck[0][id]": 42,
+            "tocheck[0][since]": 500,
+            "tocheck[1][contextlevel]": "module",
+            "tocheck[1][id]": 43,
+            "tocheck[1][since]": 501,
+            "tocheck[2][contextlevel]": "module",
+            "tocheck[2][id]": 44,
+            "tocheck[2][since]": 502,
+            "tocheck[3][contextlevel]": "module",
+            "tocheck[3][id]": 99,
+            "tocheck[3][since]": 503,
+        }
         return FakeResponse(
             json_payload={
                 "instances": [
@@ -145,14 +161,15 @@ def test_course_updates_distinguish_changed_unknown_and_unchanged_modules():
 
     session.add("POST", MOODLE_REST_URL, update_response)
 
-    updates = moodle.get_course_updates_since(session, "token", 101, 500)
+    updates = moodle.check_course_updates(session, "token", 101, module_since)
 
     assert updates is not None
     assert updates.confirms_unchanged(42, 500) is False
     assert updates.confirms_unchanged(44, 500) is False
     assert updates.confirms_unchanged(99, 500) is False
-    assert updates.confirms_unchanged(43, 500) is True
-    assert updates.confirms_unchanged(43, 499) is False
+    assert updates.confirms_unchanged(43, 501) is True
+    assert updates.confirms_unchanged(43, 500) is False
+    assert updates.confirms_unchanged(100, 501) is False
 
 
 def test_course_updates_fail_closed_on_non_module_warning():
@@ -168,7 +185,7 @@ def test_course_updates_fail_closed_on_non_module_warning():
         ),
     )
 
-    assert moodle.get_course_updates_since(session, "token", 101, 500) is None
+    assert moodle.check_course_updates(session, "token", 101, {43: 500}) is None
 
 
 def test_course_update_api_failure_is_silent_optional_cache_miss(caplog):
@@ -187,7 +204,7 @@ def test_course_update_api_failure_is_silent_optional_cache_miss(caplog):
         ),
     )
 
-    assert moodle.get_course_updates_since(session, "token", 101, 500) is None
+    assert moodle.check_course_updates(session, "token", 101, {43: 500}) is None
     assert "array_keys" not in caplog.text
 
 

@@ -17,7 +17,10 @@ from syncmymoodle.output import TerminalOutput, get_output
 if TYPE_CHECKING:
     from syncmymoodle.course_cache import CourseCacheState
     from syncmymoodle.emedia import EmediaVideo
-    from syncmymoodle.opencast import OpencastTrack
+    from syncmymoodle.opencast import (
+        OpencastEpisode,
+        OpencastMetadataState,
+    )
 
 
 # Retain a small overlap so a change committed at the integer-second token
@@ -83,6 +86,19 @@ class FilteredItem:
     reason: str
 
 
+@dataclass(frozen=True)
+class LinkedResourceCacheEntry:
+    """Revalidation metadata and optional HTML for one followed link."""
+
+    final_url: str
+    content_type: str
+    html: str | None = None
+    etag: str | None = None
+    last_modified: str | None = None
+    fresh_until: float | None = None
+    remote_size: int | None = None
+
+
 @dataclass
 class SyncContext:
     config: Config
@@ -113,10 +129,17 @@ class SyncContext:
     # None negatively caches a share that already failed during this run.
     sciebo_link_cache: dict[str, Node | None] = field(default_factory=dict)
     service_outages: ServiceOutageTracker = field(default_factory=ServiceOutageTracker)
-    opencast_episode_auth_cache: set[tuple[Any, str]] = field(default_factory=set)
-    opencast_track_cache: dict[str, tuple[OpencastTrack, ...]] = field(
+    opencast_course_auth_cache: set[tuple[str, str]] = field(default_factory=set)
+    opencast_episode_cache: dict[tuple[str | None, str], OpencastEpisode] = field(
         default_factory=dict
     )
+    opencast_seen_episodes: set[tuple[str, str]] = field(default_factory=set)
+    opencast_metadata_states: dict[tuple[str | None, str], OpencastMetadataState] = (
+        field(default_factory=dict)
+    )
+    opencast_series_cache: dict[
+        tuple[str | None, str], tuple[tuple[str, str], ...] | None
+    ] = field(default_factory=dict)
     emedia_video_cache: dict[int, EmediaVideo | None] = field(default_factory=dict)
     emedia_revision_cache: dict[str, str] = field(default_factory=dict)
     emedia_output_suffix: str | None = None
@@ -126,6 +149,13 @@ class SyncContext:
     lti_instance_cache: dict[int, dict[str, Any]] = field(default_factory=dict)
     h5p_activity_cache: dict[int, dict[str, Any]] = field(default_factory=dict)
     quiz_instance_cache: dict[int, dict[str, Any]] = field(default_factory=dict)
+    linked_resources_by_course: dict[str, dict[str, LinkedResourceCacheEntry]] = field(
+        default_factory=dict
+    )
+    linked_resource_results: dict[str, LinkedResourceCacheEntry | None] = field(
+        default_factory=dict
+    )
+    seen_linked_resources: set[tuple[str, str]] = field(default_factory=set)
 
     def __post_init__(self) -> None:
         self.auth = AuthState.from_config(self.config)
