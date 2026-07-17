@@ -33,6 +33,7 @@ MOODLE_REST_URL = f"{MOODLE_URL}webservice/rest/server.php"
 MOODLE_MOBILE_LAUNCH_URL = f"{MOODLE_URL}admin/tool/mobile/launch.php"
 MOODLE_MANAGE_TOKEN_URL = f"{MOODLE_URL}user/managetoken.php"
 MOBILE_URL_SCHEME = "syncmymoodle"
+MOBILE_SERVICE = "moodle_mobile_app"
 MOODLE_MOBILE_USER_AGENT = "MoodleMobile syncMyMoodle"
 MOODLE_UPDATE_FUNCTION = "core_course_check_updates"
 
@@ -161,6 +162,13 @@ class TokenValidation:
 
 
 @dataclass(frozen=True)
+class MobileLaunchRequest:
+    url: str
+    passport: str
+    url_scheme: str
+
+
+@dataclass(frozen=True)
 class CourseUpdates:
     """A conservative view of Moodle's per-module update feed."""
 
@@ -185,14 +193,33 @@ def mobile_site_signature(passport: str, site: str = MOODLE_URL) -> str:
     ).hexdigest()
 
 
+def create_browser_mobile_launch() -> MobileLaunchRequest:
+    passport = secrets.token_hex(16)
+    url_scheme = f"{MOBILE_URL_SCHEME}-{secrets.token_hex(8)}"
+    query = urllib.parse.urlencode(
+        {
+            "service": MOBILE_SERVICE,
+            "passport": passport,
+            "urlscheme": url_scheme,
+            "confirmed": "1",
+        }
+    )
+    return MobileLaunchRequest(
+        url=f"{MOODLE_MOBILE_LAUNCH_URL}?{query}",
+        passport=passport,
+        url_scheme=url_scheme,
+    )
+
+
 def parse_mobile_launch_location(
     location: str,
     passport: str,
     username: str,
     site: str = MOODLE_URL,
     moodle_user_id: int | None = None,
+    url_scheme: str = MOBILE_URL_SCHEME,
 ) -> MoodleTokens:
-    prefix = f"{MOBILE_URL_SCHEME}://token="
+    prefix = f"{url_scheme}://token="
     if not location.startswith(prefix):
         raise MobileLaunchError("Moodle returned an unexpected mobile launch redirect")
     encoded = location[len(prefix) :].split("&", 1)[0]
@@ -232,7 +259,7 @@ def acquire_mobile_tokens(
         response = session.get(
             MOODLE_MOBILE_LAUNCH_URL,
             params={
-                "service": "moodle_mobile_app",
+                "service": MOBILE_SERVICE,
                 "passport": passport,
                 "urlscheme": MOBILE_URL_SCHEME,
             },
@@ -326,11 +353,13 @@ def reset_mobile_token(session: requests.Session, session_key: str) -> None:
         )
 
 
-def validate_mobile_tokens(
-    tokens: MoodleTokens,
+def inspect_mobile_token(
+    wstoken: str,
     *,
+    site: str = MOODLE_URL,
     session: requests.Session | None = None,
 ) -> TokenValidation:
+    """Validate a mobile token and return its Moodle account metadata."""
     session = requests.Session() if session is None else session
     try:
         response = _request_moodle(
@@ -342,7 +371,7 @@ def validate_mobile_tokens(
                 "wsfunction": "core_webservice_get_site_info",
             },
             data={
-                "wstoken": tokens.wstoken,
+                "wstoken": wstoken,
                 "wsfunction": "core_webservice_get_site_info",
             },
             timeout=HTTP_TIMEOUT_SECONDS,
@@ -370,16 +399,16 @@ def validate_mobile_tokens(
             TokenValidationKind.UNKNOWN,
             f"Moodle token validation returned HTTP {response.status_code}",
         )
-    return validate_mobile_token_payload(
+    return inspect_mobile_token_payload(
         payload,
-        tokens,
+        site,
         server_time=_http_date_timestamp(response.headers.get("Date")),
     )
 
 
-def validate_mobile_token_payload(
+def inspect_mobile_token_payload(
     payload: Any,
-    tokens: MoodleTokens,
+    site: str,
     *,
     server_time: int | None = None,
 ) -> TokenValidation:
@@ -404,10 +433,31 @@ def validate_mobile_token_payload(
         return TokenValidation(
             TokenValidationKind.UNKNOWN, "site info omitted the Moodle site URL"
         )
-    if normalized_site(site_url) != normalized_site(tokens.site):
+    if normalized_site(site_url) != normalized_site(site):
         return TokenValidation(
             TokenValidationKind.INVALID, "token belongs to another site"
         )
+    return TokenValidation(
+        TokenValidationKind.VALID,
+        site_info=payload,
+        server_time=server_time,
+    )
+
+
+def validate_mobile_tokens(
+    tokens: MoodleTokens,
+    *,
+    session: requests.Session | None = None,
+) -> TokenValidation:
+    result = inspect_mobile_token(
+        tokens.wstoken,
+        site=tokens.site,
+        session=session,
+    )
+    if result.kind is not TokenValidationKind.VALID:
+        return result
+    assert result.site_info is not None
+    user_id = result.site_info["userid"]
     if tokens.moodle_user_id is None:
         return TokenValidation(
             TokenValidationKind.INVALID,
@@ -418,11 +468,7 @@ def validate_mobile_token_payload(
             TokenValidationKind.INVALID,
             "token belongs to another Moodle account",
         )
-    return TokenValidation(
-        TokenValidationKind.VALID,
-        site_info=payload,
-        server_time=server_time,
-    )
+    return result
 
 
 def _open_moodle_autologin(

@@ -39,8 +39,10 @@ CliValueKind: TypeAlias = Literal["scalar", "csv", "flag"]
 
 CONFLICT_HANDLING_OPTIONS = ("rename", "keep", "overwrite")
 DEFAULT_TOKEN_STORE = "keyring"
+DEFAULT_LOGIN_METHOD = "totp"
 DEFAULT_LOGIN_PROVIDER = "prompt"
 TOKEN_STORE_OPTIONS = (DEFAULT_TOKEN_STORE, "env-file")
+LOGIN_METHOD_OPTIONS = (DEFAULT_LOGIN_METHOD, "browser")
 LOGIN_PROVIDER_OPTIONS = (
     DEFAULT_LOGIN_PROVIDER,
     *TOKEN_STORE_OPTIONS,
@@ -303,6 +305,14 @@ class Config:
         validate=string_error,
         resolve_relative_path=True,
     )
+    login_method: str = option(
+        DEFAULT_LOGIN_METHOD,
+        group="auth.login",
+        key="method",
+        falsey_uses_default=True,
+        choices=LOGIN_METHOD_OPTIONS,
+        validate=string_error,
+    )
     login_provider: str = option(
         DEFAULT_LOGIN_PROVIDER,
         group="auth.login",
@@ -341,7 +351,7 @@ class Config:
         resolve_relative_path=True,
         cli=cli_arg(
             "login-env-file",
-            "temporarily use a protected environment file for the RWTH password "
+            "temporarily use an environment file for the RWTH password "
             "and optional TOTP seed",
         ),
     )

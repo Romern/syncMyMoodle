@@ -1,5 +1,6 @@
 import base64
 import hashlib
+import urllib.parse
 from datetime import UTC, datetime
 
 import pytest
@@ -13,7 +14,12 @@ from syncmymoodle.moodle_tokens import MoodleTokens
 from .helpers import FakeResponse, FakeSession
 
 
-def launch_location(passport, wstoken="ws-token", private_token="private-token"):
+def launch_location(
+    passport,
+    wstoken="ws-token",
+    private_token="private-token",
+    url_scheme="syncmymoodle",
+):
     server_site = MOODLE_URL.rstrip("/")
     signature = hashlib.md5(
         f"{server_site}{passport}".encode(), usedforsecurity=False
@@ -22,7 +28,28 @@ def launch_location(passport, wstoken="ws-token", private_token="private-token")
     if private_token is not None:
         parts.append(private_token)
     encoded = base64.b64encode(":::".join(parts).encode()).decode()
-    return f"syncmymoodle://token={encoded}"
+    return f"{url_scheme}://token={encoded}"
+
+
+def test_browser_mobile_launch_uses_a_correlated_one_use_scheme(monkeypatch):
+    values = iter(["passport", "nonce"])
+    monkeypatch.setattr(moodle.secrets, "token_hex", lambda size: next(values))
+
+    launch = moodle.create_browser_mobile_launch()
+
+    parsed = urllib.parse.urlsplit(launch.url)
+    query = urllib.parse.parse_qs(parsed.query)
+    assert urllib.parse.urlunsplit((*parsed[:3], "", "")) == (
+        moodle.MOODLE_MOBILE_LAUNCH_URL
+    )
+    assert query == {
+        "service": [moodle.MOBILE_SERVICE],
+        "passport": ["passport"],
+        "urlscheme": ["syncmymoodle-nonce"],
+        "confirmed": ["1"],
+    }
+    assert launch.passport == "passport"
+    assert launch.url_scheme == "syncmymoodle-nonce"
 
 
 def test_mobile_launch_parser_returns_paired_tokens():
@@ -47,6 +74,29 @@ def test_mobile_launch_parser_accepts_legacy_missing_private_token():
     )
 
     assert tokens.private_token is None
+
+
+def test_mobile_launch_parser_accepts_only_the_requested_url_scheme():
+    location = launch_location(
+        "passport",
+        url_scheme="syncmymoodle-one-use-scheme",
+    )
+
+    tokens = moodle.parse_mobile_launch_location(
+        location,
+        "passport",
+        "ab123456",
+        url_scheme="syncmymoodle-one-use-scheme",
+    )
+
+    assert tokens.wstoken == "ws-token"
+    with pytest.raises(moodle.MobileLaunchError, match="unexpected"):
+        moodle.parse_mobile_launch_location(
+            location,
+            "passport",
+            "ab123456",
+            url_scheme="syncmymoodle-another-scheme",
+        )
 
 
 def test_mobile_launch_parser_rejects_response_for_another_passport():
@@ -127,6 +177,22 @@ def test_token_validation_returns_site_info_for_matching_account():
 
     result = moodle.validate_mobile_tokens(
         bound_tokens(),
+        session=validation_session(payload),
+    )
+
+    assert result.kind is moodle.TokenValidationKind.VALID
+    assert result.site_info == payload
+
+
+def test_token_inspection_returns_identity_before_account_binding():
+    payload = {
+        "userid": 123,
+        "username": "https://sso.example.test/idp!opaque-persistent-id",
+        "siteurl": MOODLE_URL.rstrip("/"),
+    }
+
+    result = moodle.inspect_mobile_token(
+        "ws-token",
         session=validation_session(payload),
     )
 

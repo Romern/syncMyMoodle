@@ -62,7 +62,19 @@ syncmymoodle setup
 syncmymoodle
 ```
 
-Setup asks for:
+If you use a security key, passkey, or another MFA method handled by the RWTH
+login page, run setup through your browser instead:
+
+```shell
+syncmymoodle setup --browser
+```
+
+The command opens an RWTH/Moodle sign-in link. On the Moodle page, right-click
+the blue link offered when the app does not open automatically, copy its link
+address, and paste it back into the hidden prompt. That address contains your
+Moodle tokens, so do not share or save it.
+
+Without `--browser`, setup asks for:
 
 - Your RWTH Single Sign-On username
 - Your RWTH TOTP serial, such as `TOTP12345678`
@@ -73,8 +85,11 @@ Setup asks for:
 The TOTP serial is the identifier shown in the
 [RWTH IDM Token Manager](https://idm.rwth-aachen.de/selfservice/MFATokenManager).
 
-Setup performs one RWTH sign-in, obtains the Moodle tokens, stores them in the
-system keyring when available, and writes an example configuration.
+Browser setup asks only for the username, sync directory, and token store. It
+does not ask for an RWTH password or TOTP details. It also saves browser-assisted
+sign-in as the login method, so a later `syncmymoodle auth login` uses the browser
+again. Both setup methods perform one RWTH sign-in, obtain the Moodle tokens, store
+them in the system keyring when available, and write an example configuration.
 After this one-time login, syncMyMoodle should work without requiring re-sign-ins!
 
 Setup is only for a new installation. To change an existing setup, locate and
@@ -91,6 +106,9 @@ afterwards so the stored Moodle tokens match the new configuration:
 ```shell
 syncmymoodle auth login
 ```
+
+Use `syncmymoodle auth login --browser` for a one-off browser login when the
+saved login method is `totp`.
 
 ## Everyday use
 
@@ -241,7 +259,7 @@ There are two categories of auth data:
 
 The Moodle token record contains an API token and, when Moodle provides it, a
 browser-login token. The local record is stored either in the system keyring or
-in a protected environment file managed by syncMyMoodle.
+in an environment file managed by syncMyMoodle. The system keyring is preferred.
 
 In a desktop keyring viewer, look for service `syncmymoodle` and an entry named
 like `mobile-tokens:moodle.rwth-aachen.de:<username>`. The exact grouping and
@@ -250,9 +268,11 @@ display name depend on the operating system's keyring backend.
 A normal sync behaves as follows:
 
 - Valid stored tokens are used without contacting RWTH SSO.
+- With `auth.login.method = "browser"`, missing or invalid tokens stop the sync
+  and direct you to the browser-assisted `syncmymoodle auth login` flow.
 - With `auth.login.provider = "prompt"`, missing or invalid tokens stop the sync
   and direct you to `syncmymoodle auth login`.
-- A reusable provider such as a password manager or protected sign-in file can
+- A reusable provider such as a password manager or environment file can
   sign in again and replace missing or invalid tokens automatically.
 - Network or server failures leave token validity unknown and never trigger
   token replacement.
@@ -265,32 +285,45 @@ Automatic replacement makes at most one SSO attempt during a sync.
 |------------------------------------------|----------------------------------------------------------------------------------|
 | `syncmymoodle auth status`               | Validates local tokens and reports the cached browser session without signing in |
 | `syncmymoodle auth login`                | Performs one fresh SSO login and replaces the local token record                 |
-| `syncmymoodle auth migrate --to keyring` | Copies tokens to another secure store and updates the configuration              |
+| `syncmymoodle auth migrate --to keyring` | Copies tokens to another store and updates the configuration                     |
 | `syncmymoodle auth forget`               | Removes only this installation's tokens and cached browser session               |
 | `syncmymoodle auth reset-token`          | Revokes and replaces the shared Moodle API token                                 |
 
 `auth login` does not revoke the server token or log out another installation.
 Use `auth login --totp-manual` to ignore the configured TOTP source and enter a
-current code for that login only.
+current code for that login only. Use `auth login --browser` for a browser-based
+RWTH sign-in instead. The new tokens are accepted only after Moodle confirms
+that they belong to the same account as the existing token record. If Moodle
+does not return the private token used for browser sessions, syncMyMoodle offers
+one retry with a fresh link in a new private/incognito window. If that still
+fails, the account may have a legacy mobile-app token. Revoke the old token on
+Moodle's [Security keys page](https://moodle.rwth-aachen.de/user/managetoken.php),
+then run `syncmymoodle auth login` again.
 
-`auth migrate` leaves the previous token store untouched. To move to a protected
+`auth migrate` leaves the previous token store untouched. To move to an
 environment file, use `auth migrate --to env-file --env-file PATH`.
 
 `auth forget` leaves the configuration, RWTH sign-in secrets, and shared server
 token unchanged. If a reusable sign-in provider remains configured, a later
 sync can obtain and store the local tokens again.
 
-Use `auth reset-token` only when your account still has a legacy Moodle token
-without the ability to mint Browser sessions, or you think your tokens may have been exposed.
-Resetting the shared token logs out the Moodle app and every other
-syncMyMoodle installation that uses it.
+Use `auth reset-token` with the TOTP login method only when your account
+still has a legacy Moodle token that cannot create browser sessions, or you
+think your tokens may have been exposed. Resetting the shared token logs out the
+Moodle app and every other syncMyMoodle installation that uses it.
 
 ### Sign-in providers
 
+`auth.login.method` chooses `totp` or `browser` sign-in. With `totp`,
 `auth.login.provider` controls how RWTH SSO obtains the password and TOTP when
-new Moodle tokens are needed. Supported choices are interactive prompts, the
-system keyring, a protected environment file, 1Password, Bitwarden, pass, rbw,
+new Moodle tokens are needed. Supported providers are interactive prompts, the
+system keyring, an environment file, 1Password, Bitwarden, pass, rbw,
 gopass, and a custom command.
+
+These providers are used by the TOTP flow and by unattended recovery.
+Browser login does not read them. A setup created with `setup --browser` saves
+the browser method, so plain `auth login` opens the browser when its Moodle tokens
+eventually need replacing.
 
 During setup, installed password-manager CLIs are detected without being run.
 If selected, setup asks for provider-native password and optional TOTP

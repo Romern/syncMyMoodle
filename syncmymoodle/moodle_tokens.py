@@ -189,6 +189,14 @@ def store_tokens_verified(
         pass
 
 
+def overwrite_tokens_verified(
+    store: MoodleTokenStore,
+    tokens: MoodleTokens,
+) -> None:
+    """Replace an unreadable record when its store is managed by syncMyMoodle."""
+    _replace_tokens_verified(store, tokens)
+
+
 class KeyringTokenStore:
     def __init__(
         self,
@@ -242,7 +250,7 @@ class EnvFileTokenStore:
 
     @property
     def description(self) -> str:
-        return f"protected environment file ({self.path})"
+        return f"environment file ({self.path})"
 
     def check_available(self) -> ProviderAvailability:
         if self.path.exists() and not harden_private_file(self.path, "Moodle token"):

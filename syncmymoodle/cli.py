@@ -4,6 +4,7 @@ import json
 import logging
 import sys
 import tomllib
+import webbrowser
 from argparse import (
     SUPPRESS,
     Action,
@@ -33,6 +34,7 @@ from syncmymoodle import (
 from syncmymoodle import moodle as moodle_api
 from syncmymoodle.config import (
     CONFIG_OPTIONS,
+    DEFAULT_LOGIN_METHOD,
     DEFAULT_LOGIN_PROVIDER,
     DEFAULT_TOKEN_STORE,
     TOKEN_STORE_OPTIONS,
@@ -63,6 +65,7 @@ from syncmymoodle.moodle_tokens import (
     KeyringTokenStore,
     MoodleTokens,
     MoodleTokenStore,
+    overwrite_tokens_verified,
     store_tokens_verified,
     token_store_transaction,
 )
@@ -216,13 +219,19 @@ def build_parser() -> ArgumentParser:
     )
 
     subparsers = parser.add_subparsers(dest="command")
-    subparsers.add_parser(
+    setup_parser = subparsers.add_parser(
         "setup",
         help="configure and verify syncMyMoodle for first use",
         description=(
-            "Interactively configure RWTH sign-in, secure Moodle token storage, "
+            "Interactively configure RWTH sign-in, Moodle token storage, "
             "and the sync destination, then verify the RWTH sign-in with one login."
         ),
+    )
+    setup_parser.add_argument(
+        "--browser",
+        dest="browser_login",
+        action="store_true",
+        help="complete RWTH sign-in in a browser to use any supported MFA method",
     )
     config_parser = subparsers.add_parser("config", help="manage configuration files")
     config_subparsers = config_parser.add_subparsers(
@@ -260,15 +269,12 @@ def build_parser() -> ArgumentParser:
         "--token-store",
         choices=TOKEN_STORE_OPTIONS,
         default=DEFAULT_TOKEN_STORE,
-        help="secure store for the migrated Moodle tokens",
+        help="store for the migrated Moodle tokens",
     )
     migrate_parser.add_argument(
         "--token-env-file",
         default=None,
-        help=(
-            "protected environment file for Moodle tokens when --token-store "
-            "is env-file"
-        ),
+        help=("environment file for Moodle tokens when --token-store is env-file"),
     )
     config_subparsers.add_parser(
         "check",
@@ -291,16 +297,23 @@ def build_parser() -> ArgumentParser:
             "stored Moodle tokens. This does not revoke the shared Moodle API token."
         ),
     )
-    auth_login_parser.add_argument(
+    auth_login_method = auth_login_parser.add_mutually_exclusive_group()
+    auth_login_method.add_argument(
+        "--browser",
+        dest="browser_login",
+        action="store_true",
+        help="complete RWTH sign-in in a browser to use any supported MFA method",
+    )
+    auth_login_method.add_argument(
         "--totp-manual",
         action="store_true",
         help="ignore the configured TOTP source and prompt for a code for this login",
     )
     auth_migrate_parser = auth_subparsers.add_parser(
         "migrate",
-        help="copy Moodle tokens to another secure store and update the configuration",
+        help="copy Moodle tokens to another store and update the configuration",
         description=(
-            "Copy the stored Moodle tokens to another secure store and update the "
+            "Copy the stored Moodle tokens to another store and update the "
             "selected configuration. The previous store is left untouched."
         ),
     )
@@ -308,12 +321,12 @@ def build_parser() -> ArgumentParser:
         "--to",
         choices=TOKEN_STORE_OPTIONS,
         required=True,
-        help="secure store to use for Moodle tokens",
+        help="store to use for Moodle tokens",
     )
     auth_migrate_parser.add_argument(
         "--env-file",
         default=None,
-        help="destination protected environment file when --to is env-file",
+        help="destination environment file when --to is env-file",
     )
     auth_subparsers.add_parser(
         "status",
@@ -736,27 +749,70 @@ def run_config_command(args: Namespace, parser: ArgumentParser) -> None:
     parser.error(f"unknown config command: {args.config_command}")
 
 
+def browser_login_selected(args: Namespace, config: Config) -> bool:
+    return bool(
+        getattr(args, "browser_login", False)
+        or (
+            config.login_method == "browser" and not getattr(args, "totp_manual", False)
+        )
+    )
+
+
 def login_auth_command(
     args: Namespace,
     parser: ArgumentParser,
     keyring_backend: Any,
 ) -> None:
     ctx = configured_auth_context(args, parser, keyring_backend)
+    browser_login = browser_login_selected(args, ctx.config)
     ctx.config = replace(ctx.config, dry_run=False)
     try:
         store = token_store_from_config(ctx.config, keyring_backend)
     except ProviderSecretError as error:
         parser.error(str(error))
     require_store_available(store, parser)
-    output.phase("Logging in to obtain the current Moodle tokens...")
-    rwth.login(ctx, logger, reuse_cached_session=False)
-    tokens = acquire_validated_moodle_tokens(ctx, parser)
+    previous: MoodleTokens | None = None
+    overwrite_unreadable_store = False
+    if browser_login:
+        try:
+            previous = store.load()
+        except ProviderSecretError as error:
+            if not isinstance(store, EnvFileTokenStore):
+                parser.error(str(error))
+            overwrite_unreadable_store = True
+            output.warning(
+                f"The existing {store.description} could not be read ({error}). "
+                "It will be replaced only after you confirm the browser account."
+            )
+    tokens = acquire_moodle_tokens_for_login(
+        ctx,
+        parser,
+        browser=browser_login,
+        previous=previous,
+    )
+    if (
+        browser_login
+        and tokens.private_token is None
+        and not output.confirm(
+            "Store the Moodle API token without browser-session support"
+        )
+    ):
+        parser.error("browser login cancelled; the stored tokens were left unchanged")
     try:
-        store_tokens_verified(store, tokens)
+        if overwrite_unreadable_store:
+            overwrite_tokens_verified(store, tokens)
+        else:
+            store_tokens_verified(store, tokens)
     except ProviderSecretError as error:
         parser.error(str(error))
     output.success(f"Stored Moodle tokens in {store.description}")
-    output.print(f"Browser session cached in {ctx.config.cookie_file}")
+    if browser_login and tokens.private_token is None:
+        output.warning(
+            "Moodle did not provide a browser login token. Moodle API downloads "
+            "will work, but downloads that need a browser session may not."
+        )
+    else:
+        output.print(f"Browser session cached in {ctx.config.cookie_file}")
 
 
 def setup_sync_directory_value(value: str) -> str:
@@ -765,24 +821,30 @@ def setup_sync_directory_value(value: str) -> str:
 
 def prompt_setup_config(
     parser: ArgumentParser,
-) -> tuple[ConfigDict, str, str]:
+    *,
+    browser_login: bool = False,
+) -> tuple[ConfigDict, str]:
     username = output.prompt("RWTH SSO username")
     if not username:
         parser.error("RWTH SSO username is required")
-    totp_serial = output.prompt("RWTH SSO TOTP serial (for example, TOTP12345678)")
-    if not totp_serial:
-        parser.error("RWTH SSO TOTP serial is required")
+    totp_serial = ""
+    if not browser_login:
+        totp_serial = output.prompt("RWTH SSO TOTP serial (for example, TOTP12345678)")
+        if not totp_serial:
+            parser.error("RWTH SSO TOTP serial is required")
     sync_directory = output.prompt(
         "Directory to sync Moodle files to",
         str(Path.cwd()),
     )
     config: ConfigDict = {
         "auth.user": username,
-        "auth.login.totp_serial": totp_serial,
+        "auth.login.method": "browser" if browser_login else DEFAULT_LOGIN_METHOD,
         "auth.login.provider": DEFAULT_LOGIN_PROVIDER,
         "paths.sync_directory": setup_sync_directory_value(sync_directory),
     }
-    return config, username, totp_serial
+    if totp_serial:
+        config["auth.login.totp_serial"] = totp_serial
+    return config, username
 
 
 def mutable_toml_table(
@@ -861,6 +923,177 @@ def acquire_validated_moodle_tokens(
     return tokens
 
 
+def _prompt_browser_mobile_callback(
+    launch: moodle_api.MobileLaunchRequest,
+    parser: ArgumentParser,
+    *,
+    private_window: bool = False,
+) -> str:
+    if private_window:
+        output.phase("Retry the RWTH sign-in in a new private browser window.")
+        output.print(
+            "Open a new private/incognito browser window and paste this link into it:"
+        )
+    else:
+        output.phase("Complete the RWTH sign-in in your browser.")
+    output.print(launch.url)
+    if not private_window:
+        try:
+            opened = webbrowser.open(launch.url, new=2)
+        except (OSError, webbrowser.Error):
+            opened = False
+        if opened:
+            output.print("Opened the sign-in link in the default browser.")
+        else:
+            output.caution(
+                "Could not open a browser automatically; open the link above."
+            )
+    output.print(
+        "On the Moodle page, right-click the blue link offered when the app does "
+        "not open automatically and copy its link address. The pasted value is "
+        "hidden because it contains your Moodle tokens."
+    )
+    callback = output.prompt_secret("Paste the complete app-launch link")
+    if not callback:
+        parser.error("the Moodle app-launch link is required")
+    return callback.strip()
+
+
+def _bind_browser_moodle_account(
+    tokens: MoodleTokens,
+    result: moodle_api.TokenValidation,
+    previous: MoodleTokens | None,
+    parser: ArgumentParser,
+) -> MoodleTokens:
+    assert result.site_info is not None
+    user_id = result.site_info["userid"]
+    assert isinstance(user_id, int) and not isinstance(user_id, bool)
+    tokens = replace(tokens, moodle_user_id=user_id)
+
+    if previous is not None and previous.moodle_user_id != user_id:
+        parser.error(
+            "the browser authenticated a different Moodle account; "
+            "the existing tokens were left unchanged"
+        )
+    if (
+        previous is not None
+        and tokens.private_token is None
+        and tokens.wstoken == previous.wstoken
+    ):
+        return replace(tokens, private_token=previous.private_token)
+    return tokens
+
+
+def _confirm_browser_moodle_account(
+    tokens: MoodleTokens,
+    result: moodle_api.TokenValidation,
+    expected_username: str,
+    parser: ArgumentParser,
+) -> None:
+    assert result.site_info is not None
+    fullname = result.site_info.get("fullname")
+    account = (
+        fullname.strip()
+        if isinstance(fullname, str) and fullname.strip()
+        else f"Moodle user {tokens.moodle_user_id}"
+    )
+    if not output.confirm(
+        f"Store tokens for {account} as RWTH account {expected_username}",
+        default=True,
+    ):
+        parser.error("browser login cancelled before storing Moodle tokens")
+
+
+def acquire_browser_moodle_tokens(
+    ctx: SyncContext,
+    parser: ArgumentParser,
+    previous: MoodleTokens | None = None,
+) -> MoodleTokens:
+    assert ctx.auth.user is not None
+    private_window = False
+    while True:
+        launch = moodle_api.create_browser_mobile_launch()
+        callback = _prompt_browser_mobile_callback(
+            launch,
+            parser,
+            private_window=private_window,
+        )
+        try:
+            tokens = moodle_api.parse_mobile_launch_location(
+                callback,
+                launch.passport,
+                ctx.auth.user,
+                url_scheme=launch.url_scheme,
+            )
+        except moodle_api.MobileLaunchError as error:
+            parser.error(str(error))
+
+        result = moodle_api.inspect_mobile_token(tokens.wstoken, site=tokens.site)
+        if result.kind is not moodle_api.TokenValidationKind.VALID:
+            detail = f": {result.detail}" if result.detail else ""
+            parser.error(f"could not validate Moodle tokens{detail}")
+        tokens = _bind_browser_moodle_account(
+            tokens,
+            result,
+            previous,
+            parser,
+        )
+        if tokens.private_token is not None:
+            break
+        if not private_window:
+            output.warning(
+                "Moodle did not provide the private token needed to create browser "
+                "sessions. Try a fresh login in a new private/incognito browser "
+                "window."
+            )
+            if output.confirm(
+                "Try again in a new private browser window",
+                default=True,
+            ):
+                private_window = True
+                continue
+        output.warning(
+            "If a fresh private-window login still does not provide the private "
+            "token, your account may have a legacy Moodle mobile-app token. Revoke "
+            "the old token manually on Moodle's Security keys page, then retry: "
+            f"{moodle_api.MOODLE_MANAGE_TOKEN_URL}"
+        )
+        break
+
+    if previous is None:
+        _confirm_browser_moodle_account(tokens, result, ctx.auth.user, parser)
+    elif (
+        previous.private_token is not None
+        and tokens.private_token is None
+        and tokens.wstoken != previous.wstoken
+    ):
+        parser.error(
+            "Moodle did not return the browser login token for the replacement API "
+            "token. The existing tokens were left unchanged"
+        )
+    return tokens
+
+
+def acquire_moodle_tokens_for_login(
+    ctx: SyncContext,
+    parser: ArgumentParser,
+    *,
+    browser: bool,
+    previous: MoodleTokens | None = None,
+    persist_session: bool = True,
+) -> MoodleTokens:
+    if browser:
+        return acquire_browser_moodle_tokens(ctx, parser, previous)
+    output.phase("Logging in to obtain the current Moodle tokens...")
+    rwth.login(
+        ctx,
+        logger,
+        reuse_cached_session=False,
+        persist_session=persist_session,
+    )
+    return acquire_validated_moodle_tokens(ctx, parser)
+
+
 def prompt_setup_token_store(
     config: ConfigDict,
     username: str,
@@ -881,11 +1114,11 @@ def prompt_setup_token_store(
         )
     default_path = pathing.user_config_dir() / "moodle-tokens.env"
     env_file = output.prompt(
-        "File for securely storing Moodle tokens",
+        "File for storing Moodle tokens",
         str(default_path),
     )
     if not env_file:
-        raise ProviderSecretError("a secure Moodle token store is required")
+        raise ProviderSecretError("a Moodle token store is required")
     config["auth.tokens.store"] = "env-file"
     config["auth.tokens.env_file"] = str(pathing.absolute_path(Path(env_file)))
 
@@ -944,8 +1177,12 @@ def setup_command(
     if legacy_path is not None:
         parser.error(legacy_json_migration_message(legacy_path))
 
-    config, username, _ = prompt_setup_config(parser)
-    prompt_setup_password_manager(config, parser)
+    config, username = prompt_setup_config(
+        parser,
+        browser_login=args.browser_login,
+    )
+    if not args.browser_login:
+        prompt_setup_password_manager(config, parser)
     try:
         prompt_setup_token_store(config, username, keyring_backend)
     except ProviderSecretError as error:
@@ -958,19 +1195,24 @@ def setup_command(
     store = token_store_from_config(ctx.config, keyring_backend)
     require_store_available(store, parser)
 
-    output.phase("Logging in once to obtain Moodle tokens...")
-    rwth.login(
+    tokens = acquire_moodle_tokens_for_login(
         ctx,
-        logger,
-        reuse_cached_session=False,
+        parser,
+        browser=args.browser_login,
         persist_session=False,
     )
-    tokens = acquire_validated_moodle_tokens(ctx, parser)
     limited_opencast = tokens.private_token is None
     if limited_opencast and not output.confirm(
         "Moodle did not provide the browser login token required for embedded "
         "Opencast downloads. Finish setup with limited Opencast support"
     ):
+        if args.browser_login:
+            parser.error(
+                "setup cancelled before saving the configuration or Moodle tokens. "
+                "Moodle may have returned a legacy mobile-app token; reset the "
+                "Moodle mobile web service token in Moodle before rerunning "
+                "`syncmymoodle setup --browser`."
+            )
         parser.error(
             "setup cancelled before saving the configuration or Moodle tokens. "
             "To repair the shared token, rerun setup, finish with limited Opencast "
@@ -989,11 +1231,17 @@ def setup_command(
         "RWTH password or TOTP code."
     )
     if limited_opencast:
-        output.warning(
-            "Embedded Opencast downloads may stop working after the cached browser "
-            "session expires. Run `syncmymoodle auth reset-token` to create a "
-            "complete token pair."
-        )
+        if ctx.config.login_method == "browser":
+            output.warning(
+                "Downloads that need a Moodle browser session may not work. Run "
+                "`syncmymoodle auth login` to retry in a new private browser window."
+            )
+        else:
+            output.warning(
+                "Embedded Opencast downloads may stop working after the cached "
+                "browser session expires. Run `syncmymoodle auth reset-token` to "
+                "create a complete token pair."
+            )
     output.print("Run `syncmymoodle` to start syncing.")
 
 
@@ -1052,6 +1300,11 @@ def migrate_auth_command(
         require_store_available(source, parser)
         tokens = source.load()
         if tokens is None:
+            if config.login_method == "browser":
+                parser.error(
+                    "no stored Moodle tokens found; run `syncmymoodle auth login` "
+                    "before migrating the token store"
+                )
             ctx = SyncContext(config=config)
             configure_secret_resolvers(ctx, args, keyring_backend)
             output.phase(
@@ -1096,6 +1349,8 @@ def migrate_auth_command(
 
 
 def sign_in_method_status(config: Config, keyring_backend: Any) -> tuple[str, bool]:
+    if config.login_method == "browser":
+        return "browser-assisted sign-in (interactive)", True
     source = config.auth_source
     if isinstance(source, KeyringAuthSource):
         keyring_provider = KeyringProvider(keyring_backend)
@@ -1107,7 +1362,7 @@ def sign_in_method_status(config: Config, keyring_backend: Any) -> tuple[str, bo
     if isinstance(source, EnvFileAuthSource):
         available = source.path.is_file()
         state = "available" if available else "missing"
-        return f"protected environment file {source.path} ({state})", available
+        return f"environment file {source.path} ({state})", available
     if isinstance(source, ExternalAuthSource):
         try:
             provider = build_external_secret_provider(source.provider)
@@ -1207,9 +1462,14 @@ def report_moodle_tokens(config: Config, tokens: MoodleTokens) -> bool:
     else:
         output.caution("Browser login token: missing")
         if config.link_source_enabled("opencast"):
+            repair_command = (
+                "syncmymoodle auth login"
+                if config.login_method == "browser"
+                else "syncmymoodle auth reset-token"
+            )
             output.caution(
                 "Embedded Opencast needs a browser login token; run "
-                "`syncmymoodle auth reset-token`."
+                f"`{repair_command}`."
             )
             failed = True
     return failed
@@ -1263,7 +1523,12 @@ def forget_auth_command(
         "The shared Moodle API token, configuration, and RWTH sign-in secrets "
         "will remain unchanged."
     )
-    if not isinstance(config.auth_source, PromptAuthSource):
+    if config.login_method == "browser":
+        output.caution(
+            "Browser-assisted sign-in remains configured. Run `syncmymoodle auth "
+            "login` when you want to store local Moodle tokens again."
+        )
+    elif not isinstance(config.auth_source, PromptAuthSource):
         output.caution(
             "The configured RWTH sign-in method remains available, so a later sync "
             "can sign in and store local Moodle tokens again."
@@ -1306,6 +1571,11 @@ def reset_token_auth_command(
     keyring_backend: Any,
 ) -> None:
     ctx = configured_auth_context(args, parser, keyring_backend)
+    if ctx.config.login_method == "browser":
+        parser.error(
+            "auth reset-token requires the TOTP login method. Run "
+            "`syncmymoodle auth login` to refresh browser-assisted tokens instead"
+        )
     output.caution("This resets the shared Moodle API token.")
     output.caution(
         "The Moodle app and every other syncMyMoodle installation using it "
@@ -1759,6 +2029,8 @@ def configure_secret_resolvers(
     *,
     resolve_otp: bool = True,
 ) -> None:
+    if browser_login_selected(args, ctx.config):
+        return
     source = ctx.config.auth_source
     if isinstance(source, KeyringAuthSource):
         configure_keyring_resolver(
@@ -1966,6 +2238,12 @@ def reauthenticate_moodle_tokens(
     ctx: SyncContext,
     store: MoodleTokenStore,
 ) -> tuple[MoodleTokens, moodle_api.TokenValidation]:
+    if ctx.config.login_method == "browser":
+        logger.critical(
+            "Moodle tokens are missing or invalid, and browser-assisted sign-in "
+            "requires interaction. Run `syncmymoodle auth login`."
+        )
+        raise SystemExit(1)
     if isinstance(ctx.config.auth_source, PromptAuthSource):
         logger.critical(
             "Moodle tokens are missing or invalid, and the configured RWTH sign-in "

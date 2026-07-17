@@ -13,9 +13,11 @@ import syncmymoodle.cli as cli
 import syncmymoodle.secret_providers as secret_providers
 from syncmymoodle.config import (
     CONFIG_OPTIONS,
+    DEFAULT_LOGIN_METHOD,
     DEFAULT_LOGIN_PROVIDER,
     DEFAULT_TOKEN_STORE,
     LEGACY_KEY_MAP,
+    LOGIN_METHOD_OPTIONS,
     LOGIN_PROVIDER_OPTIONS,
     TOKEN_STORE_OPTIONS,
     Config,
@@ -251,7 +253,7 @@ def test_setup_help_explains_what_will_be_configured(capsys):
     assert exc_info.value.code == 0
     output = capsys.readouterr().out
     assert "usage: syncmymoodle setup" in output
-    assert "configure RWTH sign-in, secure Moodle token storage" in output
+    assert "configure RWTH sign-in, Moodle token storage" in output
     assert "verify the RWTH sign-in with one login" in output
 
 
@@ -274,17 +276,30 @@ def test_management_commands_reject_sync_options(argv, option, capsys):
     assert option in error
 
 
-def test_totp_manual_is_scoped_to_auth_login(capsys):
+def test_browser_login_and_totp_manual_are_scoped_auth_modes(capsys):
     parser = cli.build_parser()
 
     args = parser.parse_args(["auth", "login", "--totp-manual"])
 
     assert args.totp_manual is True
+    assert args.browser_login is False
     assert "--totp-manual" not in parser.format_help()
     with pytest.raises(SystemExit) as exc_info:
         parser.parse_args(["auth", "status", "--totp-manual"])
     assert exc_info.value.code == 2
     assert "unrecognized arguments: --totp-manual" in capsys.readouterr().err
+
+    browser_args = parser.parse_args(["auth", "login", "--browser"])
+    assert browser_args.browser_login is True
+    assert browser_args.browser is None
+    setup_args = parser.parse_args(["setup", "--browser"])
+    assert setup_args.browser_login is True
+    assert setup_args.browser is None
+
+    with pytest.raises(SystemExit) as exc_info:
+        parser.parse_args(["auth", "login", "--browser", "--totp-manual"])
+    assert exc_info.value.code == 2
+    assert "not allowed with argument --browser" in capsys.readouterr().err
 
 
 def test_config_selection_is_rejected_when_command_does_not_read_it(capsys):
@@ -525,6 +540,7 @@ def test_config_validation_rejects_invalid_choices():
     with pytest.raises(ConfigValidationError) as exc_info:
         validate_config(
             {
+                "auth": {"login": {"method": "direct"}},
                 "courses": {"prefix_handling": "later"},
                 "downloads": {"conflict_handling": "delete"},
                 "modules": {"quiz": "screenshots"},
@@ -532,6 +548,7 @@ def test_config_validation_rejects_invalid_choices():
         )
 
     message = str(exc_info.value)
+    assert "auth.login.method must be one of" in message
     assert "courses.prefix_handling must be one of" in message
     assert "downloads.conflict_handling must be one of" in message
     assert "modules.quiz must be one of" in message
@@ -552,9 +569,12 @@ def test_config_validation_rejects_non_boolean_toggles():
     assert "links.youtube must be true or false" in message
 
 
-@pytest.mark.parametrize("key", ["auto_reauthenticate", "totp_manual"])
-def test_removed_login_policy_settings_are_rejected(key):
-    with pytest.raises(ConfigValidationError, match=f"auth.login.{key}"):
+@pytest.mark.parametrize("key", ["auto_reauthenticate", "totp_manual", "mode"])
+def test_removed_login_settings_are_rejected(key):
+    with pytest.raises(
+        ConfigValidationError,
+        match=f"unknown config key 'auth.login.{key}'",
+    ):
         validate_config({"auth": {"login": {key: True}}})
 
 
@@ -618,6 +638,7 @@ def test_defaults_applied_for_empty_config(tmp_path, monkeypatch):
     assert cfg.course_prefix_handling == "keep"
     assert cfg.conflict_handling == "rename"
     assert cfg.token_store == DEFAULT_TOKEN_STORE
+    assert cfg.login_method == DEFAULT_LOGIN_METHOD
     assert cfg.login_provider == DEFAULT_LOGIN_PROVIDER
     assert cfg.follow_links is True
     assert cfg.update_files is False
@@ -640,6 +661,7 @@ def test_auth_defaults_and_choices_have_one_source_of_truth():
     options = {option.canonical_key: option for option in CONFIG_OPTIONS}
 
     assert options["auth.tokens.store"].choices == TOKEN_STORE_OPTIONS
+    assert options["auth.login.method"].choices == LOGIN_METHOD_OPTIONS
     assert options["auth.login.provider"].choices == LOGIN_PROVIDER_OPTIONS
     args = cli.build_parser().parse_args(["config", "migrate"])
     assert args.token_store == DEFAULT_TOKEN_STORE

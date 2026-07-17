@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import logging
 import tomllib
 from pathlib import Path
@@ -62,6 +63,58 @@ def valid(tokens: MoodleTokens) -> cli.moodle_api.TokenValidation:
         },
         server_time=1_000,
     )
+
+
+def browser_callback(
+    launch: cli.moodle_api.MobileLaunchRequest,
+    *,
+    wstoken: str = "browser-ws-token",
+    private_token: str | None = "browser-private-token",
+) -> str:
+    parts = [
+        cli.moodle_api.mobile_site_signature(launch.passport),
+        wstoken,
+    ]
+    if private_token is not None:
+        parts.append(private_token)
+    encoded = base64.b64encode(":::".join(parts).encode()).decode()
+    return f"{launch.url_scheme}://token={encoded}"
+
+
+def stub_browser_handoff(
+    monkeypatch,
+    *,
+    wstoken: str = "browser-ws-token",
+    private_token: str | None = "browser-private-token",
+    user_id: int = 123,
+    fullname: str = "Ada Example",
+) -> cli.moodle_api.MobileLaunchRequest:
+    launch = cli.moodle_api.MobileLaunchRequest(
+        "https://moodle.example.test/mobile-launch",
+        "passport",
+        "syncmymoodle-one-use",
+    )
+    monkeypatch.setattr(cli.moodle_api, "create_browser_mobile_launch", lambda: launch)
+    monkeypatch.setattr(cli.webbrowser, "open", lambda *args, **kwargs: False)
+    monkeypatch.setattr(
+        cli.output,
+        "prompt_secret",
+        lambda label: browser_callback(
+            launch,
+            wstoken=wstoken,
+            private_token=private_token,
+        ),
+    )
+
+    def inspect(actual_wstoken, *, site):
+        assert actual_wstoken == wstoken
+        return cli.moodle_api.TokenValidation(
+            cli.moodle_api.TokenValidationKind.VALID,
+            site_info={"userid": user_id, "fullname": fullname, "siteurl": site},
+        )
+
+    monkeypatch.setattr(cli.moodle_api, "inspect_mobile_token", inspect)
+    return launch
 
 
 def write_env_token_config(tmp_path: Path) -> tuple[Path, Path, MoodleTokens]:
@@ -157,7 +210,7 @@ def test_setup_rolls_back_tokens_when_config_write_fails(tmp_path, monkeypatch):
     monkeypatch.setattr(
         cli,
         "prompt_setup_config",
-        lambda parser: (
+        lambda parser, **kwargs: (
             {
                 "auth.user": original.username,
                 "auth.login.totp_serial": "TOTP123",
@@ -165,7 +218,6 @@ def test_setup_rolls_back_tokens_when_config_write_fails(tmp_path, monkeypatch):
                 "paths.sync_directory": str(tmp_path / "sync"),
             },
             original.username,
-            "TOTP123",
         ),
     )
     monkeypatch.setattr(cli, "prompt_setup_password_manager", lambda *args: None)
@@ -197,6 +249,49 @@ def test_setup_rolls_back_tokens_when_config_write_fails(tmp_path, monkeypatch):
     assert not (tmp_path / "xdg" / "syncmymoodle" / "config.toml").exists()
 
 
+def test_browser_setup_skips_totp_and_password_manager_configuration(
+    tmp_path, monkeypatch, capsys
+):
+    config_home = tmp_path / "xdg"
+    fake_keyring = FakeKeyring()
+    stored = tokens()
+    answers = iter([stored.username, str(tmp_path / "sync"), ""])
+    browser_calls = []
+
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(config_home))
+    monkeypatch.setattr(cli, "load_keyring_backend", lambda: fake_keyring)
+    monkeypatch.setattr("builtins.input", lambda: next(answers))
+    monkeypatch.setattr(
+        cli,
+        "detect_password_manager_clis",
+        lambda: pytest.fail("browser setup must not configure TOTP-login secrets"),
+    )
+    monkeypatch.setattr(
+        cli.rwth,
+        "login",
+        lambda *args, **kwargs: pytest.fail("browser setup performed direct SSO"),
+    )
+
+    def acquire(ctx, parser, previous=None):
+        browser_calls.append((ctx.auth.user, previous))
+        return stored
+
+    monkeypatch.setattr(cli, "acquire_browser_moodle_tokens", acquire)
+
+    cli.main(["setup", "--browser"])
+
+    parsed = tomllib.loads(
+        (config_home / "syncmymoodle" / "config.toml").read_text(encoding="utf-8")
+    )
+    assert parsed["auth"]["user"] == stored.username
+    assert parsed["auth"]["login"]["method"] == "browser"
+    assert parsed["auth"]["login"]["provider"] == "prompt"
+    assert parsed["auth"]["login"]["totp_serial"] == ""
+    assert browser_calls == [(stored.username, None)]
+    assert MoodleTokens.from_json(next(iter(fake_keyring.values.values()))) == stored
+    assert "RWTH SSO TOTP serial" not in capsys.readouterr().out
+
+
 def test_setup_token_file_fallback_prompt_is_clear(tmp_path, monkeypatch, capsys):
     token_path = tmp_path / "tokens.env"
     config = {}
@@ -210,7 +305,7 @@ def test_setup_token_file_fallback_prompt_is_clear(tmp_path, monkeypatch, capsys
     cli.prompt_setup_token_store(config, "ab123456", None)
 
     assert (
-        "File for securely storing Moodle tokens "
+        "File for storing Moodle tokens "
         f"[{cli.pathing.user_config_dir() / 'moodle-tokens.env'}]:"
         in capsys.readouterr().out
     )
@@ -218,6 +313,203 @@ def test_setup_token_file_fallback_prompt_is_clear(tmp_path, monkeypatch, capsys
         "auth.tokens.store": "env-file",
         "auth.tokens.env_file": str(token_path),
     }
+
+
+def test_browser_login_opens_handoff_and_binds_confirmed_moodle_account(
+    monkeypatch, capsys
+):
+    launch = stub_browser_handoff(monkeypatch)
+    callback = browser_callback(launch)
+    ctx = SyncContext(Config.from_dict({"auth": {"user": "ab123456"}}))
+    opened = []
+    confirmations = []
+
+    monkeypatch.setattr(
+        cli.webbrowser,
+        "open",
+        lambda url, *, new: opened.append((url, new)) or True,
+    )
+    monkeypatch.setattr(
+        cli.output,
+        "confirm",
+        lambda label, default=False: confirmations.append((label, default)) or True,
+    )
+
+    result = cli.acquire_browser_moodle_tokens(ctx, cli.build_parser())
+
+    assert result == MoodleTokens(
+        "ab123456",
+        "browser-ws-token",
+        "browser-private-token",
+        moodle_user_id=123,
+    )
+    assert opened == [(launch.url, 2)]
+    assert confirmations == [
+        ("Store tokens for Ada Example as RWTH account ab123456", True)
+    ]
+    output = capsys.readouterr().out
+    assert launch.url in output
+    assert callback not in output
+    assert "browser-ws-token" not in output
+    assert "browser-private-token" not in output
+    assert "right-click the blue link" in output
+    assert "private browser window" not in output
+
+
+def test_browser_login_keeps_existing_private_token_when_moodle_omits_it(
+    monkeypatch,
+):
+    stored = tokens()
+    ctx = SyncContext(Config.from_dict({"auth": {"user": stored.username}}))
+    stub_browser_handoff(
+        monkeypatch,
+        wstoken=stored.wstoken,
+        private_token=None,
+    )
+    monkeypatch.setattr(
+        cli.output,
+        "confirm",
+        lambda *args, **kwargs: pytest.fail(
+            "an already-bound account must not need confirmation"
+        ),
+    )
+
+    result = cli.acquire_browser_moodle_tokens(
+        ctx,
+        cli.build_parser(),
+        stored,
+    )
+
+    assert result == stored
+
+
+def test_browser_login_retries_a_missing_private_token_in_a_private_window(
+    monkeypatch, capsys
+):
+    launches = [
+        cli.moodle_api.MobileLaunchRequest(
+            "https://moodle.example.test/first-launch",
+            "first-passport",
+            "syncmymoodle-first",
+        ),
+        cli.moodle_api.MobileLaunchRequest(
+            "https://moodle.example.test/second-launch",
+            "second-passport",
+            "syncmymoodle-second",
+        ),
+    ]
+    created = []
+    opened = []
+    confirmations = []
+
+    def create_launch():
+        launch = launches[len(created)]
+        created.append(launch)
+        return launch
+
+    def callback(label):
+        del label
+        launch = created[-1]
+        return browser_callback(
+            launch,
+            wstoken=f"browser-ws-token-{len(created)}",
+            private_token=None if len(created) == 1 else "browser-private-token",
+        )
+
+    def inspect(wstoken, *, site):
+        assert site == "https://moodle.rwth-aachen.de/"
+        assert wstoken == f"browser-ws-token-{len(created)}"
+        return cli.moodle_api.TokenValidation(
+            cli.moodle_api.TokenValidationKind.VALID,
+            site_info={"userid": 123, "fullname": "Ada Example"},
+        )
+
+    def confirm(label, default=False):
+        confirmations.append((label, default))
+        return True
+
+    monkeypatch.setattr(cli.moodle_api, "create_browser_mobile_launch", create_launch)
+    monkeypatch.setattr(cli.output, "prompt_secret", callback)
+    monkeypatch.setattr(cli.moodle_api, "inspect_mobile_token", inspect)
+    monkeypatch.setattr(
+        cli.webbrowser,
+        "open",
+        lambda url, *, new: opened.append((url, new)) or True,
+    )
+    monkeypatch.setattr(cli.output, "confirm", confirm)
+    ctx = SyncContext(Config.from_dict({"auth": {"user": "ab123456"}}))
+
+    result = cli.acquire_browser_moodle_tokens(ctx, cli.build_parser())
+
+    assert result == MoodleTokens(
+        "ab123456",
+        "browser-ws-token-2",
+        "browser-private-token",
+        moodle_user_id=123,
+    )
+    assert created == launches
+    assert opened == [(launches[0].url, 2)]
+    assert confirmations == [
+        ("Try again in a new private browser window", True),
+        ("Store tokens for Ada Example as RWTH account ab123456", True),
+    ]
+    captured = capsys.readouterr()
+    assert "fresh login in a new private/incognito browser window" in captured.err
+    assert cli.moodle_api.MOODLE_MANAGE_TOKEN_URL not in captured.err
+    assert "new private/incognito browser window" in captured.out
+    assert launches[1].url in captured.out
+
+
+def test_browser_login_explains_legacy_token_recovery_when_retry_is_declined(
+    monkeypatch, capsys
+):
+    ctx = SyncContext(Config.from_dict({"auth": {"user": "ab123456"}}))
+    stub_browser_handoff(monkeypatch, private_token=None)
+    confirmations = iter((False, True))
+    monkeypatch.setattr(
+        cli.output,
+        "confirm",
+        lambda *args, **kwargs: next(confirmations),
+    )
+
+    result = cli.acquire_browser_moodle_tokens(ctx, cli.build_parser())
+
+    assert result.private_token is None
+    error = capsys.readouterr().err
+    assert "fresh login in a new private/incognito browser window" in error
+    assert "legacy Moodle mobile-app token" in error
+    assert cli.moodle_api.MOODLE_MANAGE_TOKEN_URL in error
+
+
+def test_browser_login_rejects_incomplete_replacement_token_pair(monkeypatch, capsys):
+    stored = tokens()
+    ctx = SyncContext(Config.from_dict({"auth": {"user": stored.username}}))
+    stub_browser_handoff(
+        monkeypatch,
+        wstoken="replacement-ws-token",
+        private_token=None,
+    )
+    monkeypatch.setattr(cli.output, "confirm", lambda *args, **kwargs: False)
+
+    with pytest.raises(SystemExit) as exc_info:
+        cli.acquire_browser_moodle_tokens(ctx, cli.build_parser(), stored)
+
+    assert exc_info.value.code == 2
+    error = capsys.readouterr().err
+    assert "replacement API token" in error
+    assert "existing tokens were left unchanged" in error
+
+
+def test_browser_login_rejects_a_different_moodle_account(monkeypatch, capsys):
+    stored = tokens()
+    ctx = SyncContext(Config.from_dict({"auth": {"user": stored.username}}))
+    stub_browser_handoff(monkeypatch, user_id=456, fullname="Another User")
+
+    with pytest.raises(SystemExit) as exc_info:
+        cli.acquire_browser_moodle_tokens(ctx, cli.build_parser(), stored)
+
+    assert exc_info.value.code == 2
+    assert "different Moodle account" in capsys.readouterr().err
 
 
 def test_setup_configures_detected_password_manager_and_uses_it_for_login(
@@ -539,6 +831,32 @@ def test_sign_in_method_checks_configured_otp_command(monkeypatch):
     assert available is False
 
 
+def test_sign_in_method_reports_persisted_browser_method_without_checking_provider(
+    monkeypatch,
+):
+    config = Config.from_dict(
+        {
+            "auth": {
+                "login": {
+                    "method": "browser",
+                    "provider": "command",
+                    "password_command": ["missing-password-helper"],
+                }
+            }
+        }
+    )
+    monkeypatch.setattr(
+        cli,
+        "CommandSecretProvider",
+        lambda *args: pytest.fail("browser method checked a TOTP provider"),
+    )
+
+    description, available = cli.sign_in_method_status(config, None)
+
+    assert description == "browser-assisted sign-in (interactive)"
+    assert available is True
+
+
 @pytest.mark.parametrize(
     ("command", "expected"),
     [
@@ -593,8 +911,8 @@ def test_auth_login_replaces_local_pair_without_resetting_shared_token(
     monkeypatch.setattr(
         cli.rwth,
         "login",
-        lambda ctx, log, *, reuse_cached_session: login_calls.append(
-            reuse_cached_session
+        lambda ctx, log, *, reuse_cached_session, persist_session: login_calls.append(
+            (reuse_cached_session, persist_session)
         ),
     )
     monkeypatch.setattr(
@@ -608,8 +926,120 @@ def test_auth_login_replaces_local_pair_without_resetting_shared_token(
 
     cli.main(["--config", str(config_path), "auth", "login"])
 
-    assert login_calls == [False]
+    assert login_calls == [(False, True)]
     assert EnvFileTokenStore(token_path, replacement.username).load() == (replacement)
+
+
+def test_auth_login_uses_persisted_browser_method_without_totp_sso(
+    tmp_path, monkeypatch, capsys
+):
+    config_path, token_path, stored = write_env_token_config(tmp_path)
+    config_path.write_text(
+        config_path.read_text(encoding="utf-8").replace(
+            '[auth.login]\nprovider = "prompt"',
+            '[auth.login]\nmethod = "browser"\nprovider = "command"\n'
+            'password_command = ["missing-password-helper"]',
+        ),
+        encoding="utf-8",
+    )
+    replacement = MoodleTokens(
+        stored.username,
+        "browser-ws-token",
+        "browser-private-token",
+        moodle_user_id=stored.moodle_user_id,
+    )
+    browser_calls = []
+    monkeypatch.setattr(
+        cli.rwth,
+        "login",
+        lambda *args, **kwargs: pytest.fail("browser login performed direct SSO"),
+    )
+    monkeypatch.setattr(
+        cli,
+        "configure_command_secret_provider_resolvers",
+        lambda *args, **kwargs: pytest.fail(
+            "browser login configured TOTP-login secrets"
+        ),
+    )
+
+    def acquire(ctx, parser, previous=None):
+        browser_calls.append((ctx.auth.user, previous))
+        return replacement
+
+    monkeypatch.setattr(cli, "acquire_browser_moodle_tokens", acquire)
+
+    cli.main(["--config", str(config_path), "auth", "login"])
+
+    assert browser_calls == [(stored.username, stored)]
+    assert EnvFileTokenStore(token_path, replacement.username).load() == replacement
+    assert "A Moodle browser session will be created" not in capsys.readouterr().out
+
+
+def test_browser_login_rewrites_a_managed_token_file_after_account_change(
+    tmp_path, monkeypatch, capsys
+):
+    config_path, token_path, stored = write_env_token_config(tmp_path)
+    replacement = MoodleTokens(
+        "xy123456",
+        "replacement-ws-token",
+        "replacement-private-token",
+        moodle_user_id=456,
+    )
+    config_path.write_text(
+        config_path.read_text(encoding="utf-8")
+        .replace(stored.username, replacement.username)
+        .replace(
+            '[auth.login]\nprovider = "prompt"',
+            '[auth.login]\nmethod = "browser"\nprovider = "prompt"',
+        ),
+        encoding="utf-8",
+    )
+    browser_calls = []
+
+    def acquire(ctx, parser, previous=None):
+        browser_calls.append((ctx.auth.user, previous))
+        return replacement
+
+    monkeypatch.setattr(cli, "acquire_browser_moodle_tokens", acquire)
+
+    cli.main(["--config", str(config_path), "auth", "login"])
+
+    assert browser_calls == [(replacement.username, None)]
+    assert EnvFileTokenStore(token_path, replacement.username).load() == replacement
+    error = capsys.readouterr().err
+    assert "could not be read" in error
+    assert "will be replaced only after you confirm the browser account" in error
+
+
+def test_browser_login_does_not_claim_session_support_without_private_token(
+    tmp_path, monkeypatch, capsys
+):
+    config_path, token_path, stored = write_env_token_config(tmp_path)
+    limited = MoodleTokens(
+        stored.username,
+        stored.wstoken,
+        None,
+        moodle_user_id=stored.moodle_user_id,
+    )
+    EnvFileTokenStore(token_path, stored.username).store(limited)
+    config_path.write_text(
+        config_path.read_text(encoding="utf-8").replace(
+            '[auth.login]\nprovider = "prompt"',
+            '[auth.login]\nmethod = "browser"\nprovider = "prompt"',
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        cli, "acquire_browser_moodle_tokens", lambda *args, **kwargs: limited
+    )
+    monkeypatch.setattr(cli.output, "confirm", lambda *args, **kwargs: True)
+
+    cli.main(["--config", str(config_path), "auth", "login"])
+
+    captured = capsys.readouterr()
+    assert EnvFileTokenStore(token_path, stored.username).load() == limited
+    assert "A Moodle browser session will be created" not in captured.out
+    assert "downloads that need a browser session may not" in captured.err
 
 
 def test_auth_migrate_to_keyring_validates_destination_and_leaves_source(
@@ -1000,6 +1430,40 @@ def test_prompt_provider_requires_explicit_auth_login_for_invalid_tokens(
 
     assert exc_info.value.code == 1
     assert "requires interaction" in caplog.text
+    assert "syncmymoodle auth login" in caplog.text
+    assert store.writes == []
+
+
+def test_browser_method_requires_interactive_login_for_invalid_tokens(
+    monkeypatch, caplog
+):
+    stored = tokens()
+    store = MemoryStore(stored)
+    ctx = SyncContext(
+        Config.from_dict(
+            {
+                "auth": {
+                    "user": stored.username,
+                    "login": {"method": "browser"},
+                }
+            }
+        )
+    )
+    invalid = cli.moodle_api.TokenValidation(cli.moodle_api.TokenValidationKind.INVALID)
+    monkeypatch.setattr(cli, "token_store_from_config", lambda config, keyring: store)
+    monkeypatch.setattr(
+        cli.moodle_api, "validate_mobile_tokens", lambda *args, **kwargs: invalid
+    )
+    monkeypatch.setattr(
+        cli.rwth, "login", lambda *args: pytest.fail("browser method performed SSO")
+    )
+    caplog.set_level(logging.CRITICAL, logger="syncmymoodle.cli")
+
+    with pytest.raises(SystemExit) as exc_info:
+        cli.run(ctx)
+
+    assert exc_info.value.code == 1
+    assert "browser-assisted sign-in requires interaction" in caplog.text
     assert "syncmymoodle auth login" in caplog.text
     assert store.writes == []
 

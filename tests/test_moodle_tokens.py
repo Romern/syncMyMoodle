@@ -13,6 +13,7 @@ from syncmymoodle.moodle_tokens import (
     EnvFileTokenStore,
     KeyringTokenStore,
     MoodleTokens,
+    overwrite_tokens_verified,
     store_tokens_verified,
 )
 from syncmymoodle.secret_providers import (
@@ -185,6 +186,25 @@ def test_env_file_token_store_rejects_record_for_another_sso_account(tmp_path):
 
     with pytest.raises(ProviderSecretError, match="different Moodle account"):
         EnvFileTokenStore(path, "xy123456").load()
+
+
+def test_unreadable_managed_token_file_can_be_replaced_and_verified(tmp_path):
+    path = tmp_path / "mobile-token.env"
+    EnvFileTokenStore(path, "ab123456").store(tokens())
+    replacement = MoodleTokens(
+        "xy123456",
+        "replacement-webservice-token",
+        "replacement-private-token",
+        moodle_user_id=456,
+    )
+    store = EnvFileTokenStore(path, replacement.username)
+
+    with pytest.raises(ProviderSecretError, match="different Moodle account"):
+        store.load()
+
+    overwrite_tokens_verified(store, replacement)
+
+    assert store.load() == replacement
 
 
 def test_env_file_token_store_fails_closed_when_permissions_cannot_be_hardened(
