@@ -65,6 +65,7 @@ def test_classify_local_file_is_tristate(tmp_path):
     assert classify_local_file(f, sha1(b"other")) is FileMatch.DIFFER
 
     assert classify_local_file(f, '"66a1b2c3d4e5"') is FileMatch.UNKNOWN
+    assert classify_local_file(f, "a" * 65) is FileMatch.UNKNOWN
     assert classify_local_file(f, None) is FileMatch.UNKNOWN
     assert classify_local_file(f, "") is FileMatch.UNKNOWN
     assert classify_local_file(tmp_path / "nope", sha1(b"x")) is FileMatch.UNKNOWN
@@ -481,6 +482,151 @@ def test_download_streams_chunks_to_disk_and_records_metadata(tmp_path):
     assert syncer.session.count("GET", URL) == 1
     assert outcome.downloaded == 1
     assert outcome.transferred_bytes == len(b"".join(chunks))
+
+
+@pytest.mark.parametrize("algorithm", ["md5", "sha1", "sha256"])
+def test_download_rejects_wrong_advertised_checksum_at_expected_size(
+    tmp_path,
+    algorithm,
+):
+    expected = b"correct remote bytes"
+    wrong = b"broken remote bytes!"
+    assert len(wrong) == len(expected)
+    config = {
+        "paths.sync_directory": str(tmp_path),
+        "downloads.update_files": True,
+        "downloads.conflict_handling": "overwrite",
+    }
+    syncer, file_node = make_run_syncer(
+        config,
+        timemodified=1710000500,
+        etag=hashlib.new(algorithm, expected, usedforsecurity=False).hexdigest(),
+        remote_size=len(expected),
+    )
+    file_node.etag_kind = RemoteMarkerKind.CONTENT_HASH
+    download_path = node_path(syncer, file_node)
+    download_path.parent.mkdir(parents=True, exist_ok=True)
+    download_path.write_bytes(b"existing local file")
+    syncer.session.add(
+        "GET",
+        URL,
+        FakeResponse(
+            headers={
+                "Content-Type": "application/pdf",
+                "Content-Length": str(len(wrong)),
+            },
+            chunks=[wrong],
+        ),
+    )
+
+    outcome = download_file(syncer, file_node)
+
+    assert not outcome.is_handled
+    assert download_path.read_bytes() == b"existing local file"
+    assert file_node.content_hash is None
+    assert list(download_path.parent.glob(".*.smmpart*")) == []
+
+
+@pytest.mark.parametrize(
+    ("headers", "remote_size"),
+    [
+        ({"Content-Length": "12"}, None),
+        ({}, 12),
+    ],
+    ids=["content-length", "known-remote-size"],
+)
+def test_download_rejects_short_body(tmp_path, headers, remote_size):
+    syncer, file_node = make_run_syncer(
+        {"paths.sync_directory": str(tmp_path)},
+        timemodified=1710000500,
+        remote_size=remote_size,
+    )
+    download_path = node_path(syncer, file_node)
+    syncer.session.add(
+        "GET",
+        URL,
+        FakeResponse(
+            headers={"Content-Type": "application/pdf", **headers},
+            chunks=[b"short"],
+        ),
+    )
+
+    assert not download_file(syncer, file_node).is_handled
+    assert not download_path.exists()
+    assert list(download_path.parent.glob(".*.smmpart*")) == []
+
+
+def test_fresh_download_rejects_nonzero_partial_response(tmp_path):
+    syncer, file_node = make_run_syncer(
+        {"paths.sync_directory": str(tmp_path)},
+        timemodified=1710000500,
+    )
+    download_path = node_path(syncer, file_node)
+    syncer.session.add(
+        "GET",
+        URL,
+        FakeResponse(
+            status_code=206,
+            headers={
+                "Content-Type": "application/pdf",
+                "Content-Range": "bytes 5-8/9",
+                "Content-Length": "4",
+            },
+            chunks=[b"TAIL"],
+        ),
+    )
+
+    assert not download_file(syncer, file_node).is_handled
+    assert not download_path.exists()
+    assert list(download_path.parent.glob(".*.smmpart*")) == []
+
+
+def test_fresh_download_accepts_complete_zero_based_partial_response(tmp_path):
+    syncer, file_node = make_run_syncer(
+        {"paths.sync_directory": str(tmp_path)},
+        timemodified=1710000500,
+    )
+    file_node.download_headers = {"Range": "bytes=0-"}
+    download_path = node_path(syncer, file_node)
+    syncer.session.add(
+        "GET",
+        URL,
+        FakeResponse(
+            status_code=206,
+            headers={
+                "Content-Type": "application/pdf",
+                "Content-Range": "bytes 0-3/4",
+                "Content-Length": "4",
+            },
+            chunks=[b"data"],
+        ),
+    )
+
+    assert download_file(syncer, file_node).downloaded == 1
+    assert download_path.read_bytes() == b"data"
+
+
+def test_fresh_compressed_full_response_ignores_encoded_content_length(tmp_path):
+    syncer, file_node = make_run_syncer(
+        {"paths.sync_directory": str(tmp_path)},
+        timemodified=1710000500,
+    )
+    download_path = node_path(syncer, file_node)
+    syncer.session.add(
+        "GET",
+        URL,
+        FakeResponse(
+            headers={
+                "Content-Type": "application/pdf",
+                "Content-Encoding": "gzip",
+                "Content-Length": "20",
+            },
+            chunks=[b"decoded body"],
+        ),
+    )
+
+    assert download_file(syncer, file_node).downloaded == 1
+    assert download_path.read_bytes() == b"decoded body"
 
 
 def test_yt_dlp_progress_payload_updates_shared_progress():
@@ -1442,7 +1588,9 @@ def test_missing_opencast_file_authorizes_immediately_before_download(
 ):
     current = make_context({"paths.sync_directory": str(tmp_path)})
     current.session = FakeSession()
-    current.root_node, video = build_opencast_tree("11111111111111111111111111111111")
+    current.root_node, video = build_opencast_tree(
+        hashlib.md5(b"video", usedforsecurity=False).hexdigest()
+    )
     video.type = "Lecture recording"
     authorized = []
     monkeypatch.setattr(
@@ -1800,6 +1948,114 @@ def test_resume_appends_when_remote_unchanged(tmp_path):
     assert list(download_path.parent.glob(".*.smmpart*")) == []
 
 
+def test_resume_rejects_wrong_checksum_and_discards_partial(tmp_path):
+    expected = b"HEAD-CORRECT"
+    actual = b"HEAD-INCORRT"
+    assert len(actual) == len(expected)
+    config = {"paths.sync_directory": str(tmp_path)}
+    syncer, file_node = make_run_syncer(
+        config,
+        timemodified=1710000500,
+        etag=sha1(expected),
+        remote_size=len(expected),
+    )
+    file_node.etag_kind = RemoteMarkerKind.CONTENT_HASH
+    download_path = _seed_partial(syncer, file_node, b"HEAD-", '"v1"')
+    syncer.session.add(
+        "GET",
+        URL,
+        FakeResponse(
+            status_code=206,
+            headers={
+                "Content-Type": "application/pdf",
+                "Content-Range": f"bytes 5-{len(actual) - 1}/{len(actual)}",
+                "Content-Length": str(len(actual) - 5),
+                "ETag": '"v1"',
+            },
+            chunks=[actual[5:]],
+        ),
+    )
+
+    assert not download_file(syncer, file_node).is_handled
+    assert not download_path.exists()
+    assert file_node.content_hash is None
+    assert list(download_path.parent.glob(".*.smmpart*")) == []
+
+
+def test_resume_rejects_short_range_body(tmp_path):
+    config = {"paths.sync_directory": str(tmp_path)}
+    syncer, file_node = make_run_syncer(config, timemodified=1710000500)
+    download_path = _seed_partial(syncer, file_node, b"HEAD-", '"v1"')
+    syncer.session.add(
+        "GET",
+        URL,
+        FakeResponse(
+            status_code=206,
+            headers={
+                "Content-Type": "application/pdf",
+                "Content-Range": "bytes 5-8/9",
+                "Content-Length": "4",
+                "ETag": '"v1"',
+            },
+            chunks=[b"TA"],
+        ),
+    )
+
+    assert not download_file(syncer, file_node).is_handled
+    assert not download_path.exists()
+    assert list(download_path.parent.glob(".*.smmpart*")) == []
+
+
+def test_resume_rejects_encoded_partial_response(tmp_path):
+    config = {"paths.sync_directory": str(tmp_path)}
+    syncer, file_node = make_run_syncer(config, timemodified=1710000500)
+    download_path = _seed_partial(syncer, file_node, b"HEAD-", '"v1"')
+
+    def encoded_response(url, kwargs):
+        assert kwargs["headers"]["Accept-Encoding"] == "identity"
+        return FakeResponse(
+            status_code=206,
+            headers={
+                "Content-Type": "application/pdf",
+                "Content-Encoding": "gzip",
+                "Content-Range": "bytes 5-8/9",
+                "Content-Length": "4",
+                "ETag": '"v1"',
+            },
+            chunks=[b"TAIL"],
+        )
+
+    syncer.session.add("GET", URL, encoded_response)
+
+    assert not download_file(syncer, file_node).is_handled
+    assert not download_path.exists()
+    assert list(download_path.parent.glob(".*.smmpart*")) == []
+
+
+def test_resume_rejects_content_range_with_unknown_total(tmp_path):
+    config = {"paths.sync_directory": str(tmp_path)}
+    syncer, file_node = make_run_syncer(config, timemodified=1710000500)
+    download_path = _seed_partial(syncer, file_node, b"HEAD-", '"v1"')
+    syncer.session.add(
+        "GET",
+        URL,
+        FakeResponse(
+            status_code=206,
+            headers={
+                "Content-Type": "application/pdf",
+                "Content-Range": "bytes 5-8/*",
+                "Content-Length": "4",
+                "ETag": '"v1"',
+            },
+            chunks=[b"TAIL"],
+        ),
+    )
+
+    assert not download_file(syncer, file_node).is_handled
+    assert not download_path.exists()
+    assert list(download_path.parent.glob(".*.smmpart*")) == []
+
+
 def test_resume_aborts_when_partial_response_starts_at_wrong_offset(tmp_path):
     config = {"paths.sync_directory": str(tmp_path)}
     syncer, file_node = make_run_syncer(config, timemodified=1710000500)
@@ -1891,6 +2147,31 @@ def test_unrecognized_partial_without_sidecar_is_not_resumed(tmp_path):
     )
 
     assert download_file(syncer, file_node).is_handled
+    assert download_path.read_bytes() == b"FRESH"
+    assert list(download_path.parent.glob(".*.smmpart*")) == []
+
+
+@pytest.mark.parametrize(
+    "saved_etag",
+    ['W/"v1"', "v1", '"bad etag"'],
+    ids=["weak", "unquoted", "invalid-character"],
+)
+def test_partial_with_unusable_etag_is_not_resumed(tmp_path, saved_etag):
+    config = {"paths.sync_directory": str(tmp_path)}
+    syncer, file_node = make_run_syncer(config, timemodified=1710000500)
+    download_path = _seed_partial(syncer, file_node, b"STALE", saved_etag)
+
+    def full_response(url, kwargs):
+        assert "Range" not in kwargs["headers"]
+        assert "If-Range" not in kwargs["headers"]
+        return FakeResponse(
+            headers={"Content-Type": "application/pdf", "ETag": '"v2"'},
+            chunks=[b"FRESH"],
+        )
+
+    syncer.session.add("GET", URL, full_response)
+
+    assert download_file(syncer, file_node).downloaded == 1
     assert download_path.read_bytes() == b"FRESH"
     assert list(download_path.parent.glob(".*.smmpart*")) == []
 

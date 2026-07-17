@@ -22,6 +22,7 @@ from syncmymoodle.http_utils import (
     HttpFailureKind,
     RequestPolicyError,
     classify_http_failure,
+    moodle_url_allowed,
     normalized_http_origin,
     parse_html,
     record_service_failure,
@@ -102,7 +103,8 @@ def add_episode_nodes(
     log: logging.Logger = logger,
     *,
     course_id: Any = None,
-) -> None:
+) -> bool:
+    """Add all usable tracks and report whether metadata resolution completed."""
     tracks = resolve_tracks_from_episode(
         ctx,
         episode_id,
@@ -110,7 +112,7 @@ def add_episode_nodes(
         course_id=course_id,
     )
     if tracks is None:
-        return
+        return not episode_metadata_is_stale(ctx, course_id, episode_id)
 
     for track in tracks:
         if filters.should_skip_url(
@@ -130,6 +132,7 @@ def add_episode_nodes(
             remote_size=track.size,
             download_kind=DownloadKind.OPENCAST,
         )
+    return not episode_metadata_is_stale(ctx, course_id, episode_id)
 
 
 def log_backend_issue(
@@ -295,8 +298,11 @@ def fetch_lti_form_data(
     if ctx.service_outages.should_skip(OPENCAST_URL):
         return None
     try:
-        response = ctx.require_browser_session().get(
+        response = request_following_safe_redirects(
+            ctx.require_browser_session(),
+            "GET",
             url,
+            moodle_url_allowed,
             timeout=HTTP_TIMEOUT_SECONDS,
         )
     except requests.RequestException as error:

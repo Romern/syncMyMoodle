@@ -14,7 +14,8 @@ LINKED_PAGE_MAX_BYTES = 2 * 1024 * 1024
 # Bound every direct HTTP request so an unavailable service cannot hang a run.
 HTTP_TIMEOUT_SECONDS = 15
 
-# Hidden per-course metadata cache filename.
+# Hidden internal metadata directory and per-course cache filename.
+COURSE_CACHE_DIRECTORY = ".syncmymoodle-cache"
 COURSE_CACHE_FILENAME = ".syncmymoodle_cache"
 
 YOUTUBE_WATCH_URL = "https://www.youtube.com/watch?v={video_id}"

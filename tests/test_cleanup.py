@@ -14,6 +14,13 @@ def write(path: Path, content: bytes) -> Path:
     return path
 
 
+def symlink_directory(link: Path, target: Path) -> None:
+    try:
+        link.symlink_to(target, target_is_directory=True)
+    except OSError as error:
+        pytest.skip(f"directory symlinks are not available: {error}")
+
+
 def test_conflict_cleanup_plan_removes_only_redundant_conflicts(tmp_path):
     current = write(tmp_path / "course" / "file.pdf", b"current")
     same_as_current = write(
@@ -89,6 +96,43 @@ def test_iter_course_caches_finds_only_cache_files(tmp_path):
     write(tmp_path / "course" / "notes.syncmymoodle_cache", b"not a cache")
 
     assert cleanup.iter_course_caches(tmp_path) == [cache]
+
+
+def test_iter_course_caches_refuses_a_linked_internal_directory(tmp_path):
+    root = tmp_path / "root"
+    outside = tmp_path / "outside"
+    root.mkdir()
+    write(outside / "course" / COURSE_CACHE_FILENAME, b"external")
+    symlink_directory(root / ".syncmymoodle-cache", outside)
+
+    with pytest.raises(
+        pathing.UnsafeInternalPathError, match="Refusing linked internal path"
+    ):
+        cleanup.iter_course_caches(root)
+
+    assert (outside / "course" / COURSE_CACHE_FILENAME).is_file()
+
+
+def test_delete_paths_revalidates_before_deleting(tmp_path):
+    root = tmp_path / "root"
+    cache = write(
+        root / ".syncmymoodle-cache" / "course" / COURSE_CACHE_FILENAME,
+        b"internal",
+    )
+    discovered = cleanup.iter_course_caches(root)
+    outside = write(tmp_path / "outside-cache", b"external")
+    cache.unlink()
+    try:
+        cache.symlink_to(outside)
+    except OSError as error:
+        pytest.skip(f"file symlinks are not available: {error}")
+
+    with pytest.raises(
+        pathing.UnsafeInternalPathError, match="Refusing linked internal path"
+    ):
+        cleanup.delete_paths(root, discovered)
+
+    assert outside.read_bytes() == b"external"
 
 
 @pytest.mark.parametrize("command", ["conflicts", "caches"])

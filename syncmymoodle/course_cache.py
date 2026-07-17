@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Any
 
 from syncmymoodle import links, opencast
-from syncmymoodle.constants import COURSE_CACHE_FILENAME
+from syncmymoodle.constants import COURSE_CACHE_DIRECTORY, COURSE_CACHE_FILENAME
 from syncmymoodle.context import SyncContext
 from syncmymoodle.moodle_tokens import normalized_site
 from syncmymoodle.node import (
@@ -18,7 +18,9 @@ from syncmymoodle.node import (
     NodeKind,
 )
 from syncmymoodle.pathing import (
+    InternalPathRoot,
     get_sanitized_node_path,
+    sanitized_node_path_parts,
     with_windows_extended_length_prefix,
 )
 from syncmymoodle.storage import read_private_gzip_json, write_private_gzip_json
@@ -26,7 +28,6 @@ from syncmymoodle.storage import read_private_gzip_json, write_private_gzip_json
 logger = logging.getLogger(__name__)
 LEGACY_COURSE_CACHE_FORMAT = "syncmymoodle.course-cache.v1"
 COURSE_CACHE_FORMAT = "syncmymoodle.course-cache.v2"
-COURSE_CACHE_DIRECTORY = ".syncmymoodle-cache"
 MODULE_CACHE_KEY = "module_data"
 CACHED_TEXT_CACHE_KEY = "cached_text"
 OPENCAST_EPISODES_CACHE_KEY = "opencast_episodes"
@@ -117,18 +118,29 @@ def _module_id(value: Any) -> int | None:
     return module_id if module_id > 0 else None
 
 
-def course_cache_path(ctx: SyncContext, course_node: Node) -> Path:
-    """Return the stable, account-bound cache path for one Moodle course."""
+def _internal_path_root(ctx: SyncContext) -> InternalPathRoot:
+    return ctx.internal_path_root
+
+
+def _course_cache_path(
+    ctx: SyncContext,
+    course_node: Node,
+    internal_root: InternalPathRoot,
+) -> Path:
     identity = _cache_identity(ctx, course_node)
     site_key = hashlib.sha256(str(identity["site"]).encode("utf-8")).hexdigest()
-    cache_path = (
-        Path(ctx.config.sync_directory).expanduser()
-        / COURSE_CACHE_DIRECTORY
-        / site_key
-        / str(identity["user_id"])
-        / str(identity["course_id"])
-        / COURSE_CACHE_FILENAME
+    return internal_root.path(
+        COURSE_CACHE_DIRECTORY,
+        site_key,
+        str(identity["user_id"]),
+        str(identity["course_id"]),
+        COURSE_CACHE_FILENAME,
     )
+
+
+def course_cache_path(ctx: SyncContext, course_node: Node) -> Path:
+    """Return the stable, account-bound cache path for one Moodle course."""
+    cache_path = _course_cache_path(ctx, course_node, _internal_path_root(ctx))
     return with_windows_extended_length_prefix(cache_path)
 
 
@@ -160,15 +172,19 @@ def _read_course_cache_payload(
 def _legacy_course_cache_paths(
     ctx: SyncContext,
     course_node: Node,
+    internal_root: InternalPathRoot,
 ) -> Iterator[Path]:
-    sync_directory = Path(ctx.config.sync_directory).expanduser()
-    direct_path = _node_path(ctx, course_node) / COURSE_CACHE_FILENAME
+    sync_directory = internal_root.root
+    direct_path = internal_root.path(
+        *sanitized_node_path_parts(course_node), COURSE_CACHE_FILENAME
+    )
     if direct_path.is_file():
         yield direct_path
-    stable_directory = sync_directory / COURSE_CACHE_DIRECTORY
+    stable_directory = internal_root.path(COURSE_CACHE_DIRECTORY)
     if ctx.legacy_course_cache_paths is None:
         paths_by_course: dict[int, list[Path]] = {}
-        for path in sync_directory.rglob(COURSE_CACHE_FILENAME):
+        for discovered_path in sync_directory.rglob(COURSE_CACHE_FILENAME):
+            path = internal_root.require(discovered_path)
             if not path.is_file() or path.is_relative_to(stable_directory):
                 continue
             payload = read_private_gzip_json(path, "legacy course cache")
@@ -184,11 +200,10 @@ def _legacy_course_cache_paths(
                 paths_by_course.setdefault(course_id, []).append(path)
         ctx.legacy_course_cache_paths = paths_by_course
     course_id = _module_id(course_node.id)
-    yield from (
-        path
-        for path in ctx.legacy_course_cache_paths.get(course_id or -1, [])
-        if path != direct_path and path.is_file()
-    )
+    for cached_path in ctx.legacy_course_cache_paths.get(course_id or -1, []):
+        path = internal_root.require(cached_path)
+        if path != direct_path and path.is_file():
+            yield path
 
 
 def _node_tree_has_site_url(course_root: Node, site: str) -> bool:
@@ -277,9 +292,10 @@ def _migrate_legacy_course_cache(
     ctx: SyncContext,
     course_node: Node,
     cache_path: Path,
+    internal_root: InternalPathRoot,
     log: logging.Logger,
 ) -> dict[str, Any] | None:
-    for legacy_path in _legacy_course_cache_paths(ctx, course_node):
+    for legacy_path in _legacy_course_cache_paths(ctx, course_node, internal_root):
         payload = read_private_gzip_json(legacy_path, "legacy course cache")
         if not isinstance(payload, dict):
             continue
@@ -290,7 +306,10 @@ def _migrate_legacy_course_cache(
             log.info("Using legacy course cache for this dry run: %s", legacy_path)
             return migrated
         try:
-            write_private_gzip_json(cache_path, migrated)
+            safe_cache_path = internal_root.create_parent(cache_path)
+            write_private_gzip_json(
+                with_windows_extended_length_prefix(safe_cache_path), migrated
+            )
         except OSError as error:
             log.warning(
                 "Could not move legacy course cache %s to %s: %s",
@@ -300,7 +319,7 @@ def _migrate_legacy_course_cache(
             )
             return migrated
         try:
-            legacy_path.unlink()
+            internal_root.require(legacy_path).unlink()
         except OSError as error:
             log.warning(
                 "Moved legacy course cache to %s but could not remove %s: %s",
@@ -423,15 +442,20 @@ def _course_cache_state(
     ctx: SyncContext,
     course_node: Node,
     log: logging.Logger,
+    internal_root: InternalPathRoot | None = None,
 ) -> CourseCacheState:
     if course_node in ctx.course_cache_states:
         return ctx.course_cache_states[course_node]
 
-    cache_path = course_cache_path(ctx, course_node)
+    internal_root = internal_root or _internal_path_root(ctx)
+    raw_cache_path = _course_cache_path(ctx, course_node, internal_root)
+    cache_path = with_windows_extended_length_prefix(raw_cache_path)
     cache_exists = cache_path.exists()
     payload = _read_course_cache_payload(cache_path, log) if cache_exists else None
     if not cache_exists:
-        payload = _migrate_legacy_course_cache(ctx, course_node, cache_path, log)
+        payload = _migrate_legacy_course_cache(
+            ctx, course_node, raw_cache_path, internal_root, log
+        )
     if payload is not None and payload.get("identity") != _cache_identity(
         ctx, course_node
     ):
@@ -882,17 +906,19 @@ def cache_root_node(
     if not ctx.root_node:
         return
 
+    internal_root = _internal_path_root(ctx)
     for semester_node in ctx.root_node.children:
         if semester_node.type != NodeKind.SEMESTER:
             continue
         for course_node in semester_node.children:
             if course_node.type != NodeKind.COURSE:
                 continue
-            state = _course_cache_state(ctx, course_node, log)
+            state = _course_cache_state(ctx, course_node, log, internal_root)
             if course_node.id in ctx.incomplete_course_ids:
                 continue
-            cache_path = course_cache_path(ctx, course_node)
-            cache_path.parent.mkdir(parents=True, exist_ok=True)
+            raw_cache_path = _course_cache_path(ctx, course_node, internal_root)
+            internal_root.create_parent(raw_cache_path)
+            cache_path = with_windows_extended_length_prefix(raw_cache_path)
             payload: dict[str, Any] = {
                 "format": COURSE_CACHE_FORMAT,
                 "identity": _cache_identity(ctx, course_node),

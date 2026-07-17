@@ -58,6 +58,12 @@ class ModuleContext:
     def mark_incomplete(self) -> None:
         self.ctx.mark_course_incomplete(self.course_node.id)
 
+    def fail(self) -> None:
+        self.ctx.record_course_failure(self.course_node.id)
+
+    def fail_once(self, source: str) -> None:
+        self.ctx.record_course_failure_once(self.course_node.id, source)
+
 
 @dataclass(frozen=True)
 class QuizCacheTiming:
@@ -133,6 +139,10 @@ def _page_response_cacheable(response: Any, requested_url: str) -> bool:
 
 class _H5PRangeUnavailable(Exception):
     """The package cannot be exposed as a reliable HTTP range stream."""
+
+
+class _H5PFiltered(Exception):
+    """A range request was deliberately blocked by configured URL policy."""
 
 
 class _H5PRangeReader(io.BufferedIOBase):
@@ -212,6 +222,10 @@ class _H5PRangeReader(io.BufferedIOBase):
                 if declared_size is not None and declared_size != expected_size:
                     raise _H5PRangeUnavailable
                 body = read_capped_body(response, expected_size)
+        except filters.FilteredRequestError as error:
+            # requests exceptions also inherit OSError, which ZipFile turns into
+            # BadZipFile. Preserve this deliberate policy result through it.
+            raise _H5PFiltered from error
         except RequestPolicyError:
             raise
         except requests.RequestException as error:
@@ -369,6 +383,8 @@ def _read_h5p_content(
             log,
             url_allowed,
         )
+    except filters.FilteredRequestError:
+        raise
     except (
         KeyError,
         NotImplementedError,
@@ -397,7 +413,7 @@ def module_instance(
         items = fetch(ctx.require_session(), account.wstoken, course_id)
         if items is None:
             cache[course_id] = None
-            module_context.mark_incomplete()
+            module_context.fail()
         else:
             instances: dict[int, dict[str, Any]] = {}
             for item in items:
@@ -409,7 +425,7 @@ def module_instance(
                     or course_module in instances
                 ):
                     cache[course_id] = None
-                    module_context.mark_incomplete()
+                    module_context.fail()
                     break
                 instances[course_module] = item
             else:
@@ -447,7 +463,7 @@ def _assignment_submission_files(
         assignment_id,
     )
     if fetched is None:
-        module_context.mark_incomplete()
+        module_context.fail()
         return None
     files: list[dict[str, Any]] = []
     seen_urls: set[str] = set()
@@ -459,8 +475,7 @@ def _assignment_submission_files(
                 "module %s",
                 module_id,
             )
-            ctx.stats.failed += 1
-            module_context.mark_incomplete()
+            module_context.fail()
             return None
         seen_urls.add(file_url)
         files.append(item)
@@ -724,14 +739,16 @@ def _fetch_page(
             ),
             timeout=HTTP_TIMEOUT_SECONDS,
         )
+    except filters.FilteredRequestError:
+        module_context.mark_incomplete()
+        return None
     except requests.RequestException as error:
         module_context.log.warning(
             "Failed to fetch page module %s: %s",
             module_id,
             safe_request_error(error),
         )
-        module_context.ctx.stats.failed += 1
-        module_context.mark_incomplete()
+        module_context.fail()
         return None
     if 200 <= response.status_code < 300:
         return cast(requests.Response, response)
@@ -740,8 +757,7 @@ def _fetch_page(
         module_id,
         response.status_code,
     )
-    module_context.ctx.stats.failed += 1
-    module_context.mark_incomplete()
+    module_context.fail()
     return None
 
 
@@ -804,14 +820,15 @@ def _scan_page_opencast(
         video_id = opencast_api.extract_episode_id(iframe_src)
         if not video_id:
             continue
-        opencast_api.add_episode_nodes(
+        if not opencast_api.add_episode_nodes(
             module_context.ctx,
             module_context.section_node,
             module["name"],
             video_id,
             module_context.log,
             course_id=module_context.course_id,
-        )
+        ):
+            module_context.fail_once(f"opencast:{video_id}")
 
 
 def _store_page_content(
@@ -917,21 +934,25 @@ def _handle_h5p_links(
         ):
             return
         module_context.status("downloading H5P package")
-        content = _read_h5p_content(
-            ctx.require_session(),
-            package_url,
-            module["id"],
-            module_context.log,
-            package_file.get("filesize"),
-            url_allowed=lambda url: filters.require_url_allowed(
-                ctx,
-                url,
-                "redirected H5P package",
-                course_id=module_context.course_id,
-            ),
-        )
-        if content is None:
+        try:
+            content = _read_h5p_content(
+                ctx.require_session(),
+                package_url,
+                module["id"],
+                module_context.log,
+                package_file.get("filesize"),
+                url_allowed=lambda url: filters.require_url_allowed(
+                    ctx,
+                    url,
+                    "redirected H5P package",
+                    course_id=module_context.course_id,
+                ),
+            )
+        except (filters.FilteredRequestError, _H5PFiltered):
             module_context.mark_incomplete()
+            return
+        if content is None:
+            module_context.fail()
         if content is not None and module_id is not None and marker is not None:
             course_cache.store_cached_text(
                 ctx,
@@ -980,13 +1001,14 @@ def _opencast_lti_launch(
         ctx.require_session(), ctx.require_moodle_account().wstoken, tool_id
     )
     if launch_data is None:
-        module_context.mark_incomplete()
+        module_context.fail_once(f"opencast-lti:{module['id']}")
         return None
     endpoint = launch_data.get("endpoint")
     if not isinstance(endpoint, str):
         module_context.log.warning(
             "Opencast: LTI module %s has no launch endpoint", module["id"]
         )
+        module_context.fail_once(f"opencast-lti:{module['id']}")
         return None
     if not opencast_api.lti_endpoint_allowed(endpoint):
         module_context.log.warning(
@@ -1028,6 +1050,7 @@ def _handle_opencast_series(
             endpoint=launch.endpoint,
             course_id=module_context.course_id,
         ):
+            module_context.fail_once(f"opencast-lti:{module['id']}")
             return
     episodes = opencast_api.list_series_episodes(
         ctx,
@@ -1036,7 +1059,7 @@ def _handle_opencast_series(
         module_context.course_id,
     )
     if episodes is None:
-        module_context.mark_incomplete()
+        module_context.fail_once(f"opencast-series:{launch.series_id}")
         return
     series_node = module_context.course_node.add_child(
         launch.title,
@@ -1045,14 +1068,15 @@ def _handle_opencast_series(
     )
     for index, (episode_id, episode_title) in enumerate(episodes, start=1):
         module_context.status(f"resolving Opencast episode {index}/{len(episodes)}")
-        opencast_api.add_episode_nodes(
+        if not opencast_api.add_episode_nodes(
             ctx,
             series_node,
             episode_title,
             episode_id,
             module_context.log,
             course_id=module_context.course_id,
-        )
+        ):
+            module_context.fail_once(f"opencast:{episode_id}")
 
 
 def _handle_opencast_episode(
@@ -1080,15 +1104,17 @@ def _handle_opencast_episode(
             endpoint=launch.endpoint,
             course_id=module_context.course_id,
         ):
+            module_context.fail_once(f"opencast-lti:{module['id']}")
             return
-    opencast_api.add_episode_nodes(
+    if not opencast_api.add_episode_nodes(
         module_context.ctx,
         module_context.section_node,
         launch.title,
         launch.episode_id,
         module_context.log,
         course_id=module_context.course_id,
-    )
+    ):
+        module_context.fail_once(f"opencast:{launch.episode_id}")
 
 
 def handle_opencast_lti_module(
@@ -1308,7 +1334,7 @@ def handle_quiz_module(
     else:
         loaded = _load_quiz_data(module_context, quiz_id)
         if loaded is None:
-            module_context.mark_incomplete()
+            module_context.fail()
             return
         attempts, reviews, complete = loaded
         timing = _quiz_cache_timing(
@@ -1316,6 +1342,8 @@ def handle_quiz_module(
             instance,
             ctx.moodle_server_time,
         )
+        if not complete:
+            module_context.fail()
 
     _add_quiz_nodes(ctx, section_node, module["name"], attempts, reviews)
     if complete and timing is not None:

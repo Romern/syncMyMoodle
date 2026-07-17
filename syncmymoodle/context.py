@@ -13,10 +13,12 @@ from syncmymoodle.moodle_tokens import MoodleTokens
 from syncmymoodle.node import Node
 from syncmymoodle.outcomes import RunStatistics
 from syncmymoodle.output import TerminalOutput, get_output
+from syncmymoodle.pathing import InternalPathRoot
 
 if TYPE_CHECKING:
     from syncmymoodle.course_cache import CourseCacheState
-    from syncmymoodle.emedia import EmediaVideo
+    from syncmymoodle.emedia import EmediaResolution
+    from syncmymoodle.links import LinkedResourceResolution
     from syncmymoodle.opencast import (
         OpencastEpisode,
         OpencastMetadataState,
@@ -110,6 +112,7 @@ class SyncContext:
         default_factory=RunStatistics, repr=False, compare=False
     )
     auth: AuthState = field(init=False)
+    internal_path_root: InternalPathRoot = field(init=False, repr=False, compare=False)
     session: requests.Session | None = None
     session_key: str | None = field(default=None, repr=False)
     moodle_account: MoodleAccount | None = field(default=None, repr=False)
@@ -141,7 +144,7 @@ class SyncContext:
     opencast_series_cache: dict[
         tuple[str | None, str], tuple[tuple[str, str], ...] | None
     ] = field(default_factory=dict)
-    emedia_video_cache: dict[int, EmediaVideo | None] = field(default_factory=dict)
+    emedia_video_cache: dict[int, EmediaResolution] = field(default_factory=dict)
     emedia_revision_cache: dict[str, str | None] = field(default_factory=dict)
     emedia_output_suffix: str | None = None
     downloaded_paths: set[Path] = field(default_factory=set)
@@ -153,11 +156,15 @@ class SyncContext:
     linked_resources_by_course: dict[str, dict[str, LinkedResourceCacheEntry]] = field(
         default_factory=dict
     )
-    linked_resource_results: dict[str, LinkedResourceCacheEntry | None] = field(
+    linked_resource_results: dict[str, LinkedResourceResolution] = field(
         default_factory=dict
     )
     seen_linked_resources: set[tuple[str, str]] = field(default_factory=set)
     incomplete_course_ids: set[int] = field(default_factory=set)
+    reported_course_failure_sources: set[tuple[int, str]] = field(
+        default_factory=set,
+        repr=False,
+    )
     legacy_course_cache_paths: dict[int, list[Path]] | None = field(
         default=None,
         repr=False,
@@ -165,6 +172,9 @@ class SyncContext:
 
     def __post_init__(self) -> None:
         self.auth = AuthState.from_config(self.config)
+        self.internal_path_root = InternalPathRoot.resolve(
+            Path(self.config.sync_directory)
+        )
 
     @property
     def moodle_update_watermark(self) -> int | None:
@@ -183,12 +193,31 @@ class SyncContext:
         self.filtered_items.add(FilteredItem(config_key, category, item, reason))
 
     def mark_course_incomplete(self, course_id: Any) -> None:
+        """Prevent a partial course inventory from replacing its previous cache."""
         if (
             isinstance(course_id, int)
             and not isinstance(course_id, bool)
             and course_id > 0
         ):
             self.incomplete_course_ids.add(course_id)
+
+    def record_course_failure(self, course_id: Any) -> None:
+        """Record a failed course source and retain its last complete cache."""
+        self.stats.failed += 1
+        self.mark_course_incomplete(course_id)
+
+    def record_course_failure_once(self, course_id: Any, source: str) -> None:
+        """Record one failed source once per affected course."""
+        if (
+            isinstance(course_id, int)
+            and not isinstance(course_id, bool)
+            and course_id > 0
+        ):
+            failure_key = (course_id, source)
+            if failure_key in self.reported_course_failure_sources:
+                return
+            self.reported_course_failure_sources.add(failure_key)
+        self.record_course_failure(course_id)
 
     def require_session(self) -> requests.Session:
         """Return the token-capable general HTTP session."""

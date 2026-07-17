@@ -120,10 +120,59 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
+  validate-distribution:
+    name: Validate ${{ matrix.name }}
+    runs-on: ubuntu-latest
+    needs: build
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: wheel
+            artifact: "dist/*.whl"
+          - name: sdist
+            artifact: "dist/*.tar.gz"
+    permissions:
+      contents: read
+
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ env.RELEASE_REF }}
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - uses: actions/download-artifact@v8
+        with:
+          name: syncmymoodle-dist
+          path: dist
+
+      - name: Install exact ${{ matrix.name }} in isolation
+        env:
+          ARTIFACT: ${{ matrix.artifact }}
+        run: |
+          shopt -s nullglob
+          artifacts=($ARTIFACT)
+          if [ "${#artifacts[@]}" -ne 1 ]; then
+            echo "Expected one ${ARTIFACT} artifact, found ${#artifacts[@]}." >&2
+            exit 1
+          fi
+          python -m venv /tmp/syncmymoodle-distribution
+          /tmp/syncmymoodle-distribution/bin/python -m pip install packaging "${artifacts[0]}"
+
+      - name: Smoke-test exact ${{ matrix.name }}
+        run: |
+          workdir=$(mktemp -d)
+          cd "$workdir"
+          /tmp/syncmymoodle-distribution/bin/python "$GITHUB_WORKSPACE/.github/scripts/smoke_distribution.py" "$RELEASE_TAG"
+
   publish-testpypi:
     name: Publish to TestPyPI
     runs-on: ubuntu-latest
-    needs: build
+    needs: validate-distribution
     environment:
       name: testpypi
       url: https://test.pypi.org/p/syncMyMoodle
@@ -140,6 +189,7 @@ jobs:
         uses: pypa/gh-action-pypi-publish@release/v1
         with:
           repository-url: https://test.pypi.org/legacy/
+          skip-existing: true
 
   publish-pypi:
     name: Publish to PyPI

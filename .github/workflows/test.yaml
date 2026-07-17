@@ -38,16 +38,74 @@ jobs:
           pip install .[test]
 
       - name: Check formatting with ruff
-        if: runner.os == 'Linux'
+        if: runner.os == 'Linux' && matrix.python-version == '3.13'
         run: ruff format --check syncmymoodle tests
 
       - name: Lint with ruff
-        if: runner.os == 'Linux'
+        if: runner.os == 'Linux' && matrix.python-version == '3.13'
         run: ruff check syncmymoodle tests
 
+      - name: Run tests with branch coverage
+        if: runner.os == 'Linux' && matrix.python-version == '3.13'
+        run: python -m pytest --cov=syncmymoodle --cov-report=term-missing
+
       - name: Run tests
+        if: runner.os != 'Linux' || matrix.python-version != '3.13'
         run: python -m pytest
 
       - name: Analyze with mypy
-        if: runner.os == 'Linux'
+        if: runner.os == 'Linux' && matrix.python-version == '3.13'
         run: mypy syncmymoodle
+
+  minimum-dependencies:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install lowest declared direct dependencies
+        run: |
+          python -m pip install --upgrade pip uv
+          uv venv .minimum-venv --python 3.11
+          uv pip install --python .minimum-venv/bin/python --resolution lowest-direct ".[test]"
+
+      - name: Run tests with lowest direct dependencies
+        run: .minimum-venv/bin/python -m pytest
+
+  distribution-smoke:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Set up Python 3.13
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+          cache: pip
+
+      - name: Build distributions
+        run: |
+          python -m pip install --upgrade pip build
+          python -m build
+
+      - name: Install wheel and sdist in separate environments
+        run: |
+          python -m venv /tmp/syncmymoodle-wheel
+          /tmp/syncmymoodle-wheel/bin/python -m pip install packaging dist/*.whl
+          python -m venv /tmp/syncmymoodle-sdist
+          /tmp/syncmymoodle-sdist/bin/python -m pip install packaging dist/*.tar.gz
+
+      - name: Smoke-test wheel and sdist
+        run: |
+          expected_version=$(python -c 'import tomllib; print(tomllib.load(open("pyproject.toml", "rb"))["project"]["version"])')
+          workdir=$(mktemp -d)
+          cd "$workdir"
+          /tmp/syncmymoodle-wheel/bin/python "$GITHUB_WORKSPACE/.github/scripts/smoke_distribution.py" "$expected_version"
+          /tmp/syncmymoodle-sdist/bin/python "$GITHUB_WORKSPACE/.github/scripts/smoke_distribution.py" "$expected_version"

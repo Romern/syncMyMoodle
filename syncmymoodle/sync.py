@@ -343,7 +343,7 @@ def _assignments_by_cmid(
             ctx.require_session(), account.wstoken, course.course_id
         )
         if assignments is None:
-            ctx.mark_course_incomplete(course.node.id)
+            ctx.record_course_failure(course.node.id)
             return {}
         indexed = _inventory_by_positive_id(assignments.get("assignments"), "cmid")
         if indexed is None or any(
@@ -353,8 +353,7 @@ def _assignments_by_cmid(
             logger.error(
                 "Moodle returned a malformed assignment inventory for %s", course.name
             )
-            ctx.stats.failed += 1
-            ctx.mark_course_incomplete(course.node.id)
+            ctx.record_course_failure(course.node.id)
             return {}
         return indexed
     return {}
@@ -389,15 +388,14 @@ def _folders_by_coursemodule(
             ctx.require_session(), account.wstoken, course.course_id
         )
         if folders is None:
-            ctx.mark_course_incomplete(course.node.id)
+            ctx.record_course_failure(course.node.id)
             return {}
         indexed = _inventory_by_positive_id(folders, "coursemodule")
         if indexed is None:
             logger.error(
                 "Moodle returned a malformed folder inventory for %s", course.name
             )
-            ctx.stats.failed += 1
-            ctx.mark_course_incomplete(course.node.id)
+            ctx.record_course_failure(course.node.id)
             return {}
         return indexed
     return {}
@@ -413,19 +411,16 @@ def _sync_module(
     module_kind = str(module.get("modname") or "unknown")
     run.update_progress(section_index, f"{module_name} [{module_kind}]")
     module_started_at = time.monotonic()
-    failed_before = run.ctx.stats.failed
     try:
         if not filters.should_skip_module(run.ctx, module, module_context.course_id):
             sync_handlers.handle_module(module_context, module)
     except Exception:
-        run.ctx.stats.failed += 1
+        module_context.fail()
         logger.exception(
             "Failed to process Moodle module %s (%s)",
             module.get("id"),
             module.get("modname"),
         )
-    if run.ctx.stats.failed > failed_before:
-        run.ctx.mark_course_incomplete(run.course.node.id)
     elapsed = time.monotonic() - module_started_at
     if elapsed >= SLOW_MODULE_SECONDS:
         logger.info(
@@ -480,7 +475,7 @@ def _sync_course(
         ctx.require_session(), account.wstoken, course.course_id
     )
     if course_sections is None:
-        ctx.stats.failed += 1
+        ctx.record_course_failure(course.node.id)
         _remove_course_node(root_node, course.node)
         ctx.output.sync_progress.finish_course(course_index)
         return
@@ -495,8 +490,7 @@ def _sync_course(
         course_cache.retain_current_modules(ctx, course.node, modules, logger)
     else:
         logger.error("Moodle returned a malformed inventory for %s", course.name)
-        ctx.stats.failed += 1
-        ctx.mark_course_incomplete(course.node.id)
+        ctx.record_course_failure(course.node.id)
     module_names = {module.get("modname") for module in modules}
     run.course_updates = _course_updates(ctx, course, modules)
     run.assignments_by_cmid = _assignments_by_cmid(ctx, course, module_names)
@@ -515,8 +509,7 @@ def _sync_course_safely(
     try:
         _sync_course(ctx, root_node, course, course_index)
     except Exception:
-        ctx.stats.failed += 1
-        ctx.mark_course_incomplete(course.node.id)
+        ctx.record_course_failure(course.node.id)
         logger.exception("Failed to process Moodle course %s", course.name)
         ctx.output.sync_progress.finish_course(course_index)
 

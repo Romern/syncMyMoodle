@@ -6,7 +6,7 @@ from syncmymoodle.context import MoodleAccount
 from syncmymoodle.moodle_tokens import MoodleTokens
 from syncmymoodle.node import Node
 
-from .helpers import FakeResponse, FakeSession, make_context
+from .helpers import FakeResponse, FakeSession, make_context, two_course_tree
 
 LINK_URL = "https://links.example.test/overview"
 YOUTUBE_ONE = "https://youtu.be/abcdefghijk"
@@ -190,6 +190,46 @@ def test_identical_links_are_requested_once_per_run(tmp_path):
     assert session.calls == [("HEAD", LINK_URL), ("GET", LINK_URL)]
     assert _youtube_ids(first_section) == ["abcdefghijk"]
     assert _youtube_ids(second_section) == ["abcdefghijk"]
+
+
+def test_failed_link_result_marks_each_course_and_preserves_both_caches(tmp_path):
+    config = {
+        "paths.sync_directory": str(tmp_path),
+        "links.follow_links": True,
+        "links.youtube": False,
+        "links.opencast": False,
+        "links.sciebo": False,
+        "links.emedia": False,
+    }
+    seeded = make_context(config)
+    seeded.root_node, seeded_courses, _ = two_course_tree(with_cached_files=True)
+    course_cache.cache_root_node(seeded)
+    cached_files = {
+        course.id: course_cache.course_cache_path(seeded, course)
+        for course in seeded_courses
+    }
+    cached_bytes = {
+        course_id: path.read_bytes() for course_id, path in cached_files.items()
+    }
+
+    ctx = make_context(config)
+    ctx.root_node, _, sections = two_course_tree()
+    session = FakeSession()
+    session.add("HEAD", LINK_URL, FakeResponse(status_code=503))
+    session.add("GET", LINK_URL, FakeResponse(status_code=503))
+    ctx.session = session
+
+    links.scan_for_links(ctx, LINK_URL, sections[0], 101, single=True)
+    links.scan_for_links(ctx, LINK_URL, sections[0], 101, single=True)
+    links.scan_for_links(ctx, LINK_URL, sections[1], 202, single=True)
+    course_cache.cache_root_node(ctx)
+
+    assert session.calls == [("HEAD", LINK_URL), ("GET", LINK_URL)]
+    assert ctx.stats.failed == 2
+    assert ctx.incomplete_course_ids == {101, 202}
+    assert {
+        course_id: path.read_bytes() for course_id, path in cached_files.items()
+    } == cached_bytes
 
 
 def test_reused_link_result_obeys_per_course_domain_filter(tmp_path):

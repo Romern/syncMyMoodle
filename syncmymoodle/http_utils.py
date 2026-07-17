@@ -12,7 +12,7 @@ from typing import Any, Protocol, cast
 import requests
 from bs4 import BeautifulSoup
 
-from syncmymoodle.constants import DEFAULT_BLOCK_SIZE
+from syncmymoodle.constants import DEFAULT_BLOCK_SIZE, MOODLE_URL
 
 # Media types that indicate an HTML page rather than a downloadable file
 # (e.g. a login or error page served in place of the expected content).
@@ -208,6 +208,21 @@ def same_origin(url: str, expected_origin: str) -> bool:
     """Return whether two HTTP(S) URLs have the same normalized origin."""
     origin = _http_origin(url)
     return origin is not None and origin == _http_origin(expected_origin)
+
+
+def moodle_url_allowed(url: str) -> bool:
+    """Return whether credentials may be sent to this Moodle URL."""
+    if url != url.strip():
+        return False
+    try:
+        parsed = urllib.parse.urlsplit(url)
+    except ValueError:
+        return False
+    return (
+        parsed.username is None
+        and parsed.password is None
+        and same_origin(url, MOODLE_URL)
+    )
 
 
 def normalized_http_origin(url: Any) -> str | None:

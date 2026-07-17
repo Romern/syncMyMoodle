@@ -37,6 +37,13 @@ from syncmymoodle.storage import (
 from .helpers import make_context, node_path
 
 
+def symlink_directory(link: Path, target: Path) -> None:
+    try:
+        link.symlink_to(target, target_is_directory=True)
+    except OSError as error:
+        pytest.skip(f"directory symlinks are not available: {error}")
+
+
 def test_sanitized_node_path_stays_inside_basedir(tmp_path):
     syncer = make_context({"paths.sync_directory": str(tmp_path)})
     root = Node("", -1, "Root", None)
@@ -347,6 +354,58 @@ def test_sync_run_lock_rejects_a_concurrent_writer(tmp_path):
 
     with sync_run_lock(tmp_path):
         pass
+
+
+def test_sync_run_lock_refuses_a_linked_cache_parent(tmp_path):
+    root = tmp_path / "root"
+    outside = tmp_path / "outside"
+    root.mkdir()
+    outside.mkdir()
+    symlink_directory(root / ".syncmymoodle-cache", outside)
+
+    with pytest.raises(SyncRunLockedError, match="Refusing linked internal path"):
+        with sync_run_lock(root):
+            pass
+
+    assert not (outside / "run.lock").exists()
+
+
+def test_sync_run_lock_allows_the_configured_root_to_be_a_link(tmp_path):
+    target = tmp_path / "target"
+    target.mkdir()
+    configured_root = tmp_path / "configured-root"
+    symlink_directory(configured_root, target)
+
+    with sync_run_lock(configured_root):
+        pass
+
+    assert (target / ".syncmymoodle-cache" / "run.lock").is_file()
+
+
+def test_internal_path_root_refuses_a_windows_reparse_descendant(
+    tmp_path,
+    monkeypatch,
+):
+    internal_root = pathing.InternalPathRoot.resolve(tmp_path)
+    reparse_directory = tmp_path / "reparse"
+    reparse_directory.mkdir()
+    original_lstat = Path.lstat
+
+    def reparse_lstat(path):
+        result = original_lstat(path)
+        if path == reparse_directory:
+            return SimpleNamespace(
+                st_mode=result.st_mode,
+                st_file_attributes=getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400),
+            )
+        return result
+
+    monkeypatch.setattr(Path, "lstat", reparse_lstat)
+
+    with pytest.raises(
+        pathing.UnsafeInternalPathError, match="Refusing linked internal path"
+    ):
+        internal_root.path("reparse", "course-cache")
 
 
 def test_private_text_restricts_temp_before_writing_on_windows(tmp_path, monkeypatch):

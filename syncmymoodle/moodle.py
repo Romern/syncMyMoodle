@@ -9,7 +9,7 @@ import urllib.parse
 from dataclasses import dataclass
 from email.utils import parsedate_to_datetime
 from enum import Enum
-from typing import Any
+from typing import Any, cast
 
 import requests
 from requests.auth import AuthBase
@@ -18,11 +18,11 @@ from syncmymoodle.constants import HTTP_TIMEOUT_SECONDS, MOODLE_URL
 from syncmymoodle.http_utils import (
     HttpFailureKind,
     classify_http_failure,
+    moodle_url_allowed,
     moodle_user_id_from_html,
     parse_html,
     request_following_safe_redirects,
     safe_error_message,
-    same_origin,
     session_key_from_html,
 )
 from syncmymoodle.moodle_tokens import MoodleTokens, normalized_site
@@ -68,7 +68,7 @@ class MoodleTokenAuth(AuthBase):
         if request.url is None:
             return request
         parsed = urllib.parse.urlsplit(request.url)
-        if not same_origin(request.url, MOODLE_URL):
+        if not moodle_url_allowed(request.url):
             return request
         path = parsed.path
         if path.startswith("/pluginfile.php/"):
@@ -109,6 +109,25 @@ def create_token_session(
     session = requests.Session()
     session.auth = MoodleTokenAuth(tokens.wstoken, user_private_access_key)
     return session
+
+
+def _request_moodle(
+    session: requests.Session,
+    method: str,
+    url: str,
+    **kwargs: Any,
+) -> requests.Response:
+    """Send a credential-bearing request without leaving Moodle's origin."""
+    return cast(
+        requests.Response,
+        request_following_safe_redirects(
+            session,
+            method,
+            url,
+            moodle_url_allowed,
+            **kwargs,
+        ),
+    )
 
 
 def _http_date_timestamp(value: str | None) -> int | None:
@@ -237,7 +256,12 @@ def acquire_mobile_tokens(
 
 def browser_session_user_id(session: requests.Session) -> int:
     try:
-        response = session.get(MOODLE_URL, timeout=HTTP_TIMEOUT_SECONDS)
+        response = _request_moodle(
+            session,
+            "GET",
+            MOODLE_URL,
+            timeout=HTTP_TIMEOUT_SECONDS,
+        )
     except requests.RequestException as error:
         raise BrowserSessionIdentityError(
             "could not verify the logged-in Moodle account: "
@@ -273,12 +297,16 @@ def mobile_token_id_from_security_keys(html: str) -> str:
 
 def reset_mobile_token(session: requests.Session, session_key: str) -> None:
     try:
-        response = session.get(
+        response = _request_moodle(
+            session,
+            "GET",
             MOODLE_MANAGE_TOKEN_URL,
             timeout=HTTP_TIMEOUT_SECONDS,
         )
         token_id = mobile_token_id_from_security_keys(response.text)
-        response = session.get(
+        response = _request_moodle(
+            session,
+            "GET",
             MOODLE_MANAGE_TOKEN_URL,
             params={
                 "action": "resetwstoken",
@@ -305,7 +333,9 @@ def validate_mobile_tokens(
 ) -> TokenValidation:
     session = requests.Session() if session is None else session
     try:
-        response = session.post(
+        response = _request_moodle(
+            session,
+            "POST",
             MOODLE_REST_URL,
             params={
                 "moodlewsrestformat": "json",
@@ -400,15 +430,14 @@ def _open_moodle_autologin(
     user_id: int,
     key: str,
 ) -> tuple[requests.Session, str]:
-    if not same_origin(autologin_url, MOODLE_URL):
+    if not moodle_url_allowed(autologin_url):
         raise BrowserBootstrapError("Moodle returned an unsafe auto-login URL")
     browser_session = requests.Session()
     try:
-        response = request_following_safe_redirects(
+        response = _request_moodle(
             browser_session,
             "GET",
             autologin_url,
-            lambda url: same_origin(url, MOODLE_URL),
             params={"userid": str(user_id), "key": key},
             timeout=HTTP_TIMEOUT_SECONDS,
         )
@@ -441,7 +470,9 @@ def create_browser_session(
     mobile_session = requests.Session()
     mobile_session.headers["User-Agent"] = MOODLE_MOBILE_USER_AGENT
     try:
-        response = mobile_session.post(
+        response = _request_moodle(
+            mobile_session,
+            "POST",
             MOODLE_REST_URL,
             params={
                 "moodlewsrestformat": "json",
@@ -507,7 +538,9 @@ def call_webservice(
 ) -> Any:
     request_data = {"wstoken": wstoken, "wsfunction": function, **data}
     try:
-        response = session.post(
+        response = _request_moodle(
+            session,
+            "POST",
             MOODLE_REST_URL,
             params={"moodlewsrestformat": "json", "wsfunction": function},
             data=request_data,

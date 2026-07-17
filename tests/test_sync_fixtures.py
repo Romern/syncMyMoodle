@@ -31,6 +31,7 @@ from .helpers import (
     make_context,
     node_at_path,
     node_rows,
+    two_course_tree,
 )
 
 H5P_PACKAGE_URL = "https://moodle.rwth-aachen.de/pluginfile.php/activity.h5p"
@@ -140,6 +141,32 @@ def test_page_redirect_cannot_bypass_course_domain_filter():
     assert {item.config_key for item in ctx.filtered_items} == {
         "filters.allowed_domains"
     }
+    assert ctx.stats.failed == 0
+    assert ctx.incomplete_course_ids == {1}
+
+
+def test_page_opencast_failure_is_counted_once_across_both_scanners(monkeypatch):
+    episode_id = "33333333-4444-4555-8666-777777777777"
+    calls = []
+
+    def fail_episode(*args, **kwargs):
+        calls.append((args, kwargs))
+        return False
+
+    monkeypatch.setattr(opencast, "add_episode_nodes", fail_episode)
+    ctx = run_page_handler(
+        FakeResponse(
+            text=(
+                '<iframe src="https://engage.streaming.rwth-aachen.de/play/'
+                f'{episode_id}"></iframe>'
+            )
+        ),
+        {"links.opencast": True},
+    )
+
+    assert len(calls) == 2
+    assert ctx.stats.failed == 1
+    assert ctx.incomplete_course_ids == {1}
 
 
 def h5p_package(content: str) -> bytes:
@@ -341,9 +368,11 @@ def test_h5p_package_download_is_streamed_and_capped(monkeypatch, caplog):
         }
         return FakeResponse(chunks=[b"1234", b"56789"])
 
-    _, section_node, _ = run_h5p_handler(monkeypatch, package_response)
+    ctx, section_node, _ = run_h5p_handler(monkeypatch, package_response)
 
     assert section_node.children == []
+    assert ctx.stats.failed == 1
+    assert ctx.incomplete_course_ids == {1}
     assert "H5P package for module 317 is too large" in caplog.text
 
 
@@ -359,6 +388,7 @@ def test_h5p_package_initial_url_obeys_course_domain_filter(monkeypatch):
     assert {item.config_key for item in ctx.filtered_items} == {
         "filters.allowed_domains"
     }
+    assert ctx.stats.failed == 0
 
 
 @pytest.mark.parametrize("package_metadata", [None, {"filesize": 128}])
@@ -385,6 +415,8 @@ def test_h5p_package_redirect_obeys_course_domain_filter(
     assert {item.config_key for item in ctx.filtered_items} == {
         "filters.allowed_domains"
     }
+    assert ctx.stats.failed == 0
+    assert ctx.incomplete_course_ids == {1}
 
 
 def test_h5p_content_is_bounded_after_decompression(monkeypatch, caplog):
@@ -1269,6 +1301,47 @@ def test_opencast_lti_authorization_is_reused_for_the_course():
     assert syncer.session.count("POST", opencast.OPENCAST_LTI_URL) == 2
 
 
+@pytest.mark.parametrize("status_code", [307, 308])
+def test_opencast_lti_launch_does_not_resend_session_cross_origin(status_code):
+    syncer = make_context()
+    syncer.session = FakeSession()
+    syncer.browser_session = FakeSession()
+    syncer.browser_session_key = "browser-session-key"
+    destination = "https://evil.test/collect-session"
+    query = urllib.parse.urlencode(
+        {
+            "courseid": 101,
+            "episodeid": "11111111-2222-4333-8444-555555555555",
+            "sesskey": syncer.browser_session_key,
+            "ocinstanceid": 1,
+        }
+    )
+    launch_url = f"{opencast.MOODLE_URL}filter/opencast/ltilaunch.php?{query}"
+
+    def redirect(url, kwargs):
+        del url
+        assert kwargs["allow_redirects"] is False
+        return FakeResponse(
+            status_code=status_code,
+            headers={"Location": destination},
+        )
+
+    syncer.browser_session.add("GET", launch_url, redirect)
+    syncer.browser_session.add(
+        "GET",
+        destination,
+        lambda url, kwargs: pytest.fail(f"session reached {url}: {kwargs}"),
+    )
+
+    assert not opencast.authorize_course_for_episode(
+        syncer,
+        101,
+        "11111111-2222-4333-8444-555555555555",
+    )
+    assert syncer.browser_session.calls == [("GET", launch_url)]
+    assert syncer.session.calls == []
+
+
 @pytest.mark.parametrize(
     "endpoint",
     [
@@ -1378,7 +1451,81 @@ def test_opencast_lti_launch_rejects_unexpected_endpoint(monkeypatch):
     )
 
     assert launch is None
+    assert syncer.stats.failed == 0
+    assert syncer.incomplete_course_ids == set()
     assert syncer.session.calls == []
+
+
+@pytest.mark.parametrize("failure", ["lti-submit", "series-list"])
+def test_opencast_series_source_failure_records_course_failure(monkeypatch, failure):
+    syncer = make_context({"links.opencast": True})
+    syncer.session = FakeSession()
+    course_node = Node("Course", 1, "Course", None)
+    section_node = course_node.add_child("Section", 2, "Section")
+    module_context = sync_handlers.ModuleContext(
+        syncer,
+        1,
+        course_node,
+        section_node,
+        {},
+        {},
+    )
+    launch = sync_handlers._OpencastLtiLaunch(
+        opencast.OPENCAST_LTI_URL,
+        {},
+        "Recordings",
+        "series-1",
+        None,
+    )
+    monkeypatch.setattr(
+        opencast,
+        "course_is_authorized",
+        lambda *args: failure != "lti-submit",
+    )
+    monkeypatch.setattr(opencast, "submit_lti_form", lambda *args, **kwargs: False)
+    monkeypatch.setattr(opencast, "list_series_episodes", lambda *args: None)
+
+    sync_handlers._handle_opencast_series(
+        module_context,
+        {"id": 501, "name": "Recordings"},
+        launch,
+    )
+
+    assert syncer.stats.failed == 1
+    assert syncer.incomplete_course_ids == {1}
+
+
+def test_opencast_episode_resolution_failure_records_course_failure(monkeypatch):
+    syncer = make_context({"links.opencast": True})
+    syncer.session = FakeSession()
+    course_node = Node("Course", 1, "Course", None)
+    section_node = course_node.add_child("Section", 2, "Section")
+    module_context = sync_handlers.ModuleContext(
+        syncer,
+        1,
+        course_node,
+        section_node,
+        {},
+        {},
+    )
+    launch = sync_handlers._OpencastLtiLaunch(
+        opencast.OPENCAST_LTI_URL,
+        {},
+        "Recording",
+        None,
+        "episode-1",
+    )
+    monkeypatch.setattr(opencast, "course_is_authorized", lambda *args: True)
+    monkeypatch.setattr(opencast, "add_episode_nodes", lambda *args, **kwargs: False)
+
+    sync_handlers._handle_opencast_episode(
+        module_context,
+        {"id": 501, "name": "Recording"},
+        launch,
+    )
+
+    assert syncer.stats.failed == 1
+    assert syncer.incomplete_course_ids == {1}
 
 
 def test_opencast_repeated_503_opens_shared_service_circuit(caplog):
@@ -1556,6 +1703,7 @@ def _assert_sciebo_share_outage(
     ]
     assert parent.children == []
     assert syncer.service_outages.should_skip(sciebo.SCIEBO_URL)
+    assert syncer.stats.failed == 4
 
 
 def _assert_sciebo_webdav_outage(caplog, response, reason):
@@ -1589,6 +1737,84 @@ def _assert_sciebo_webdav_outage(caplog, response, reason):
     ]
     assert parent.children == []
     assert not any(syncer.sciebo_link_cache.values())
+    assert syncer.stats.failed == 4
+
+
+@pytest.mark.parametrize("mode", ["negative-cache", "open-circuit"])
+def test_sciebo_failure_marks_each_course_and_preserves_both_caches(
+    tmp_path,
+    mode,
+):
+    config = {
+        "paths.sync_directory": str(tmp_path),
+        "links.sciebo": True,
+    }
+    seeded = make_context(config)
+    seeded.root_node, seeded_courses, _ = two_course_tree(with_cached_files=True)
+    course_cache.cache_root_node(seeded)
+    cached_files = {
+        course.id: course_cache.course_cache_path(seeded, course)
+        for course in seeded_courses
+    }
+    cached_bytes = {
+        course_id: path.read_bytes() for course_id, path in cached_files.items()
+    }
+
+    syncer = make_context(config)
+    syncer.root_node, _, sections = two_course_tree()
+    session = FakeSession()
+    first_links = (
+        (SCIEBO_SHARE_LINK,) if mode == "negative-cache" else SCIEBO_OUTAGE_LINKS[:3]
+    )
+    for link in first_links:
+        session.add("GET", link, FakeResponse(status_code=503))
+    syncer.session = session
+
+    first_text = " ".join(first_links)
+    sciebo.scan_public_shares(syncer, first_text, sections[0], course_id=101)
+    sciebo.scan_public_shares(syncer, first_text, sections[0], course_id=101)
+    second_link = (
+        SCIEBO_SHARE_LINK if mode == "negative-cache" else SCIEBO_OUTAGE_LINKS[3]
+    )
+    sciebo.scan_public_shares(syncer, second_link, sections[1], course_id=202)
+    course_cache.cache_root_node(syncer)
+
+    assert session.calls == [("GET", link) for link in first_links]
+    assert syncer.stats.failed == (2 if mode == "negative-cache" else 4)
+    assert syncer.incomplete_course_ids == {101, 202}
+    assert {
+        course_id: path.read_bytes() for course_id, path in cached_files.items()
+    } == cached_bytes
+
+
+def test_sciebo_filter_and_success_cache_precede_open_circuit():
+    cached_link = SCIEBO_SHARE_LINK
+    filtered_link = SCIEBO_OUTAGE_LINKS[3]
+    syncer = make_context(
+        {
+            "links.sciebo": True,
+            "filters.exclude_links": {"202": [filtered_link]},
+        }
+    )
+    syncer.root_node, _, sections = two_course_tree()
+    syncer.sciebo_link_cache[cached_link] = Node(
+        "cached-share",
+        None,
+        "Sciebo Folder",
+        None,
+    )
+    for _ in range(3):
+        syncer.service_outages.record_failure(sciebo.SCIEBO_URL)
+
+    sciebo.scan_public_shares(syncer, cached_link, sections[1], course_id=202)
+    sciebo.scan_public_shares(syncer, filtered_link, sections[1], course_id=202)
+
+    assert [child.name for child in sections[1].children] == ["cached-share"]
+    assert syncer.stats.failed == 0
+    assert syncer.incomplete_course_ids == set()
+    assert {item.config_key for item in syncer.filtered_items} == {
+        "filters.exclude_links"
+    }
 
 
 def test_sciebo_503_opens_shared_service_circuit(caplog):
@@ -1695,7 +1921,7 @@ def test_direct_link_redirect_cannot_bypass_allowed_domains(caplog):
     }
 
 
-def test_generic_link_resource_errors_are_quiet_and_not_scanned(caplog):
+def test_generic_link_resource_errors_are_reported_and_not_scanned(caplog):
     caplog.set_level(logging.WARNING, logger="syncmymoodle.links")
 
     for status_code in (403, 404):
@@ -1726,8 +1952,15 @@ def test_generic_link_resource_errors_are_quiet_and_not_scanned(caplog):
 
         assert session.calls == [("HEAD", url), ("GET", url)]
         assert parent.children == []
+        assert syncer.stats.failed == 1
+        assert syncer.incomplete_course_ids == {101}
 
-    assert caplog.messages == []
+    assert caplog.messages == [
+        "Skipping linked resource: GET https://files.example.test/error-403 "
+        "returned HTTP 403",
+        "Skipping linked resource: GET https://files.example.test/error-404 "
+        "returned HTTP 404",
+    ]
 
 
 def test_generic_link_error_pages_open_origin_circuit_without_being_scanned(caplog):
@@ -1965,6 +2198,18 @@ def test_opencast_null_media_preserves_cached_tracks_as_stale(monkeypatch):
 
     assert tracks == cached.tracks
     assert opencast.episode_metadata_is_stale(syncer, course_id, episode_id)
+    parent = Node("Section", 1, "Section", None)
+    assert (
+        opencast.add_episode_nodes(
+            syncer,
+            parent,
+            "Cached recording",
+            episode_id,
+            course_id=course_id,
+        )
+        is False
+    )
+    assert len(parent.children) == 1
 
 
 def test_opencast_malformed_series_page_falls_back_to_episode_refresh(monkeypatch):

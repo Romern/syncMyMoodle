@@ -111,8 +111,6 @@ def scan_public_shares(
     course_id: Any = None,
 ) -> None:
     for link in sorted(set(SCIEBO_LINK_RE.findall(text))):
-        if ctx.service_outages.should_skip(SCIEBO_URL):
-            return
         log.info(f"Found Sciebo Link: {link}")
         if filters.should_skip_url(
             ctx,
@@ -121,13 +119,29 @@ def scan_public_shares(
             course_id=course_id,
         ):
             continue
-        if _reuse_cached_share(ctx, link, parent_node):
+        if link in ctx.sciebo_link_cache:
+            if ctx.sciebo_link_cache[link] is None:
+                _record_share_failure(ctx, parent_node, course_id, link)
+            else:
+                _reuse_cached_share(ctx, link, parent_node)
             continue
+        if ctx.service_outages.should_skip(SCIEBO_URL):
+            _record_share_failure(ctx, parent_node, course_id, link)
+            return
         ctx.output.sync_progress.module_status("connecting to Sciebo share")
         if not _scan_new_share(ctx, link, parent_node, log):
-            course_node = parent_node.ancestor(NodeKind.COURSE)
-            if course_node is not None:
-                ctx.mark_course_incomplete(course_node.id)
+            _record_share_failure(ctx, parent_node, course_id, link)
+
+
+def _record_share_failure(
+    ctx: SyncContext,
+    parent_node: Node,
+    course_id: Any,
+    link: str,
+) -> None:
+    course_node = parent_node.ancestor(NodeKind.COURSE)
+    affected_course = course_node.id if course_node is not None else course_id
+    ctx.record_course_failure_once(affected_course, f"sciebo:{link}")
 
 
 def _reuse_cached_share(

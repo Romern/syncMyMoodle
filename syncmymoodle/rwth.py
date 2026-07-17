@@ -23,6 +23,7 @@ from syncmymoodle.constants import (
 from syncmymoodle.context import SyncContext
 from syncmymoodle.http_utils import (
     get_input_value,
+    moodle_url_allowed,
     parse_html,
     request_following_safe_redirects,
     safe_error_message,
@@ -248,7 +249,16 @@ def check_moodle_availability(
         raise Exception("You need a requests session first.")
 
     try:
-        response = session.get(MOODLE_URL, timeout=HTTP_TIMEOUT_SECONDS)
+        response = cast(
+            requests.Response,
+            request_following_safe_redirects(
+                session,
+                "GET",
+                MOODLE_URL,
+                moodle_url_allowed,
+                timeout=HTTP_TIMEOUT_SECONDS,
+            ),
+        )
     except requests.RequestException as exc:
         log.critical(
             "Could not reach RWTH Moodle at %s: %s",
@@ -293,14 +303,20 @@ def cached_session_status(cookie_file: Path) -> SessionStatus:
 
     request = [{"index": 0, "methodname": "core_session_time_remaining", "args": {}}]
     try:
-        response = session.post(
-            SESSION_REMAINING_URL,
-            params={
-                "sesskey": session_key,
-                "info": "core_session_time_remaining",
-            },
-            json=request,
-            timeout=HTTP_TIMEOUT_SECONDS,
+        response = cast(
+            requests.Response,
+            request_following_safe_redirects(
+                session,
+                "POST",
+                SESSION_REMAINING_URL,
+                moodle_url_allowed,
+                params={
+                    "sesskey": session_key,
+                    "info": "core_session_time_remaining",
+                },
+                json=request,
+                timeout=HTTP_TIMEOUT_SECONDS,
+            ),
         )
         payload = response.json()
     except (requests.RequestException, ValueError) as error:
@@ -359,12 +375,8 @@ def sso_url_allowed(
     return _url_on_allowed_origin(url, allowed_origins)
 
 
-def _moodle_url_allowed(url: str) -> bool:
-    return _url_on_allowed_origin(url, (MOODLE_URL,))
-
-
 def _login_url_allowed(url: str) -> bool:
-    return _moodle_url_allowed(url) or sso_url_allowed(url)
+    return moodle_url_allowed(url) or sso_url_allowed(url)
 
 
 def _saml_response_url_allowed(url: str) -> bool:
@@ -374,7 +386,7 @@ def _saml_response_url_allowed(url: str) -> bool:
     except ValueError:
         return False
     return (
-        _moodle_url_allowed(url)
+        moodle_url_allowed(url)
         and parsed.path == expected.path
         and not parsed.query
         and not parsed.fragment
@@ -642,7 +654,7 @@ def _submit_saml_response(
         data,
         "SAML response",
         log,
-        _moodle_url_allowed,
+        moodle_url_allowed,
     )
     return _get_session_key(parse_html(response.text), log)
 

@@ -176,6 +176,32 @@ def node_at_path(root: Node, target_path: list[str]) -> Node:
     return node
 
 
+def two_course_tree(
+    *,
+    with_cached_files: bool = False,
+) -> tuple[Node, tuple[Node, Node], tuple[Node, Node]]:
+    root = Node("", -1, "Root", None)
+    semester = root.add_child("26ss", None, "Semester")
+    courses = (
+        semester.add_child("First Course", 101, "Course"),
+        semester.add_child("Second Course", 202, "Course"),
+    )
+    sections = tuple(
+        course.add_child("General", 1000 + int(course.id), "Section")
+        for course in courses
+    )
+    if with_cached_files:
+        for course, section in zip(courses, sections, strict=True):
+            cached = section.add_download_child(
+                f"cached-{course.id}.pdf",
+                f"cached-{course.id}",
+                "Resource",
+                url=f"https://example.test/cached-{course.id}.pdf",
+            )
+            cached.mark_handled()
+    return root, courses, sections
+
+
 def install_moodle_fixtures(
     monkeypatch: Any,
     courses: list[dict[str, Any]],

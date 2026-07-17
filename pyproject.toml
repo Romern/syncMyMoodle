@@ -24,27 +24,41 @@ scripts = { syncmymoodle = "syncmymoodle.cli:main" }
 urls = { "Homepage" = "https://github.com/Romern/syncMyMoodle", "Bug Tracker" = "https://github.com/Romern/syncMyMoodle/issues" }
 
 dependencies = [
-  "requests>=2.0.0",
-  "beautifulsoup4>=4.0.0",
-  "yt-dlp>=2021.12.27",
+  "requests>=2.31.0",
+  "beautifulsoup4>=4.12.2",
+  "yt-dlp>=2023.7.6",
   "rich>=14.1.0",
   "lxml>=5.0.0",
   "latex2mathml>=3.77.0",
-  "keyring>=20.0.0",
+  "keyring>=24.2.0",
   "pywin32>=306; platform_system == 'Windows'",
   "tomlkit>=0.13.0",
 ]
 
 [project.optional-dependencies]
 test = [
-  "ruff",
-  "mypy",
-  "pytest",
-  "types-requests"
+  "ruff>=0.11.0",
+  "mypy>=1.15.0",
+  "pytest>=8.3.0",
+  "pytest-cov>=6.0.0",
+  "types-requests>=2.32.0.20240602"
 ]
 
 [tool.setuptools.package-data]
 syncmymoodle = ["config.toml.example", "certs/*.pem"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+filterwarnings = ["error"]
+
+[tool.coverage.run]
+branch = true
+source = ["syncmymoodle"]
+
+[tool.coverage.report]
+fail_under = 80
+show_missing = true
+skip_covered = true
 
 [tool.ruff]
 target-version = "py311"

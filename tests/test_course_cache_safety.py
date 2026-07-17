@@ -1,3 +1,5 @@
+import pytest
+
 from syncmymoodle import course_cache, moodle, opencast, pathing, sync, sync_handlers
 from syncmymoodle.constants import COURSE_CACHE_FILENAME, MOODLE_URL
 from syncmymoodle.context import MoodleAccount
@@ -6,6 +8,13 @@ from syncmymoodle.node import DownloadKind, Node
 from syncmymoodle.storage import read_private_gzip_json, write_private_gzip_json
 
 from .helpers import FakeSession, make_context, node_path
+
+
+def symlink_directory(link, target):
+    try:
+        link.symlink_to(target, target_is_directory=True)
+    except OSError as error:
+        pytest.skip(f"directory symlinks are not available: {error}")
 
 
 def course_tree():
@@ -265,6 +274,54 @@ def test_course_cache_path_applies_long_windows_path_support(tmp_path, monkeypat
     assert str(cache_path).startswith("\\\\?\\")
 
 
+def test_course_cache_refuses_a_linked_internal_parent(tmp_path):
+    root = tmp_path / "root"
+    outside = tmp_path / "outside"
+    root.mkdir()
+    outside.mkdir()
+    symlink_directory(root / course_cache.COURSE_CACHE_DIRECTORY, outside)
+    context = make_context({"paths.sync_directory": str(root)})
+    context.root_node, course = course_tree()
+
+    with pytest.raises(
+        pathing.UnsafeInternalPathError, match="Refusing linked internal path"
+    ):
+        course_cache.cache_root_node(context)
+
+    assert list(outside.iterdir()) == []
+
+
+def test_course_cache_resolves_a_linked_configured_root(tmp_path):
+    target = tmp_path / "target"
+    target.mkdir()
+    configured_root = tmp_path / "configured-root"
+    symlink_directory(configured_root, target)
+    context = make_context({"paths.sync_directory": str(configured_root)})
+    _, course = course_tree()
+
+    cache_path = course_cache.course_cache_path(context, course)
+
+    assert cache_path.is_relative_to(target)
+
+
+def test_course_cache_keeps_the_root_resolved_for_the_context(tmp_path):
+    first_target = tmp_path / "first-target"
+    second_target = tmp_path / "second-target"
+    first_target.mkdir()
+    second_target.mkdir()
+    configured_root = tmp_path / "configured-root"
+    symlink_directory(configured_root, first_target)
+    context = make_context({"paths.sync_directory": str(configured_root)})
+    configured_root.unlink()
+    symlink_directory(configured_root, second_target)
+    _, course = course_tree()
+
+    cache_path = course_cache.course_cache_path(context, course)
+
+    assert cache_path.is_relative_to(first_target)
+    assert not cache_path.is_relative_to(second_target)
+
+
 def test_course_cache_is_isolated_by_moodle_account(tmp_path):
     config = {"paths.sync_directory": str(tmp_path)}
     seeded = make_context(config)
@@ -331,6 +388,67 @@ def test_module_handler_failure_preserves_previous_course_cache(
     course_cache.cache_root_node(current)
 
     assert current.stats.failed == 1
+    assert cache_path.read_bytes() == cached_bytes
+
+
+@pytest.mark.parametrize(
+    ("module_kind", "config_key", "inventory_function"),
+    [
+        ("assign", "modules.assignment", "get_assignment"),
+        ("folder", "modules.folder", "get_folders_by_courses"),
+    ],
+)
+def test_auxiliary_inventory_outage_fails_run_without_stopping_modules_or_cache(
+    tmp_path,
+    monkeypatch,
+    module_kind,
+    config_key,
+    inventory_function,
+):
+    config = {"paths.sync_directory": str(tmp_path), config_key: True}
+    seeded = make_context(config)
+    seeded.root_node, course_node = course_tree()
+    course_cache.cache_root_node(seeded)
+    cache_path = course_cache.course_cache_path(seeded, course_node)
+    cached_bytes = cache_path.read_bytes()
+
+    monkeypatch.setattr(
+        moodle,
+        "get_all_courses",
+        lambda session, wstoken, user_id: [
+            {"id": 301, "shortname": "Download Course", "idnumber": "26ss"}
+        ],
+    )
+    monkeypatch.setattr(
+        moodle,
+        "get_course",
+        lambda session, wstoken, course_id: [
+            {
+                "id": 401,
+                "name": "General",
+                "modules": [
+                    {"id": 501, "modname": module_kind, "name": "Unavailable"},
+                    {"id": 502, "modname": "label", "name": "Still handled"},
+                ],
+            }
+        ],
+    )
+    monkeypatch.setattr(moodle, inventory_function, lambda *args: None)
+    handled = []
+    monkeypatch.setattr(
+        sync_handlers,
+        "handle_module",
+        lambda module_context, module: handled.append(module["id"]),
+    )
+    current = make_context(config)
+    current.session = FakeSession()
+
+    sync.sync(current)
+    course_cache.cache_root_node(current)
+
+    assert handled == [501, 502]
+    assert current.stats.failed == 1
+    assert current.incomplete_course_ids == {301}
     assert cache_path.read_bytes() == cached_bytes
 
 

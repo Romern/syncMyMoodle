@@ -1392,7 +1392,7 @@ def cleanup_root_from_args(args: Namespace, parser: ArgumentParser) -> Path:
 
 @contextmanager
 def cleanup_lock(
-    root: Path,
+    root: pathing.InternalPathRoot,
     *,
     apply: bool,
     parser: ArgumentParser,
@@ -1408,12 +1408,12 @@ def cleanup_lock(
 
 
 def clean_conflicts_command(args: Namespace, parser: ArgumentParser) -> None:
-    root = cleanup_root_from_args(args, parser)
+    root = pathing.InternalPathRoot.resolve(cleanup_root_from_args(args, parser))
     with cleanup_lock(root, apply=args.apply, parser=parser):
         conflicts = cleanup.iter_conflicts(root)
         plan = cleanup.conflict_cleanup_plan(conflicts)
         if args.apply:
-            cleanup.delete_paths(plan.remove)
+            cleanup.delete_paths(root, plan.remove)
     action = "Deleted" if args.apply else "Would delete"
     report = output.success if args.apply else output.caution
     for path in plan.remove:
@@ -1430,7 +1430,7 @@ def clean_conflicts_command(args: Namespace, parser: ArgumentParser) -> None:
 
 
 def clean_caches_command(args: Namespace, parser: ArgumentParser) -> None:
-    root = cleanup_root_from_args(args, parser)
+    root = pathing.InternalPathRoot.resolve(cleanup_root_from_args(args, parser))
     with cleanup_lock(root, apply=args.apply, parser=parser):
         cache_paths = cleanup.iter_course_caches(root)
         output.caution(
@@ -1438,14 +1438,14 @@ def clean_caches_command(args: Namespace, parser: ArgumentParser) -> None:
             "when recovering from broken or stale cache metadata."
         )
         if args.apply:
-            cleanup.delete_paths(cache_paths)
+            cleanup.delete_paths(root, cache_paths)
     action = "Deleted" if args.apply else "Would delete"
     report = output.success if args.apply else output.caution
     for path in cache_paths:
         report(f"{action}: {path}")
 
     report(
-        f"Scanned {root}; "
+        f"Scanned {root.root}; "
         f"{count_phrase(len(cache_paths), 'cache file', 'cache files')} "
         f"{'deleted' if args.apply else 'would be deleted'}."
     )
@@ -2050,7 +2050,7 @@ def run(ctx: SyncContext, *, show_filtered: bool = False) -> None:
     run_lock = (
         nullcontext()
         if ctx.config.dry_run
-        else storage.sync_run_lock(Path(ctx.config.sync_directory))
+        else storage.sync_run_lock(ctx.internal_path_root)
     )
     try:
         with run_lock, ctx.output.sync_progress:

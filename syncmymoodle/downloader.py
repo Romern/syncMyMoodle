@@ -9,7 +9,7 @@ from dataclasses import dataclass
 from enum import Enum
 from fnmatch import fnmatchcase
 from pathlib import Path
-from typing import Any
+from typing import Any, TypeGuard
 
 import requests
 import yt_dlp
@@ -181,15 +181,10 @@ def classify_local_file(
     Only strong markers carrying a plain MD5/SHA1/SHA256 hex digest can verify
     content. Opaque, missing, or unreadable markers are UNKNOWN.
     """
-    if not marker:
+    parsed_hash = parse_content_hash(marker)
+    if parsed_hash is None:
         return FileMatch.UNKNOWN
-    match = re.search(r"([0-9a-fA-F]{32,64})", str(marker))
-    if not match:
-        return FileMatch.UNKNOWN
-    hex_str = match.group(1).lower()
-    algo = HASH_ALGOS_BY_LENGTH.get(len(hex_str))
-    if algo is None:
-        return FileMatch.UNKNOWN
+    algo, hex_str = parsed_hash
     if snapshot is not None:
         digest = snapshot.digest_for(algo)
         if digest is None:
@@ -201,6 +196,18 @@ def classify_local_file(
         except OSError:
             return FileMatch.UNKNOWN
     return FileMatch.MATCH if digest == hex_str else FileMatch.DIFFER
+
+
+def parse_content_hash(marker: Any) -> tuple[str, str] | None:
+    if not isinstance(marker, str):
+        return None
+    digest = marker.strip().lower()
+    if len(digest) >= 2 and digest[0] == digest[-1] == '"':
+        digest = digest[1:-1]
+    if re.fullmatch(r"[0-9a-f]+", digest) is None:
+        return None
+    algorithm = HASH_ALGOS_BY_LENGTH.get(len(digest))
+    return (algorithm, digest) if algorithm is not None else None
 
 
 def node_allows_html_download(node: Any) -> bool:
@@ -645,10 +652,11 @@ def download_violates_size_limits(
 
     Best-effort: responses without a Content-Length header are not limited.
     """
-    total_size = content_length(response, resume_size)
+    total_size = trustworthy_response_size(response, resume_size)
     if total_size is None:
         return False
-    node.remote_size = total_size
+    if node.remote_size is None:
+        node.remote_size = total_size
     if not size_limits_configured(ctx):
         return False
     return record_size_limit_filter(ctx, str(downloadpath), total_size, "size")
@@ -756,12 +764,13 @@ def prepare_transfer_plan(node: Node, downloadpath: Path) -> TransferPlan:
     if tmp_path.exists():
         if etag_sidecar.exists():
             try:
-                plan.partial_etag = etag_sidecar.read_text(encoding="utf-8").strip()
+                plan.partial_etag = etag_sidecar.read_text(encoding="utf-8")
             except OSError:
                 plan.partial_etag = None
-        if plan.partial_etag:
+        if strong_etag(plan.partial_etag):
             plan.resume_size = tmp_path.stat().st_size
             plan.headers = {
+                "Accept-Encoding": "identity",
                 "Range": f"bytes={plan.resume_size}-",
                 "If-Range": plan.partial_etag,
             }
@@ -769,25 +778,60 @@ def prepare_transfer_plan(node: Node, downloadpath: Path) -> TransferPlan:
             plan.discard_partial()
 
     if node.download_headers:
-        plan.headers = {**plan.headers, **node.download_headers}
+        plan.headers = (
+            {**node.download_headers, **plan.headers}
+            if plan.resume_size
+            else dict(node.download_headers)
+        )
     return plan
 
 
+def strong_etag(value: Any) -> TypeGuard[str]:
+    """Whether ``value`` is a strong entity-tag suitable for If-Range."""
+    return (
+        isinstance(value, str)
+        and re.fullmatch(r'"[\x21\x23-\x7e\x80-\xff]*"', value) is not None
+    )
+
+
 def valid_resume_content_range(value: Any, resume_size: int) -> bool:
-    if not isinstance(value, str):
+    parsed = parse_content_range(value)
+    if parsed is None:
         return False
+    start, end, total = parsed
+    return start == resume_size and end >= start and total is not None and end < total
+
+
+def parse_content_range(value: Any) -> tuple[int, int, int | None] | None:
+    if not isinstance(value, str):
+        return None
     match = CONTENT_RANGE_RE.fullmatch(value.strip())
     if match is None:
-        return False
+        return None
     start = int(match.group("start"))
     end = int(match.group("end"))
-    total = match.group("total")
-    return start == resume_size and end >= start and (total == "*" or end < int(total))
+    raw_total = match.group("total")
+    total = None if raw_total == "*" else int(raw_total)
+    return start, end, total
 
 
 def validate_resume_response(response: Any, transfer: TransferPlan) -> bool:
+    if response.status_code == 206 and not response_has_identity_encoding(response):
+        transfer.discard_partial()
+        return False
     if not transfer.resume_size:
-        return True
+        if response.status_code != 206:
+            return True
+        parsed_range = parse_content_range(response.headers.get("Content-Range"))
+        valid_complete_response = (
+            parsed_range is not None
+            and parsed_range[0] == 0
+            and parsed_range[2] is not None
+            and parsed_range[1] + 1 == parsed_range[2]
+        )
+        if not valid_complete_response:
+            transfer.discard_partial()
+        return valid_complete_response
 
     etag_header = response.headers.get("ETag")
     valid_resume = (
@@ -803,6 +847,13 @@ def validate_resume_response(response: Any, transfer: TransferPlan) -> bool:
     was_partial_response = response.status_code == 206
     transfer.discard_partial()
     return not was_partial_response
+
+
+def response_has_identity_encoding(response: Any) -> bool:
+    content_encoding = (
+        str(response.headers.get("Content-Encoding", "")).strip().casefold()
+    )
+    return content_encoding in {"", "identity"}
 
 
 def response_body_is_usable(
@@ -864,6 +915,91 @@ def write_response_body(
                 progress.advance(len(data))
                 file.write(data)
     return progress.transferred_bytes
+
+
+def trustworthy_response_size(response: Any, resume_size: int) -> int | None:
+    """Return the complete decoded size only when Content-Length describes it."""
+    if not response_has_identity_encoding(response):
+        return None
+    body_size = content_length(response)
+    return body_size + resume_size if body_size is not None else None
+
+
+def expected_staged_sizes(
+    node: Node,
+    response: Any,
+    transfer: TransferPlan,
+) -> set[int]:
+    expected = set()
+    if node.remote_size is not None:
+        expected.add(node.remote_size)
+    response_size = trustworthy_response_size(response, transfer.resume_size)
+    if response_size is not None:
+        expected.add(response_size)
+    if response.status_code == 206:
+        parsed_range = parse_content_range(response.headers.get("Content-Range"))
+        if parsed_range is not None:
+            _, end, total = parsed_range
+            expected.add(end + 1)
+            if total is not None:
+                expected.add(total)
+    return expected
+
+
+def advertised_content_hash(node: Node) -> tuple[str, str] | None:
+    if node.etag_kind is not RemoteMarkerKind.CONTENT_HASH:
+        return None
+    return parse_content_hash(node.etag)
+
+
+def validate_staged_download(
+    node: Node,
+    response: Any,
+    transfer: TransferPlan,
+    downloadpath: Path,
+    log: logging.Logger,
+) -> str | None:
+    """Return the staged SHA-256 after validating all advertised integrity data."""
+    snapshot = storage.snapshot_file(transfer.tmp_path)
+    try:
+        actual_size = transfer.tmp_path.stat().st_size
+    except OSError:
+        actual_size = None
+    expected_sizes = expected_staged_sizes(node, response, transfer)
+    if (
+        actual_size is None
+        or snapshot.digest is None
+        or not snapshot.metadata_still_matches(transfer.tmp_path)
+    ):
+        log.warning("Discarding unreadable staged download for %s", downloadpath)
+        transfer.discard_partial()
+        return None
+    if expected_sizes and any(actual_size != size for size in expected_sizes):
+        log.warning(
+            "Discarding incomplete download of %s: received %s bytes, expected %s",
+            downloadpath,
+            actual_size,
+            ", ".join(str(size) for size in sorted(expected_sizes)),
+        )
+        transfer.discard_partial()
+        return None
+
+    expected_hash = advertised_content_hash(node)
+    if node.etag_kind is RemoteMarkerKind.CONTENT_HASH and expected_hash is None:
+        log.warning("Discarding download with an invalid checksum for %s", downloadpath)
+        transfer.discard_partial()
+        return None
+    if expected_hash is not None:
+        algorithm, digest = expected_hash
+        if snapshot.digest_for(algorithm) != digest:
+            log.warning(
+                "Discarding download of %s because its %s checksum does not match",
+                downloadpath,
+                algorithm.upper(),
+            )
+            transfer.discard_partial()
+            return None
+    return snapshot.digest
 
 
 def install_downloaded_file(
@@ -958,9 +1094,17 @@ def process_download_response(
         content,
         first_chunk,
     )
-    staged_hash = storage.file_sha256(transfer.tmp_path)
+    staged_hash = validate_staged_download(
+        node,
+        response,
+        transfer,
+        downloadpath,
+        log,
+    )
+    if staged_hash is None:
+        return FAILED_DOWNLOAD
     local_hash = storage.file_sha256(downloadpath) if downloadpath.exists() else None
-    if staged_hash is not None and staged_hash == local_hash:
+    if staged_hash == local_hash:
         transfer.discard_partial()
         record_download_metadata(node, downloadpath, etag_header, staged_hash)
         ctx.downloaded_paths.add(downloadpath)

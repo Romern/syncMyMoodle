@@ -9,8 +9,8 @@ from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
 
-from syncmymoodle.constants import COURSE_CACHE_FILENAME
-from syncmymoodle.pathing import CONFLICT_GLOB, parse_conflict_path
+from syncmymoodle.constants import COURSE_CACHE_DIRECTORY, COURSE_CACHE_FILENAME
+from syncmymoodle.pathing import CONFLICT_GLOB, InternalPathRoot, parse_conflict_path
 
 
 @dataclass(frozen=True)
@@ -31,18 +31,21 @@ def file_hash(path: Path) -> str:
         return hashlib.file_digest(handle, "sha256").hexdigest()
 
 
-def iter_conflicts(root: Path) -> list[ConflictFile]:
+def iter_conflicts(root: Path | InternalPathRoot) -> list[ConflictFile]:
+    internal_root = InternalPathRoot.resolve(root)
     conflicts: list[ConflictFile] = []
-    for path in root.rglob(CONFLICT_GLOB):
+    for discovered_path in internal_root.root.rglob(CONFLICT_GLOB):
+        path = internal_root.require(discovered_path)
         if not path.is_file():
             continue
         conflict_path = parse_conflict_path(path)
         if conflict_path is None:
             continue
+        canonical = internal_root.require(conflict_path.canonical)
         conflicts.append(
             ConflictFile(
                 path=path,
-                canonical=conflict_path.canonical,
+                canonical=canonical,
                 content_hash=file_hash(path),
             )
         )
@@ -91,10 +94,18 @@ def conflict_cleanup_plan(conflicts: Iterable[ConflictFile]) -> ConflictCleanupP
     return ConflictCleanupPlan(tuple(sorted(remove)), tuple(keep))
 
 
-def iter_course_caches(root: Path) -> list[Path]:
-    return sorted(path for path in root.rglob(COURSE_CACHE_FILENAME) if path.is_file())
+def iter_course_caches(root: Path | InternalPathRoot) -> list[Path]:
+    internal_root = InternalPathRoot.resolve(root)
+    internal_root.path(COURSE_CACHE_DIRECTORY)
+    caches = []
+    for discovered_path in internal_root.root.rglob(COURSE_CACHE_FILENAME):
+        path = internal_root.require(discovered_path)
+        if path.is_file():
+            caches.append(path)
+    return sorted(caches)
 
 
-def delete_paths(paths: Iterable[Path]) -> None:
+def delete_paths(root: Path | InternalPathRoot, paths: Iterable[Path]) -> None:
+    internal_root = InternalPathRoot.resolve(root)
     for path in paths:
-        path.unlink()
+        internal_root.require(path).unlink()

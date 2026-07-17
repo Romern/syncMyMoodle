@@ -4,6 +4,7 @@ import time
 import urllib.parse
 from collections.abc import Callable
 from contextlib import closing
+from dataclasses import dataclass
 from typing import Any, cast
 
 import requests
@@ -43,6 +44,24 @@ from syncmymoodle.node import DownloadKind, Node, RemoteMarkerKind
 
 logger = logging.getLogger(__name__)
 LINKED_RESOURCES_CACHE_FORMAT = "syncmymoodle.linked-resources.v1"
+
+
+@dataclass(frozen=True)
+class LinkedResourceResolution:
+    """One reusable generic-link lookup result and its failure semantics."""
+
+    resource: LinkedResourceCacheEntry | None
+    cacheable: bool = True
+    failure: str | None = None
+
+
+@dataclass(frozen=True)
+class _HeadResolution:
+    resource: LinkedResourceCacheEntry | None
+    final_url: str
+    origin: str | None
+    cacheable: bool = True
+    failure: str | None = None
 
 
 def _response_header(response: Any, name: str) -> str | None:
@@ -264,7 +283,7 @@ def _head_linked_resource(
     url: str,
     cached: LinkedResourceCacheEntry | None,
     url_allowed: Callable[[str], bool],
-) -> tuple[LinkedResourceCacheEntry | None, str, str | None, bool]:
+) -> _HeadResolution:
     headers = _conditional_headers(cached)
     conditional = bool(headers)
     while True:
@@ -286,7 +305,7 @@ def _head_linked_resource(
                 and final_url == cached.final_url
             ):
                 entry, cacheable = _revalidated_cache_entry(cached, response)
-                return entry, final_url, request_origin, cacheable
+                return _HeadResolution(entry, final_url, request_origin, cacheable)
             if response.status_code == 304 and conditional:
                 headers = {}
                 conditional = False
@@ -298,8 +317,20 @@ def _head_linked_resource(
                 and content_type not in HTML_CONTENT_TYPES
             ):
                 entry, cacheable = _response_cache_entry(response, None)
-                return entry, final_url, request_origin, cacheable
-            return None, final_url, request_origin, True
+                return _HeadResolution(entry, final_url, request_origin, cacheable)
+            failure = (
+                f"HEAD {redact_url_secrets(final_url)} returned HTTP "
+                f"{response.status_code}"
+                if not 200 <= response.status_code < 300
+                else None
+            )
+            return _HeadResolution(
+                None,
+                final_url,
+                request_origin,
+                True,
+                failure,
+            )
 
 
 def _linked_page_html(
@@ -332,6 +363,31 @@ def _linked_page_html(
         return body.decode("utf-8", errors="replace"), True
 
 
+def _linked_http_failure(
+    ctx: SyncContext,
+    response_origin: str | None,
+    final_url: str,
+    status_code: int,
+    log: logging.Logger,
+) -> LinkedResourceResolution | None:
+    failure_kind = classify_http_failure(status_code)
+    if failure_kind is None:
+        return None
+    failure = f"GET {redact_url_secrets(final_url)} returned HTTP {status_code}"
+    if response_origin:
+        record_service_failure(
+            ctx.service_outages,
+            response_origin,
+            f"Link origin {response_origin}",
+            failure_kind,
+            failure,
+            log,
+        )
+    if failure_kind is HttpFailureKind.RESOURCE:
+        log.warning("Skipping linked resource: %s", failure)
+    return LinkedResourceResolution(None, failure=failure)
+
+
 def _get_linked_resource(
     ctx: SyncContext,
     url: str,
@@ -339,7 +395,7 @@ def _get_linked_resource(
     url_allowed: Callable[[str], bool],
     request_origin: str | None,
     log: logging.Logger,
-) -> tuple[LinkedResourceCacheEntry | None, bool]:
+) -> LinkedResourceResolution:
     headers = _conditional_headers(cached)
     conditional = bool(headers)
     while True:
@@ -365,32 +421,30 @@ def _get_linked_resource(
             ):
                 if response_origin:
                     ctx.service_outages.record_available(response_origin)
-                return _revalidated_cache_entry(cached, response)
+                entry, cacheable = _revalidated_cache_entry(cached, response)
+                return LinkedResourceResolution(entry, cacheable)
             if response.status_code == 304 and conditional:
                 headers = {}
                 conditional = False
                 continue
 
-            failure_kind = classify_http_failure(response.status_code)
-            if failure_kind is not None:
-                if response_origin:
-                    record_service_failure(
-                        ctx.service_outages,
-                        response_origin,
-                        f"Link origin {response_origin}",
-                        failure_kind,
-                        f"GET {redact_url_secrets(final_url)} returned HTTP "
-                        f"{response.status_code}",
-                        log,
-                    )
-                return None, True
+            failure = _linked_http_failure(
+                ctx,
+                response_origin,
+                final_url,
+                response.status_code,
+                log,
+            )
+            if failure is not None:
+                return failure
 
             if response_origin:
                 ctx.service_outages.record_available(response_origin)
             html, usable = _linked_page_html(response, final_url, log)
             if not usable:
-                return None, False
-            return _response_cache_entry(response, html)
+                return LinkedResourceResolution(None, cacheable=False)
+            entry, cacheable = _response_cache_entry(response, html)
+            return LinkedResourceResolution(entry, cacheable)
 
 
 def _fresh_cached_resource(
@@ -420,7 +474,7 @@ def _handle_link_request_error(
     request_origin: str | None,
     error: requests.RequestException,
     log: logging.Logger,
-) -> tuple[None, bool]:
+) -> LinkedResourceResolution:
     reason = (
         f"request for {redact_url_secrets(url)} failed: {safe_request_error(error)}"
     )
@@ -440,7 +494,12 @@ def _handle_link_request_error(
         log.warning("Skipping link request: %s", reason)
     # A course-specific URL policy rejection must not become a global negative
     # result for a later course with a more permissive policy.
-    return None, not isinstance(error, filters.FilteredRequestError)
+    filtered = isinstance(error, filters.FilteredRequestError)
+    return LinkedResourceResolution(
+        None,
+        cacheable=not filtered,
+        failure=None if filtered else reason,
+    )
 
 
 def _resolve_linked_resource(
@@ -449,14 +508,17 @@ def _resolve_linked_resource(
     cached: LinkedResourceCacheEntry | None,
     course_id: Any,
     log: logging.Logger,
-) -> tuple[LinkedResourceCacheEntry | None, bool]:
+) -> LinkedResourceResolution:
     link_origin = normalized_http_origin(url)
     request_origin = link_origin
     use_cached, fresh_resource = _fresh_cached_resource(ctx, cached, course_id)
     if use_cached:
-        return fresh_resource, True
+        return LinkedResourceResolution(fresh_resource)
     if link_origin and ctx.service_outages.should_skip(link_origin):
-        return None, True
+        return LinkedResourceResolution(
+            None,
+            failure=f"link origin {link_origin} is unavailable",
+        )
 
     def url_allowed(candidate: str) -> bool:
         return filters.require_url_allowed(
@@ -479,26 +541,33 @@ def _resolve_linked_resource(
             )
 
         ctx.output.sync_progress.module_status("checking linked resource")
-        resource, final_url, final_origin, cacheable = _head_linked_resource(
+        head = _head_linked_resource(
             ctx,
             url,
             cached,
             url_allowed,
         )
-        request_origin = final_origin or request_origin
-        if resource is not None:
+        request_origin = head.origin or request_origin
+        if head.resource is not None:
             if request_origin:
                 ctx.service_outages.record_available(request_origin)
-            return resource, cacheable
+            return LinkedResourceResolution(head.resource, head.cacheable)
 
         if not ctx.config.follow_links or (
             request_origin and ctx.service_outages.should_skip(request_origin)
         ):
-            return None, True
+            failure = head.failure or (
+                f"link origin {request_origin} is unavailable"
+                if request_origin and ctx.service_outages.should_skip(request_origin)
+                else None
+            )
+            if failure is not None:
+                log.warning("Skipping linked resource: %s", failure)
+            return LinkedResourceResolution(None, failure=failure)
         ctx.output.sync_progress.module_status("loading linked page")
         return _get_linked_resource(
             ctx,
-            final_url,
+            head.final_url,
             None,
             url_allowed,
             request_origin,
@@ -526,6 +595,7 @@ def _linked_resource_for_course(
     course_key = str(course_id)
     cache = ctx.linked_resources_by_course.setdefault(course_key, {})
     cached_resource = cache.get(url)
+    failed = False
     if cached_resource is not None and filters.should_skip_url(
         ctx,
         cached_resource.final_url,
@@ -535,7 +605,9 @@ def _linked_resource_for_course(
         return None
     ctx.seen_linked_resources.add((course_key, url))
     if url in ctx.linked_resource_results:
-        resource = ctx.linked_resource_results[url]
+        resolution = ctx.linked_resource_results[url]
+        resource = resolution.resource
+        failed = resolution.failure is not None
         if resource is not None and filters.should_skip_url(
             ctx,
             resource.final_url,
@@ -546,20 +618,24 @@ def _linked_resource_for_course(
         if resource is not None:
             cache[url] = resource
     else:
-        resource, cacheable = _resolve_linked_resource(
+        resolution = _resolve_linked_resource(
             ctx,
             url,
             cached_resource,
             course_id,
             log,
         )
-        if cacheable:
+        resource = resolution.resource
+        failed = resolution.failure is not None
+        if resolution.cacheable:
             if resource is not None:
                 cache[url] = resource
-            ctx.linked_resource_results[url] = resource
+            ctx.linked_resource_results[url] = resolution
         else:
             cache.pop(url, None)
-    if resource is None and cached_resource is not None:
+    if failed:
+        ctx.record_course_failure_once(course_id, f"linked-resource:{url}")
+    if resource is None and cached_resource is not None and not failed:
         ctx.mark_course_incomplete(course_id)
     return resource
 
@@ -726,14 +802,15 @@ def _scan_opencast_links(
                 redact_url_secrets(video_url),
             )
             continue
-        opencast_api.add_episode_nodes(
+        if not opencast_api.add_episode_nodes(
             ctx,
             parent_node,
             module_title,
             video_id,
             log,
             course_id=course_id,
-        )
+        ):
+            ctx.record_course_failure_once(course_id, f"opencast:{video_id}")
 
 
 def _scan_emedia_links(
@@ -756,14 +833,16 @@ def _scan_emedia_links(
         ):
             continue
         ctx.output.sync_progress.module_status("resolving emedia video")
-        emedia_api.add_video_node(
+        if not emedia_api.add_video_node(
             ctx,
             parent_node,
             link,
             module_title,
             log,
             course_id=course_id,
-        )
+        ):
+            video_id = emedia_api.extract_video_id(link)
+            ctx.record_course_failure_once(course_id, f"emedia:{video_id}")
 
 
 def scan_for_links(

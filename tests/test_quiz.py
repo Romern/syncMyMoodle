@@ -204,6 +204,29 @@ def test_quiz_node_keeps_remote_name_until_path_materialization(monkeypatch):
     assert module_context.section_node.children[0].name == "R&amp;D, Versuch 1"
 
 
+def test_missing_quiz_review_records_a_course_failure(monkeypatch):
+    install_quiz_activity(monkeypatch)
+    ctx, module_context = quiz_module_context()
+    monkeypatch.setattr(
+        sync_handlers.moodle_api,
+        "get_quiz_attempts",
+        lambda session, wstoken, quiz_id: [{"id": 5}],
+    )
+    monkeypatch.setattr(
+        sync_handlers.moodle_api,
+        "get_quiz_attempt_review",
+        lambda session, wstoken, attempt_id: None,
+    )
+
+    sync_handlers.handle_quiz_module(
+        module_context,
+        {"id": 42, "instance": 7, "modname": "quiz", "name": "My Quiz"},
+    )
+
+    assert ctx.stats.failed == 1
+    assert ctx.incomplete_course_ids == {1}
+
+
 def test_build_quiz_snapshot_is_self_contained_and_network_silent(tmp_path):
     ctx = quiz_context(tmp_path, "html")
 

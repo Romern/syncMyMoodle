@@ -230,7 +230,7 @@ def test_token_validation_requires_integer_user_id():
 
 def test_token_validation_treats_network_failure_as_unknown():
     class FailingSession:
-        def post(self, *args, **kwargs):
+        def request(self, *args, **kwargs):
             raise requests.ConnectionError("offline")
 
     result = moodle.validate_mobile_tokens(
@@ -239,6 +239,34 @@ def test_token_validation_treats_network_failure_as_unknown():
     )
 
     assert result.kind is moodle.TokenValidationKind.UNKNOWN
+
+
+@pytest.mark.parametrize("status_code", [307, 308])
+def test_token_validation_does_not_resend_token_cross_origin(status_code):
+    session = FakeSession()
+    destination = "https://evil.test/collect-token"
+
+    def redirect(url, kwargs):
+        del url
+        assert kwargs["allow_redirects"] is False
+        assert kwargs["data"]["wstoken"] == "ws-token"
+        return FakeResponse(
+            status_code=status_code,
+            headers={"Location": destination},
+        )
+
+    session.add("POST", moodle.MOODLE_REST_URL, redirect)
+    session.add(
+        "POST",
+        destination,
+        lambda url, kwargs: pytest.fail(f"credentials reached {url}: {kwargs}"),
+    )
+
+    result = moodle.validate_mobile_tokens(bound_tokens(), session=session)
+
+    assert result.kind is moodle.TokenValidationKind.UNKNOWN
+    assert "refusing redirect" in (result.detail or "")
+    assert session.calls == [("POST", moodle.MOODLE_REST_URL)]
 
 
 def test_token_validation_rejects_token_for_another_account():
@@ -469,6 +497,73 @@ def test_create_browser_session_uses_private_token_and_mobile_user_agent(monkeyp
 
     assert returned_session is browser_session
     assert session_key == "browser-sesskey"
+
+
+@pytest.mark.parametrize("status_code", [307, 308])
+def test_create_browser_session_does_not_resend_tokens_cross_origin(
+    monkeypatch,
+    status_code,
+):
+    mobile_session = FakeSession()
+    destination = "https://evil.test/collect-mobile-tokens"
+
+    def redirect(url, kwargs):
+        del url
+        assert kwargs["allow_redirects"] is False
+        assert kwargs["data"] == {
+            "wstoken": "ws-token",
+            "wsfunction": "tool_mobile_get_autologin_key",
+            "privatetoken": "private-token",
+        }
+        return FakeResponse(
+            status_code=status_code,
+            headers={"Location": destination},
+        )
+
+    mobile_session.add("POST", moodle.MOODLE_REST_URL, redirect)
+    mobile_session.add(
+        "POST",
+        destination,
+        lambda url, kwargs: pytest.fail(f"credentials reached {url}: {kwargs}"),
+    )
+    monkeypatch.setattr(moodle.requests, "Session", lambda: mobile_session)
+
+    with pytest.raises(moodle.BrowserBootstrapError, match="refusing redirect"):
+        moodle.create_browser_session(bound_tokens())
+
+    assert mobile_session.calls == [("POST", moodle.MOODLE_REST_URL)]
+
+
+def test_webservice_preserves_credentials_on_same_origin_307_redirect():
+    session = FakeSession()
+    destination = f"{MOODLE_URL}webservice/rest/redirected.php"
+    session.add(
+        "POST",
+        moodle.MOODLE_REST_URL,
+        FakeResponse(status_code=307, headers={"Location": destination}),
+    )
+
+    def redirected_response(url, kwargs):
+        del url
+        assert kwargs["data"] == {
+            "wstoken": "ws-token",
+            "wsfunction": "core_test",
+            "value": 42,
+        }
+        return FakeResponse(json_payload={"accepted": True})
+
+    session.add("POST", destination, redirected_response)
+
+    assert moodle.call_webservice(
+        session,
+        "ws-token",
+        "core_test",
+        {"value": 42},
+    ) == {"accepted": True}
+    assert session.calls == [
+        ("POST", moodle.MOODLE_REST_URL),
+        ("POST", destination),
+    ]
 
 
 def test_create_browser_session_names_missing_browser_login_token():

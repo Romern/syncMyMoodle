@@ -15,6 +15,7 @@ from typing import Any, BinaryIO
 import requests
 
 from syncmymoodle import pathing
+from syncmymoodle.constants import COURSE_CACHE_DIRECTORY
 
 logger = logging.getLogger(__name__)
 
@@ -199,18 +200,21 @@ def _unlock_file(handle: BinaryIO) -> None:
 
 
 @contextmanager
-def sync_run_lock(sync_directory: Path) -> Iterator[None]:
+def sync_run_lock(sync_directory: Path | pathing.InternalPathRoot) -> Iterator[None]:
     """Prevent concurrent writers from targeting one sync directory."""
-    lock_path = pathing.with_windows_extended_length_prefix(
-        sync_directory.expanduser() / ".syncmymoodle-cache" / "run.lock"
-    )
-    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    internal_root = pathing.InternalPathRoot.resolve(sync_directory)
+    try:
+        raw_lock_path = internal_root.path(COURSE_CACHE_DIRECTORY, "run.lock")
+        internal_root.create_parent(raw_lock_path)
+    except pathing.UnsafeInternalPathError as error:
+        raise SyncRunLockedError(str(error)) from error
+    lock_path = pathing.with_windows_extended_length_prefix(raw_lock_path)
     with lock_path.open("a+b") as handle:
         try:
             _lock_file(handle)
         except OSError as error:
             raise SyncRunLockedError(
-                f"another sync is already using {sync_directory}"
+                f"another sync is already using {internal_root.root}"
             ) from error
         try:
             yield

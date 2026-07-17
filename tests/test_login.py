@@ -653,6 +653,61 @@ def test_cached_session_status_reports_expired_session(monkeypatch, tmp_path):
     assert status.kind is rwth.SessionStatusKind.EXPIRED
 
 
+@pytest.mark.parametrize("status_code", [307, 308])
+def test_cached_session_status_does_not_resend_session_cross_origin(
+    monkeypatch,
+    tmp_path,
+    status_code,
+):
+    session = FakeSession()
+    session.cookies = requests.cookies.RequestsCookieJar()
+    destination = "https://evil.test/collect-session"
+
+    def redirect(url, kwargs):
+        del url
+        assert kwargs["allow_redirects"] is False
+        assert kwargs["params"]["sesskey"] == "browser-sesskey"
+        assert kwargs["json"][0]["methodname"] == "core_session_time_remaining"
+        return FakeResponse(
+            status_code=status_code,
+            headers={"Location": destination},
+        )
+
+    session.add("POST", rwth.SESSION_REMAINING_URL, redirect)
+    session.add(
+        "POST",
+        destination,
+        lambda url, kwargs: pytest.fail(f"session reached {url}: {kwargs}"),
+    )
+    monkeypatch.setattr(rwth.requests, "Session", lambda: session)
+    monkeypatch.setattr(
+        rwth,
+        "read_private_gzip_json",
+        lambda path, description: {
+            "format": "syncmymoodle.session.v2",
+            "session_key": "browser-sesskey",
+            "cookies": [
+                {
+                    "name": "MoodleSession",
+                    "value": "browser-cookie",
+                    "domain": "",
+                    "path": "/",
+                    "secure": True,
+                    "expires": None,
+                    "rest": {},
+                }
+            ],
+        },
+    )
+
+    status = rwth.cached_session_status(tmp_path / "session")
+
+    assert status.kind is rwth.SessionStatusKind.UNKNOWN
+    assert "refusing redirect" in (status.detail or "")
+    assert session.cookies.get("MoodleSession") == "browser-cookie"
+    assert session.calls == [("POST", rwth.SESSION_REMAINING_URL)]
+
+
 def test_cached_session_status_does_not_probe_legacy_cache(monkeypatch, tmp_path):
     session = FakeSession()
     session.cookies = requests.cookies.RequestsCookieJar()

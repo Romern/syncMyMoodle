@@ -6,6 +6,7 @@ import html
 import ntpath
 import os
 import re
+import stat
 import sys
 import unicodedata
 import urllib.parse
@@ -21,6 +22,86 @@ WINDOWS_EXTENDED_PATH_THRESHOLD = 240
 # A UTF-8 byte limit is also conservative for NTFS's 255 UTF-16-code-unit limit.
 PATH_COMPONENT_MAX_BYTES = 220
 PATH_COMPONENT_HASH_LENGTH = 8
+
+
+class UnsafeInternalPathError(ValueError):
+    """An internal control path could escape or traverse a filesystem link."""
+
+
+def _is_link_or_reparse_point(result: os.stat_result) -> bool:
+    reparse_flag = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
+    attributes = getattr(result, "st_file_attributes", 0)
+    return stat.S_ISLNK(result.st_mode) or bool(attributes & reparse_flag)
+
+
+@dataclass(frozen=True)
+class InternalPathRoot:
+    """A resolved sync root that rejects linked internal descendants."""
+
+    root: Path
+
+    @classmethod
+    def resolve(cls, configured_root: Path | InternalPathRoot) -> InternalPathRoot:
+        if isinstance(configured_root, InternalPathRoot):
+            return configured_root
+        return cls(configured_root.expanduser().resolve(strict=False))
+
+    def path(self, *parts: str) -> Path:
+        """Build and validate an internal path below this root."""
+        return self.require(self.root.joinpath(*parts))
+
+    def require(self, path: Path) -> Path:
+        """Validate one path without following any descendant links."""
+        candidate = absolute_path(path)
+        try:
+            relative = candidate.relative_to(self.root)
+        except ValueError as error:
+            raise UnsafeInternalPathError(
+                f"Refusing internal path outside sync directory: {candidate}"
+            ) from error
+
+        current = self.root
+        for part in relative.parts:
+            current /= part
+            try:
+                result = current.lstat()
+            except FileNotFoundError:
+                break
+            except OSError as error:
+                raise UnsafeInternalPathError(
+                    f"Could not validate internal path: {current}"
+                ) from error
+            if _is_link_or_reparse_point(result):
+                raise UnsafeInternalPathError(
+                    f"Refusing linked internal path: {current}"
+                )
+
+        try:
+            resolved = candidate.resolve(strict=False)
+        except OSError as error:
+            raise UnsafeInternalPathError(
+                f"Could not resolve internal path: {candidate}"
+            ) from error
+        if not resolved.is_relative_to(self.root):
+            raise UnsafeInternalPathError(
+                f"Refusing internal path outside sync directory: {candidate}"
+            )
+        return candidate
+
+    def create_parent(self, path: Path) -> Path:
+        """Create a validated path's parents without accepting linked components."""
+        candidate = self.require(path)
+        self.root.mkdir(parents=True, exist_ok=True)
+        current = self.root
+        relative_parent = candidate.parent.relative_to(self.root)
+        for part in relative_parent.parts:
+            current /= part
+            try:
+                current.mkdir()
+            except FileExistsError:
+                pass
+            self.require(current)
+        return self.require(candidate)
 
 
 def is_windows() -> bool:

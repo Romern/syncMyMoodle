@@ -5,11 +5,17 @@ from pathlib import Path
 
 import pytest
 
-from syncmymoodle import downloader, emedia, links
+from syncmymoodle import course_cache, downloader, emedia, links
 from syncmymoodle.constants import EMEDIA_API_URL, EMEDIA_URL
 from syncmymoodle.node import DownloadKind, Node, RemoteMarkerKind
 
-from .helpers import FakeResponse, FakeSession, make_context, node_path
+from .helpers import (
+    FakeResponse,
+    FakeSession,
+    make_context,
+    node_path,
+    two_course_tree,
+)
 
 PLAYLIST_URL = (
     "https://wms01-avmz.germanywestcentral.cloudapp.azure.com/veira/"
@@ -97,8 +103,8 @@ def test_single_emedia_link_resolves_public_api_without_login(monkeypatch):
         module_title="Clinical Lecture 1.2",
         single=True,
     )
-    assert emedia.resolve_video(ctx, 540) == emedia.EmediaVideo(
-        540, "API title", PLAYLIST_URL
+    assert emedia.resolve_video(ctx, 540) == emedia.EmediaResolution(
+        emedia.EmediaVideo(540, "API title", PLAYLIST_URL)
     )
 
     assert ctx.session.calls == []
@@ -145,7 +151,9 @@ def test_unusable_manifest_does_not_fabricate_a_revision_marker(monkeypatch):
     monkeypatch.setattr(emedia.shutil, "which", lambda executable: f"/{executable}")
     ctx = make_context()
     ctx.emedia_api_session = api_session
-    ctx.emedia_video_cache[540] = emedia.EmediaVideo(540, "API title", PLAYLIST_URL)
+    ctx.emedia_video_cache[540] = emedia.EmediaResolution(
+        emedia.EmediaVideo(540, "API title", PLAYLIST_URL)
+    )
     first_parent = Node("First", 1, "Section", None)
     second_parent = Node("Second", 2, "Section", None)
     link = "https://emedia-medizin.rwth-aachen.de/web/veira_fe/#/watch/540"
@@ -164,7 +172,9 @@ def test_unusable_manifest_does_not_fabricate_a_revision_marker(monkeypatch):
 def test_emedia_without_ffmpeg_warns_once_and_uses_ts_extension(monkeypatch, caplog):
     monkeypatch.setattr(emedia.shutil, "which", lambda executable: None)
     ctx = make_context()
-    ctx.emedia_video_cache[540] = emedia.EmediaVideo(540, "API title", PLAYLIST_URL)
+    ctx.emedia_video_cache[540] = emedia.EmediaResolution(
+        emedia.EmediaVideo(540, "API title", PLAYLIST_URL)
+    )
     ctx.emedia_revision_cache[PLAYLIST_URL] = "revision"
 
     first_parent = Node("First", 1, "Section", None)
@@ -185,7 +195,9 @@ def test_emedia_api_outage_stops_after_shared_threshold(caplog):
     ctx.emedia_api_session = api_session
 
     for video_id in (540, 541, 542, 543):
-        assert emedia.resolve_video(ctx, video_id) is None
+        resolution = emedia.resolve_video(ctx, video_id)
+        assert resolution.video is None
+        assert resolution.failure is not None
 
     assert api_session.count("POST", EMEDIA_API_URL) == 3
     assert ctx.service_outages.should_skip(EMEDIA_API_URL)
@@ -212,11 +224,89 @@ def test_emedia_rejects_non_https_metadata_and_caches_failure(caplog):
     ctx = make_context()
     ctx.emedia_api_session = api_session
 
-    assert emedia.resolve_video(ctx, 540) is None
-    assert emedia.resolve_video(ctx, 540) is None
+    first = emedia.resolve_video(ctx, 540)
+    second = emedia.resolve_video(ctx, 540)
+
+    assert first == second
+    assert first.video is None
+    assert first.failure is not None
+    assert api_session.calls == [("POST", EMEDIA_API_URL)]
+    assert "unsafe or invalid playlist URL" in caplog.text
+
+
+@pytest.mark.parametrize("payload", [{}, {"records": ["maintenance"]}])
+def test_emedia_malformed_success_response_is_a_cached_failure(payload):
+    api_session = FakeSession()
+    api_session.add("POST", EMEDIA_API_URL, FakeResponse(json_payload=payload))
+    ctx = make_context()
+    ctx.emedia_api_session = api_session
+
+    first = emedia.resolve_video(ctx, 540)
+    second = emedia.resolve_video(ctx, 540)
+
+    assert first == second
+    assert first.video is None
+    assert first.failure == "VEIRA returned malformed metadata"
+    assert api_session.calls == [("POST", EMEDIA_API_URL)]
+
+
+def test_emedia_valid_inventory_without_video_is_authoritative_absence():
+    link = "https://emedia-medizin.rwth-aachen.de/web/veira_fe/#/watch/540"
+    api_session = FakeSession()
+    api_session.add(
+        "POST",
+        EMEDIA_API_URL,
+        FakeResponse(json_payload={"records": []}),
+    )
+    ctx = make_context({"links.emedia": True})
+    ctx.emedia_api_session = api_session
+    parent = Node("Section", 1, "Section", None)
+
+    links.scan_for_links(ctx, link, parent, 101, single=True)
+
+    assert parent.children == []
+    assert ctx.emedia_video_cache[540] == emedia.EmediaResolution(None)
+    assert ctx.stats.failed == 0
+    assert ctx.incomplete_course_ids == set()
+
+
+def test_emedia_api_failure_marks_each_course_and_preserves_both_caches(tmp_path):
+    link = "https://emedia-medizin.rwth-aachen.de/web/veira_fe/#/watch/540"
+    config = {
+        "paths.sync_directory": str(tmp_path),
+        "links.emedia": True,
+        "links.youtube": False,
+        "links.opencast": False,
+        "links.sciebo": False,
+    }
+    seeded = make_context(config)
+    seeded.root_node, seeded_courses, _ = two_course_tree(with_cached_files=True)
+    course_cache.cache_root_node(seeded)
+    cached_files = {
+        course.id: course_cache.course_cache_path(seeded, course)
+        for course in seeded_courses
+    }
+    cached_bytes = {
+        course_id: path.read_bytes() for course_id, path in cached_files.items()
+    }
+
+    ctx = make_context(config)
+    ctx.root_node, _, sections = two_course_tree()
+    api_session = FakeSession()
+    api_session.add("POST", EMEDIA_API_URL, FakeResponse(status_code=503))
+    ctx.emedia_api_session = api_session
+
+    links.scan_for_links(ctx, link, sections[0], 101, single=True)
+    links.scan_for_links(ctx, link, sections[0], 101, single=True)
+    links.scan_for_links(ctx, link, sections[1], 202, single=True)
+    course_cache.cache_root_node(ctx)
 
     assert api_session.calls == [("POST", EMEDIA_API_URL)]
-    assert "no usable metadata" in caplog.text
+    assert ctx.stats.failed == 2
+    assert ctx.incomplete_course_ids == {101, 202}
+    assert {
+        course_id: path.read_bytes() for course_id, path in cached_files.items()
+    } == cached_bytes
 
 
 @pytest.mark.parametrize(

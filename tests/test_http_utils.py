@@ -9,6 +9,7 @@ from syncmymoodle.http_utils import (
     ServiceOutageTracker,
     classify_http_failure,
     classify_request_failure,
+    moodle_url_allowed,
     normalized_http_origin,
     record_service_failure,
     redact_url_secrets,
@@ -90,6 +91,25 @@ def test_http_origin_is_normalized_for_outage_keys():
         "https://example.test:8443"
     )
     assert normalized_http_origin("not a URL") is None
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "http://moodle.rwth-aachen.de/webservice/rest/server.php",
+        "https://moodle.rwth-aachen.de.evil.test/webservice/rest/server.php",
+        "https://attacker@moodle.rwth-aachen.de/webservice/rest/server.php",
+        " https://moodle.rwth-aachen.de/webservice/rest/server.php",
+    ],
+)
+def test_moodle_credential_url_policy_rejects_unsafe_origins(url):
+    assert not moodle_url_allowed(url)
+
+
+def test_moodle_credential_url_policy_accepts_same_origin():
+    assert moodle_url_allowed(
+        "https://moodle.rwth-aachen.de/webservice/rest/server.php"
+    )
 
 
 def test_request_policy_failures_do_not_count_as_transient_outages():

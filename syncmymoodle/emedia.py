@@ -54,6 +54,14 @@ class EmediaVideo:
     playlist_url: str
 
 
+@dataclass(frozen=True)
+class EmediaResolution:
+    """A cached metadata lookup: found, authoritatively absent, or failed."""
+
+    video: EmediaVideo | None
+    failure: str | None = None
+
+
 class _CelliaTLSAdapter(requests.adapters.HTTPAdapter):
     """Supply the public intermediate certificate omitted by Cellia's server."""
 
@@ -89,36 +97,59 @@ def extract_video_id(link: str) -> int | None:
     return int(match.group("video_id")) if match is not None else None
 
 
-def _parse_video(payload: Any, video_id: int) -> EmediaVideo | None:
+def _records_by_id(payload: Any) -> dict[int, dict[str, Any]] | None:
     if not isinstance(payload, dict) or not isinstance(payload.get("records"), list):
         return None
-    record = next(
-        (
-            item
-            for item in payload["records"]
-            if isinstance(item, dict) and str(item.get("id")) == str(video_id)
-        ),
-        None,
-    )
+    records: dict[int, dict[str, Any]] = {}
+    for item in payload["records"]:
+        if not isinstance(item, dict):
+            return None
+        raw_id = item.get("id")
+        if isinstance(raw_id, int) and not isinstance(raw_id, bool):
+            record_id = raw_id
+        elif isinstance(raw_id, str) and raw_id.isdigit():
+            record_id = int(raw_id)
+        else:
+            return None
+        if record_id <= 0 or record_id in records:
+            return None
+        records[record_id] = item
+    return records
+
+
+def _parse_video(payload: Any, video_id: int) -> EmediaResolution:
+    records = _records_by_id(payload)
+    if records is None:
+        return EmediaResolution(None, "VEIRA returned malformed metadata")
+    record = records.get(video_id)
     if record is None:
-        return None
+        return EmediaResolution(None)
     title = record.get("title")
     playlist_url = record.get("wowza_url")
     if not isinstance(title, str) or not title.strip():
-        return None
+        return EmediaResolution(None, f"VEIRA video {video_id} has no valid title")
     if not isinstance(playlist_url, str):
-        return None
+        return EmediaResolution(
+            None,
+            f"VEIRA video {video_id} has no valid playlist URL",
+        )
     try:
         parsed_url = urllib.parse.urlsplit(playlist_url)
     except ValueError:
-        return None
+        return EmediaResolution(
+            None,
+            f"VEIRA video {video_id} has no valid playlist URL",
+        )
     if (
         parsed_url.scheme != "https"
         or not parsed_url.hostname
         or not parsed_url.path.casefold().endswith(".m3u8")
     ):
-        return None
-    return EmediaVideo(video_id, title.strip(), playlist_url)
+        return EmediaResolution(
+            None,
+            f"VEIRA video {video_id} has an unsafe or invalid playlist URL",
+        )
+    return EmediaResolution(EmediaVideo(video_id, title.strip(), playlist_url))
 
 
 def _api_session(ctx: SyncContext) -> requests.Session:
@@ -194,20 +225,26 @@ def resolve_video(
     ctx: SyncContext,
     video_id: int,
     log: logging.Logger = logger,
-) -> EmediaVideo | None:
+) -> EmediaResolution:
     if video_id in ctx.emedia_video_cache:
         return ctx.emedia_video_cache[video_id]
 
     payload = _fetch_video_payload(ctx, video_id, log)
     if payload is _API_FAILURE:
-        ctx.emedia_video_cache[video_id] = None
-        return None
+        resolution = EmediaResolution(
+            None,
+            f"VEIRA metadata lookup failed for video {video_id}",
+        )
+        ctx.emedia_video_cache[video_id] = resolution
+        return resolution
 
-    video = _parse_video(payload, video_id)
-    if video is None:
+    resolution = _parse_video(payload, video_id)
+    if resolution.failure is not None:
+        log.warning("%s", resolution.failure)
+    elif resolution.video is None:
         log.warning("VEIRA returned no usable metadata for video %s", video_id)
-    ctx.emedia_video_cache[video_id] = video
-    return video
+    ctx.emedia_video_cache[video_id] = resolution
+    return resolution
 
 
 def manifest_revision_marker(playlist_url: str, manifest: bytes) -> str | None:
@@ -315,18 +352,22 @@ def add_video_node(
     log: logging.Logger = logger,
     *,
     course_id: Any = None,
-) -> None:
+) -> bool:
+    """Add a VEIRA node and report whether metadata resolution completed."""
     video_id = extract_video_id(link)
     if video_id is None:
-        return
-    video = resolve_video(ctx, video_id, log)
+        return True
+    resolution = resolve_video(ctx, video_id, log)
+    if resolution.failure is not None:
+        return False
+    video = resolution.video
     if video is None or filters.should_skip_url(
         ctx,
         video.playlist_url,
         "emedia video URL",
         course_id=course_id,
     ):
-        return
+        return True
     marker = _revision_marker(ctx, video.playlist_url, log, course_id)
     output_suffix = _output_suffix(ctx, log)
     title = str(module_title or video.title)
@@ -344,3 +385,4 @@ def add_video_node(
         etag_kind=RemoteMarkerKind.OPAQUE if marker is not None else None,
         download_kind=DownloadKind.EMEDIA,
     )
+    return True
