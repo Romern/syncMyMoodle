@@ -560,7 +560,7 @@ def _add_sciebo_files(
     listing: Any | None = None,
     cached_parent: Node | None = None,
 ) -> bool:
-    ctx.output.sync_progress.module_status(f"scanning Sciebo folder {parent_node.name}")
+    ctx.output.sync_progress.module_status("scanning Sciebo folder")
     listing_result = (
         listing
         if listing is not None

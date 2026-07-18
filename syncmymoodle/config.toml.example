@@ -6,7 +6,7 @@ store = "keyring" # keyring (recommended) or env-file
 env_file = "" # Environment file used only when store = "env-file"
 
 [auth.login]
-method = "totp" # totp or browser; setup --browser selects browser
+method = "totp" # totp or browser; interactive setup defaults to browser
 # With the TOTP method: prompt, keyring, env-file, 1password, bitwarden, pass, rbw, gopass, or command.
 # Reusable providers can sign in again during sync if Moodle tokens stop working.
 provider = "prompt"

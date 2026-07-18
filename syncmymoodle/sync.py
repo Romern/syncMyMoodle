@@ -150,15 +150,14 @@ class _CourseRun:
     def update_progress(
         self,
         section_index: int,
-        current_module: str = "",
+        module_active: bool = False,
     ) -> None:
         self.ctx.output.sync_progress.update_course(
-            self.course.name,
             section=section_index,
             sections=self.section_total,
             module=self.module_index,
             modules=self.module_total,
-            current_module=current_module,
+            module_active=module_active,
         )
 
 
@@ -522,7 +521,7 @@ def _sync_module(
 ) -> None:
     module_name = str(module.get("name") or f"module {module.get('id', 'unknown')}")
     module_kind = str(module.get("modname") or "unknown")
-    run.update_progress(section_index, f"{module_name} [{module_kind}]")
+    run.update_progress(section_index, module_active=True)
     module_started_at = time.monotonic()
     try:
         if not filters.should_skip_module(run.ctx, module, module_context.course_id):

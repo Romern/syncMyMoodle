@@ -174,7 +174,7 @@ def test_setup_logs_in_once_and_writes_only_non_secret_config(
         lambda *args: pytest.fail("setup must not reset the shared token"),
     )
 
-    cli.main(["setup"])
+    cli.main(["setup", "--totp"])
     output = capsys.readouterr().out
 
     config_path = config_home / "syncmymoodle" / "config.toml"
@@ -241,7 +241,7 @@ def test_setup_rolls_back_tokens_when_config_write_fails(tmp_path, monkeypatch):
     )
 
     with pytest.raises(SystemExit) as exc_info:
-        cli.main(["setup"])
+        cli.main(["setup", "--totp"])
 
     assert exc_info.value.code == 2
     assert store.tokens == original
@@ -278,7 +278,7 @@ def test_browser_setup_skips_totp_and_password_manager_configuration(
 
     monkeypatch.setattr(cli, "acquire_browser_moodle_tokens", acquire)
 
-    cli.main(["setup", "--browser"])
+    cli.main(["setup"])
 
     parsed = tomllib.loads(
         (config_home / "syncmymoodle" / "config.toml").read_text(encoding="utf-8")
@@ -579,7 +579,7 @@ def test_setup_configures_detected_password_manager_and_uses_it_for_login(
         cli, "acquire_validated_moodle_tokens", lambda ctx, parser: stored
     )
 
-    cli.main(["setup"])
+    cli.main(["setup", "--totp"])
     output = capsys.readouterr().out
 
     parsed = tomllib.loads(
@@ -638,7 +638,7 @@ def test_setup_explains_limited_opencast_before_recommending_token_reset(
         lambda ctx, parser: legacy_tokens,
     )
 
-    cli.main(["setup"])
+    cli.main(["setup", "--totp"])
 
     assert (config_home / "syncmymoodle" / "config.toml").is_file()
     stored = MoodleTokens.from_json(next(iter(fake_keyring.values.values())))

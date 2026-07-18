@@ -15,7 +15,7 @@ import subprocess
 import tempfile
 import urllib.parse
 from collections.abc import Callable
-from contextlib import closing
+from contextlib import closing, nullcontext
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -738,14 +738,15 @@ def render_quiz_pdf(
         )
         return False
 
-    ctx.output.action("Rendering", display_path, "Quiz PDF")
-    pdf_ok = render_pdf_with_chromium(browser, html_path, pdf_path, log)
-    if not pdf_ok:
-        log.warning(
-            "Keeping the HTML snapshot for %s after PDF rendering failed.",
-            node.name,
-        )
-    return pdf_ok
+    with ctx.output.tracked_action("Rendering", display_path, "Quiz PDF"):
+        pdf_ok = render_pdf_with_chromium(browser, html_path, pdf_path, log)
+        if not pdf_ok:
+            log.warning(
+                "Keeping the HTML snapshot for %s after PDF rendering failed.",
+                node.name,
+            )
+            return False
+        return True
 
 
 def report_quiz_dry_run(
@@ -857,6 +858,10 @@ def _install_quiz_artifact(
         return FAILED_DOWNLOAD
     node.artifact_hashes[kind] = digest
     ctx.downloaded_paths.add(target_path)
+    if kind == "html":
+        ctx.output.action("Downloaded", target_path, "Quiz")
+    else:
+        ctx.output.action("Rendered", target_path, "Quiz PDF")
     return completed_download(existed=existed)
 
 
@@ -926,24 +931,28 @@ def _stage_quiz_snapshot(
             redact_url_secrets(node.url),
         )
         return None
-    if announce:
-        ctx.output.action("Downloading", html_path, "Quiz")
-    html_path.parent.mkdir(parents=True, exist_ok=True)
-    staged_path = _temporary_quiz_path(html_path)
-    staged_path.unlink(missing_ok=True)
-    try:
-        snapshot = build_quiz_snapshot(
-            review_html,
-            ctx.require_session(),
-            node.url,
-            log,
-        )
-        staged_path.write_text(snapshot, encoding="utf-8")
-    except (OSError, ValueError):
-        log.exception("Failed to create quiz snapshot %s", html_path)
+    action_context = (
+        ctx.output.tracked_action("Downloading", html_path, "Quiz")
+        if announce
+        else nullcontext()
+    )
+    with action_context:
+        html_path.parent.mkdir(parents=True, exist_ok=True)
+        staged_path = _temporary_quiz_path(html_path)
         staged_path.unlink(missing_ok=True)
-        return None
-    return staged_path
+        try:
+            snapshot = build_quiz_snapshot(
+                review_html,
+                ctx.require_session(),
+                node.url,
+                log,
+            )
+            staged_path.write_text(snapshot, encoding="utf-8")
+        except (OSError, ValueError):
+            log.exception("Failed to create quiz snapshot %s", html_path)
+            staged_path.unlink(missing_ok=True)
+            return None
+        return staged_path
 
 
 def _normalized_quiz_snapshot_hash(path: Path) -> str | None:
@@ -1011,11 +1020,20 @@ def _prepare_quiz_artifacts(
     pdf_path: Path,
     *,
     snapshot_needed: bool,
+    announce_snapshot: bool,
     pdf_needed: bool,
     log: logging.Logger,
 ) -> tuple[Path | None, Path | None, bool]:
     html_stage = (
-        _stage_quiz_snapshot(ctx, node, html_path, log) if snapshot_needed else None
+        _stage_quiz_snapshot(
+            ctx,
+            node,
+            html_path,
+            log,
+            announce=announce_snapshot,
+        )
+        if snapshot_needed
+        else None
     )
     if snapshot_needed and html_stage is None:
         return None, None, False
@@ -1207,6 +1225,7 @@ def download_quiz(
         html_path,
         pdf_path,
         snapshot_needed=snapshot_needed,
+        announce_snapshot=html_needed,
         pdf_needed=pdf_needed,
         log=log,
     )

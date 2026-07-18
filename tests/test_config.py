@@ -292,9 +292,13 @@ def test_browser_login_and_totp_manual_are_scoped_auth_modes(capsys):
     browser_args = parser.parse_args(["auth", "login", "--browser"])
     assert browser_args.browser_login is True
     assert browser_args.browser is None
+    default_setup_args = parser.parse_args(["setup"])
+    assert default_setup_args.browser_login is True
     setup_args = parser.parse_args(["setup", "--browser"])
     assert setup_args.browser_login is True
     assert setup_args.browser is None
+    totp_setup_args = parser.parse_args(["setup", "--totp"])
+    assert totp_setup_args.browser_login is False
 
     with pytest.raises(SystemExit) as exc_info:
         parser.parse_args(["auth", "login", "--browser", "--totp-manual"])

@@ -127,43 +127,18 @@ The documentation for the 0.5.0 release remains available on its
 
 Run the interactive setup once, then start your first sync.
 
-Choose the setup method that matches how you sign in to RWTH:
+The default setup opens the RWTH login page in your browser. This supports
+passkeys, security keys, TOTP, and the other sign-in methods offered there.
 
-| Sign-in method | Use it when                                                                             | Command                        |
-|----------------|-----------------------------------------------------------------------------------------|--------------------------------|
-| TOTP           | You sign in with an RWTH password and TOTP token                                        | `syncmymoodle setup`           |
-| Browser        | You use a passkey, security key, or another MFA method supported by the RWTH login page | `syncmymoodle setup --browser` |
-
-### TOTP setup
-
-```shell
-syncmymoodle setup
-```
-
-Setup asks for:
-
-* Your RWTH Single Sign-On username
-* Your RWTH TOTP serial, such as `TOTP12345678`
-* The directory where Moodle files should be downloaded
-* How RWTH sign-in credentials should be obtained when new Moodle tokens are
-  needed
-* Where the Moodle tokens should be stored
-
-The TOTP serial is the identifier shown in the
-[RWTH IDM Token Manager](https://idm.rwth-aachen.de/selfservice/MFATokenManager).
-
-Depending on the selected sign-in provider, setup may prompt for your RWTH
-password, TOTP secret, or password-manager references. These are used to
-complete the initial RWTH sign-in and, when configured through a reusable
-provider, to obtain new Moodle tokens later.
+| Sign-in method | Use it when                                                                 | Command                     |
+|----------------|-----------------------------------------------------------------------------|-----------------------------|
+| Browser        | You want the simplest setup or use any MFA method supported by the login page | `syncmymoodle setup`        |
+| TOTP           | You want to stay in the terminal or configure automatic sign-in recovery     | `syncmymoodle setup --totp` |
 
 ### Browser setup
 
-Use browser setup for passkeys, security keys, or other MFA methods handled by
-the RWTH login page:
-
 ```shell
-syncmymoodle setup --browser
+syncmymoodle setup
 ```
 
 Browser setup asks for your username, sync directory, and Moodle token store.
@@ -180,9 +155,34 @@ display a blue link:
 > The app-link address contains your Moodle tokens. Do not share, save, publish,
 > or paste it anywhere except the syncMyMoodle prompt.
 
-A setup created with `--browser` saves browser-assisted sign-in as the default
-login method. A later `syncmymoodle auth login` will therefore use the browser
-again.
+Browser setup saves browser-assisted sign-in as the default login method. A
+later `syncmymoodle auth login` will therefore use the browser again.
+
+### TOTP setup
+
+Use TOTP setup to complete sign-in entirely in the terminal and optionally
+configure a reusable credential provider for automatic sign-in recovery:
+
+```shell
+syncmymoodle setup --totp
+```
+
+TOTP setup asks for:
+
+* Your RWTH Single Sign-On username
+* Your RWTH TOTP serial, such as `TOTP12345678`
+* The directory where Moodle files should be downloaded
+* How RWTH sign-in credentials should be obtained when new Moodle tokens are
+  needed
+* Where the Moodle tokens should be stored
+
+The TOTP serial is the identifier shown in the
+[RWTH IDM Token Manager](https://idm.rwth-aachen.de/selfservice/MFATokenManager).
+
+Depending on the selected sign-in provider, setup may prompt for your RWTH
+password, TOTP secret, or password-manager references. These are used to
+complete the initial RWTH sign-in and, when configured through a reusable
+provider, to obtain new Moodle tokens later.
 
 ### Start the first sync
 

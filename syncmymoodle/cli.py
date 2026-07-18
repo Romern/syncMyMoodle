@@ -227,12 +227,23 @@ def build_parser() -> ArgumentParser:
             "and the sync destination, then verify the RWTH sign-in with one login."
         ),
     )
-    setup_parser.add_argument(
+    setup_login_method = setup_parser.add_mutually_exclusive_group()
+    setup_login_method.add_argument(
         "--browser",
         dest="browser_login",
         action="store_true",
-        help="complete RWTH sign-in in a browser to use any supported MFA method",
+        help=(
+            "complete RWTH sign-in in a browser to use any supported MFA method "
+            "(default)"
+        ),
     )
+    setup_login_method.add_argument(
+        "--totp",
+        dest="browser_login",
+        action="store_false",
+        help="complete RWTH password and TOTP sign-in in the terminal",
+    )
+    setup_parser.set_defaults(browser_login=True)
     config_parser = subparsers.add_parser("config", help="manage configuration files")
     config_subparsers = config_parser.add_subparsers(
         dest="config_command",
@@ -822,7 +833,7 @@ def setup_sync_directory_value(value: str) -> str:
 def prompt_setup_config(
     parser: ArgumentParser,
     *,
-    browser_login: bool = False,
+    browser_login: bool,
 ) -> tuple[ConfigDict, str]:
     username = output.prompt("RWTH SSO username")
     if not username:
@@ -1211,7 +1222,7 @@ def setup_command(
                 "setup cancelled before saving the configuration or Moodle tokens. "
                 "Moodle may have returned a legacy mobile-app token; reset the "
                 "Moodle mobile web service token in Moodle before rerunning "
-                "`syncmymoodle setup --browser`."
+                "`syncmymoodle setup`."
             )
         parser.error(
             "setup cancelled before saving the configuration or Moodle tokens. "

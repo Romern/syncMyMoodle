@@ -948,10 +948,8 @@ def write_response_body(
     content: Any,
     first_chunk: bytes,
 ) -> int:
-    ctx.output.action("Downloading", downloadpath, node.type)
     total_size_in_bytes = content_length(response, transfer.resume_size)
     with ctx.output.transfer(
-        downloadpath.name,
         total_size_in_bytes,
         transfer.resume_size,
     ) as progress:
@@ -1311,53 +1309,58 @@ def process_download_response(
         return FAILED_DOWNLOAD
 
     existed = downloadpath.exists()
-    transferred_bytes = write_response_body(
-        ctx,
-        node,
-        response,
-        transfer,
-        downloadpath,
-        content,
-        first_chunk,
-    )
-    staged_hash = validate_staged_download(
-        node,
-        response,
-        transfer,
-        downloadpath,
-        log,
-    )
-    if staged_hash is None:
-        return FAILED_DOWNLOAD
-    local_hash = storage.file_sha256(downloadpath) if downloadpath.exists() else None
-    if staged_hash == local_hash:
-        transfer.discard_partial()
-        record_verified_download(
+    with ctx.output.tracked_action("Downloading", downloadpath, node.type) as action:
+        transferred_bytes = write_response_body(
             ctx,
             node,
+            response,
+            transfer,
             downloadpath,
-            etag_header,
-            staged_hash,
+            content,
+            first_chunk,
         )
-        return DownloadOutcome(
-            unchanged=1,
-            transferred_bytes=transferred_bytes,
+        staged_hash = validate_staged_download(
+            node,
+            response,
+            transfer,
+            downloadpath,
+            log,
         )
-    install_result = install_downloaded_file(
-        downloadpath,
-        transfer,
-        planned,
-        ctx.config.conflict_handling,
-        log,
-    )
-    install_outcome = noninstalled_download_outcome(
-        install_result,
-        transferred_bytes,
-    )
-    if install_outcome is not None:
-        return install_outcome
-    record_verified_download(ctx, node, downloadpath, etag_header, staged_hash)
-    return completed_download(existed=existed, transferred_bytes=transferred_bytes)
+        if staged_hash is None:
+            return FAILED_DOWNLOAD
+        local_hash = (
+            storage.file_sha256(downloadpath) if downloadpath.exists() else None
+        )
+        if staged_hash == local_hash:
+            transfer.discard_partial()
+            record_verified_download(
+                ctx,
+                node,
+                downloadpath,
+                etag_header,
+                staged_hash,
+            )
+            action.complete("Downloaded")
+            return DownloadOutcome(
+                unchanged=1,
+                transferred_bytes=transferred_bytes,
+            )
+        install_result = install_downloaded_file(
+            downloadpath,
+            transfer,
+            planned,
+            ctx.config.conflict_handling,
+            log,
+        )
+        install_outcome = noninstalled_download_outcome(
+            install_result,
+            transferred_bytes,
+        )
+        if install_outcome is not None:
+            return install_outcome
+        record_verified_download(ctx, node, downloadpath, etag_header, staged_hash)
+        action.complete("Downloaded")
+        return completed_download(existed=existed, transferred_bytes=transferred_bytes)
 
 
 def _classify_download_response(
@@ -1595,7 +1598,7 @@ def download_emedia_video(
     temporary_path = pathing.with_windows_extended_length_prefix(
         downloadpath.parent / f".{stem}.smmpart{suffix}"
     )
-    progress = ctx.output.transfer(downloadpath.name, node.remote_size)
+    progress = ctx.output.transfer(node.remote_size)
     ydl_opts: dict[str, Any] = {
         "format": "best",
         "fragment_retries": 15,
@@ -1613,39 +1616,40 @@ def download_emedia_video(
             return SKIPPED_DOWNLOAD
         if ctx.config.dry_run:
             return report_planned_download(ctx, downloadpath, "Emedia")
-        ctx.output.action("Downloading", downloadpath, "Emedia")
-        downloadpath.parent.mkdir(parents=True, exist_ok=True)
-        temporary_path.unlink(missing_ok=True)
-        with progress:
-            result = ydl.download([node.url])
-        if result not in (None, 0) or not temporary_path.is_file():
-            log.warning("yt-dlp did not download VEIRA video %s", node.id)
-            return FAILED_DOWNLOAD
+        with ctx.output.tracked_action("Downloading", downloadpath, "Emedia") as action:
+            downloadpath.parent.mkdir(parents=True, exist_ok=True)
+            temporary_path.unlink(missing_ok=True)
+            with progress:
+                result = ydl.download([node.url])
+            if result not in (None, 0) or not temporary_path.is_file():
+                log.warning("yt-dlp did not download VEIRA video %s", node.id)
+                return FAILED_DOWNLOAD
 
-    transfer = TransferPlan(
-        temporary_path,
-        temporary_path.with_name(temporary_path.name + ".etag"),
-        {},
-    )
-    install_result = install_downloaded_file(
-        downloadpath,
-        transfer,
-        planned,
-        ctx.config.conflict_handling,
-        log,
-    )
-    install_outcome = noninstalled_download_outcome(
-        install_result,
-        progress.transferred_bytes,
-    )
-    if install_outcome is not None:
-        return install_outcome
-    record_download_metadata(node, downloadpath, None)
-    ctx.downloaded_paths.add(downloadpath)
-    return completed_download(
-        existed=existed,
-        transferred_bytes=progress.transferred_bytes,
-    )
+            transfer = TransferPlan(
+                temporary_path,
+                temporary_path.with_name(temporary_path.name + ".etag"),
+                {},
+            )
+            install_result = install_downloaded_file(
+                downloadpath,
+                transfer,
+                planned,
+                ctx.config.conflict_handling,
+                log,
+            )
+            install_outcome = noninstalled_download_outcome(
+                install_result,
+                progress.transferred_bytes,
+            )
+            if install_outcome is not None:
+                return install_outcome
+            record_download_metadata(node, downloadpath, None)
+            ctx.downloaded_paths.add(downloadpath)
+            action.complete("Downloaded")
+            return completed_download(
+                existed=existed,
+                transferred_bytes=progress.transferred_bytes,
+            )
 
 
 def youtube_download_exists(path: Path, video_id: str | None) -> bool:
@@ -1696,7 +1700,7 @@ def scan_and_download_youtube(
         path / "%(title)s-%(id)s.%(ext)s",
         force=True,
     )
-    progress = ctx.output.transfer(node.name or "YouTube video", node.remote_size)
+    progress = ctx.output.transfer(node.remote_size)
     ydl_opts: dict[str, Any] = {
         "outtmpl": os.fspath(outtmpl),
         "ignoreerrors": True,
@@ -1715,22 +1719,26 @@ def scan_and_download_youtube(
                 "Youtube",
                 verb="Would download YouTube video",
             )
-        ctx.output.action("Downloading YouTube video", f"{link} to {path}", "Youtube")
-        path.mkdir(parents=True, exist_ok=True)
-        with progress:
-            result = ydl.download([link])
-    if result not in (None, 0):
-        return FAILED_DOWNLOAD
-    if not youtube_download_exists(path, video_id):
-        log.warning(
-            "yt-dlp did not download YouTube video %s; it may have been filtered",
-            video_id or link,
-        )
-        return FAILED_DOWNLOAD
-    return completed_download(
-        existed=False,
-        transferred_bytes=progress.transferred_bytes,
-    )
+        target = f"{link} to {path}"
+        with ctx.output.tracked_action(
+            "Downloading YouTube video", target, "Youtube"
+        ) as action:
+            path.mkdir(parents=True, exist_ok=True)
+            with progress:
+                result = ydl.download([link])
+            if result not in (None, 0):
+                return FAILED_DOWNLOAD
+            if not youtube_download_exists(path, video_id):
+                log.warning(
+                    "yt-dlp did not download YouTube video %s; it may have been filtered",
+                    video_id or link,
+                )
+                return FAILED_DOWNLOAD
+            action.complete("Downloaded YouTube video")
+            return completed_download(
+                existed=False,
+                transferred_bytes=progress.transferred_bytes,
+            )
 
 
 def cached_yt_dlp_size_violates_limit(

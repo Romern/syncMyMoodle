@@ -390,7 +390,9 @@ def test_html_mode_writes_snapshot_without_browser(tmp_path, monkeypatch, capsys
     assert outcome.is_handled
     assert outcome.downloaded == 1
     assert outcome.transferred_bytes == 0
-    assert capsys.readouterr().out == f"Downloading {html_path} [Quiz]\n"
+    assert capsys.readouterr().out == (
+        f"Downloading {html_path} [Quiz]\nDownloaded {html_path} [Quiz]\n"
+    )
     assert html_path.exists()
     snapshot = html_path.read_text(encoding="utf-8")
     assert "Content-Security-Policy" in snapshot
@@ -488,12 +490,15 @@ def test_changed_quiz_review_replaces_an_unmodified_snapshot(tmp_path):
     assert list(html_path.parent.glob("*.syncconflict.*")) == []
 
 
-def test_quiz_edit_during_snapshot_creation_obeys_keep_policy(tmp_path, monkeypatch):
+def test_quiz_edit_during_snapshot_creation_obeys_keep_policy(
+    tmp_path, monkeypatch, capsys
+):
     first = quiz_context(tmp_path, "html")
     first.root_node, first_node = versioned_quiz_tree(QUIZ_HTML)
     assert quiz.download_quiz(first, first_node).downloaded == 1
     first_node.mark_handled()
     course_cache.cache_root_node(first)
+    capsys.readouterr()
 
     updated_review = QUIZ_HTML.replace("My answer", "Updated answer")
     current = quiz_context(tmp_path, "html")
@@ -519,6 +524,7 @@ def test_quiz_edit_during_snapshot_creation_obeys_keep_policy(tmp_path, monkeypa
     assert outcome.cache_verified is False
     assert html_path.read_text(encoding="utf-8") == "user edit during rendering"
     assert list(html_path.parent.glob("*.syncconflict.*")) == []
+    assert f"Downloaded {html_path} [Quiz]" not in capsys.readouterr().out
 
 
 def test_pdf_mode_removes_html_on_success(tmp_path, monkeypatch, capsys):
@@ -536,7 +542,7 @@ def test_pdf_mode_removes_html_on_success(tmp_path, monkeypatch, capsys):
 
     assert quiz.download_quiz(ctx, node).is_handled
     assert capsys.readouterr().out == (
-        f"Downloading {html_path} [Quiz]\nRendering {pdf_path} [Quiz PDF]\n"
+        f"Rendering {pdf_path} [Quiz PDF]\nRendered {pdf_path} [Quiz PDF]\n"
     )
     assert pdf_path.exists()
     assert not html_path.exists()

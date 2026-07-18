@@ -1,10 +1,10 @@
 import io
 import logging
-import re
 import sys
 import time
 
 import pytest
+from rich.console import Console
 from rich.progress import Progress
 
 from syncmymoodle.outcomes import RemovedContent, RunStatistics
@@ -14,6 +14,12 @@ from syncmymoodle.output import TerminalOutput, safe_terminal_text
 class TtyBuffer(io.StringIO):
     def isatty(self):
         return True
+
+
+def render_progress_frame(progress: Progress) -> str:
+    output = io.StringIO()
+    Console(file=output, width=120, color_system=None).print(progress.get_renderable())
+    return output.getvalue()
 
 
 @pytest.fixture(autouse=True)
@@ -29,7 +35,7 @@ def test_redirected_output_is_plain_unwrapped_and_markup_safe(monkeypatch):
     message = f"Course [bold red]not markup[/] {'x' * 100}"
 
     terminal.phase(f"{message}\x1b[31m")
-    with terminal.transfer("lecture.mp4", total=10) as progress:
+    with terminal.transfer(total=10) as progress:
         progress.advance(10)
 
     assert stdout.getvalue() == f"{message}\n"
@@ -40,7 +46,7 @@ def test_redirected_output_is_plain_unwrapped_and_markup_safe(monkeypatch):
     stdout.truncate()
     monkeypatch.setenv("FORCE_COLOR", "1")
     forced_color = TerminalOutput("auto")
-    with forced_color.transfer("lecture.mp4", total=10) as progress:
+    with forced_color.transfer(total=10) as progress:
         progress.advance(10)
     assert forced_color.interactive is False
     assert stdout.getvalue() == ""
@@ -151,13 +157,13 @@ def test_transfer_progress_tracks_bytes_and_only_animates_on_a_tty(monkeypatch):
     monkeypatch.setattr(sys, "stderr", stderr)
     terminal = TerminalOutput("never")
 
-    with terminal.transfer("lecture.mp4", total=10, completed=2) as progress:
+    with terminal.transfer(total=10, completed=2) as progress:
         progress.advance(3)
         progress.update(8, 10)
 
     assert terminal.interactive is True
     assert progress.transferred_bytes == 6
-    assert "lecture.mp4" in stderr.getvalue()
+    assert "Downloading" in stderr.getvalue()
 
 
 def test_redirected_sync_progress_uses_numbered_plain_milestones(monkeypatch):
@@ -186,6 +192,8 @@ def test_redirected_sync_progress_uses_numbered_plain_milestones(monkeypatch):
     assert "Scanning 2 courses..." in output
     assert "[1/2] Scanning Course [red]one[/]..." in output
     assert "[2/2] Scanning Course two..." in output
+    assert "Scanned Course [red]one[/] [Course]" in output
+    assert "Scanned Course two [Course]" in output
     assert "Processing 2 items..." in output
     assert "[1/2] Processing File: Course one/slides.pdf" in output
     assert "[2/2] Processing Video: Course two/lecture.mp4" in output
@@ -213,24 +221,13 @@ def test_redirected_item_progress_is_throttled_for_large_runs(monkeypatch):
     assert output.count("] Processing File ") == 11
 
 
-def test_tty_sync_progress_coalesces_fast_item_checks(monkeypatch):
-    stderr = TtyBuffer()
-    monkeypatch.setattr(sys, "stderr", stderr)
-    terminal = TerminalOutput("never")
-
-    with terminal.sync_progress as progress:
-        progress.begin_items(200)
-        for index in range(1, 201):
-            progress.start_item(index, f"File {index}")
-            progress.finish_item(index)
-
-    rendered = stderr.getvalue()
-    rendered_labels = len(set(re.findall(r"File (\d+)", rendered)))
-    assert rendered_labels < 10
-    assert "200/200 items" in rendered
-
-
-def test_tty_sync_progress_shows_the_active_item_check(monkeypatch):
+@pytest.mark.parametrize(
+    ("dry_run", "stage_label"),
+    [(False, "Processing items"), (True, "Planning downloads")],
+)
+def test_tty_sync_progress_uses_a_stable_item_check_label(
+    monkeypatch, dry_run, stage_label
+):
     stderr = TtyBuffer()
     monkeypatch.setattr(sys, "stderr", stderr)
     terminal = TerminalOutput("never")
@@ -238,16 +235,21 @@ def test_tty_sync_progress_shows_the_active_item_check(monkeypatch):
     with terminal.sync_progress as progress:
         renderer = progress.renderer
         assert renderer is not None
-        progress.begin_items(1)
-        progress.start_item(1, "File: slow metadata check")
+        progress.begin_items(1, dry_run=dry_run)
+        progress.start_item(1, "File: a very long and slow metadata check")
         renderer.refresh()
         progress.finish_item(1)
 
-    assert "File: slow metadata check" in stderr.getvalue()
+    rendered = stderr.getvalue()
+    assert stage_label in rendered
+    assert "Checking item" in rendered
+    assert "a very long and slow metadata check" not in rendered
 
 
 def test_interrupted_sync_retains_the_active_transfer_frame(monkeypatch):
+    stdout = TtyBuffer()
     stderr = TtyBuffer()
+    monkeypatch.setattr(sys, "stdout", stdout)
     monkeypatch.setattr(sys, "stderr", stderr)
     stopped = []
     original_stop = Progress.stop
@@ -265,13 +267,20 @@ def test_interrupted_sync_retains_the_active_transfer_frame(monkeypatch):
             assert renderer is not None
             progress.begin_items(1)
             progress.start_item(1, "Video: interrupted.mp4")
-            with terminal.transfer("interrupted.mp4", total=100) as transfer:
-                transfer.advance(40)
-                renderer.refresh()
-                raise KeyboardInterrupt
+            with terminal.tracked_action(
+                "Downloading", "/sync/interrupted.mp4", "Video"
+            ):
+                with terminal.transfer(total=100) as transfer:
+                    transfer.advance(40)
+                    renderer.refresh()
+                    raise KeyboardInterrupt
 
     assert stopped == [False]
-    assert "interrupted.mp4" in stderr.getvalue()
+    rendered = stderr.getvalue()
+    assert "Downloading /sync/interrupted.mp4 [Video]" in rendered
+    assert "Downloading" in rendered
+    assert "40/100 bytes" in rendered
+    assert stdout.getvalue() == ""
 
 
 def test_tty_sync_progress_combines_aggregate_detail_and_transfer(monkeypatch):
@@ -285,38 +294,54 @@ def test_tty_sync_progress_combines_aggregate_detail_and_transfer(monkeypatch):
         renderer = progress.renderer
         assert renderer is not None
         progress.begin_courses(2)
-        progress.start_course(1, "Operating Systems")
+        course = "Operating Systems with a very long course name"
+        progress.start_course(1, course)
         progress.update_course(
-            "Operating Systems",
             section=1,
             sections=3,
             module=2,
             modules=8,
-            current_module="Lecture recordings [lti]",
+            module_active=True,
         )
         progress.module_status("resolving Opencast episode 2/5")
         renderer.refresh()
+        course_frame = render_progress_frame(renderer)
         progress.finish_course(1)
+        finished_course_frame = render_progress_frame(renderer)
         progress.begin_items(2)
-        progress.start_item(1, "Video: Operating Systems/lecture.mp4")
-        terminal.action("Downloading", "/sync/lecture.mp4", "Video")
-        with terminal.transfer("lecture.mp4", total=100) as transfer:
-            transfer.advance(100)
-            renderer.refresh()
+        path = "/sync/a-very-long-course-name/lecture.mp4"
+        progress.start_item(1, f"Video: {path}")
+        with terminal.tracked_action("Downloading", path, "Video") as action:
+            with terminal.transfer(total=100) as transfer:
+                transfer.advance(100)
+                renderer.refresh()
+                transfer_frame = render_progress_frame(renderer)
+            action.complete("Downloaded")
+        finished_transfer_frame = render_progress_frame(renderer)
         progress.finish_item(1)
 
     rendered = stderr.getvalue()
     normalized = " ".join(safe_terminal_text(rendered).split())
     assert "Scanning courses" in rendered
-    assert "Operating Systems" in rendered
+    assert f"Scanned {course} [Course]" in rendered
     assert "3/8 modules" in rendered
     assert "section 1/3" in rendered
-    assert "Lecture recordings [lti]" in normalized
     assert "resolving Opencast episode 2/5" in normalized
     assert "Processing items" in rendered
-    assert "lecture.mp4" in rendered
     assert "100/100 bytes" in rendered
-    assert "Downloading /sync/lecture.mp4 [Video]" in rendered
+    assert f"Downloaded {path} [Video]" in rendered
+    course_lines = course_frame.splitlines()
+    assert any(
+        "Scanning course" in line and "3/8 modules" in line for line in course_lines
+    )
+    assert not any(course in line and "3/8 modules" in line for line in course_lines)
+    assert course not in finished_course_frame
+    transfer_lines = transfer_frame.splitlines()
+    assert any(
+        "Downloading" in line and "100/100 bytes" in line for line in transfer_lines
+    )
+    assert not any(path in line and "100/100 bytes" in line for line in transfer_lines)
+    assert path not in finished_transfer_frame
     assert stdout.getvalue() == ""
 
 

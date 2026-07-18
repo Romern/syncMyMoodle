@@ -607,7 +607,7 @@ def test_download_dispatch_uses_semantic_kind_not_display_type(monkeypatch):
 # --------------------------------------------------------------------------
 
 
-def test_download_streams_chunks_to_disk_and_records_metadata(tmp_path):
+def test_download_streams_chunks_to_disk_and_records_metadata(tmp_path, capsys):
     config = {"paths.sync_directory": str(tmp_path)}
     syncer, file_node = make_run_syncer(config, timemodified=1710000500)
     download_path = node_path(syncer, file_node)
@@ -636,12 +636,16 @@ def test_download_streams_chunks_to_disk_and_records_metadata(tmp_path):
     assert syncer.session.count("GET", URL) == 1
     assert outcome.downloaded == 1
     assert outcome.transferred_bytes == len(b"".join(chunks))
+    output = capsys.readouterr().out
+    assert f"Downloading {download_path} [{file_node.type}]" in output
+    assert f"Downloaded {download_path} [{file_node.type}]" in output
 
 
 @pytest.mark.parametrize("algorithm", ["md5", "sha1", "sha256"])
 def test_download_rejects_wrong_advertised_checksum_at_expected_size(
     tmp_path,
     algorithm,
+    capsys,
 ):
     expected = b"correct remote bytes"
     wrong = b"broken remote bytes!"
@@ -679,6 +683,9 @@ def test_download_rejects_wrong_advertised_checksum_at_expected_size(
     assert download_path.read_bytes() == b"existing local file"
     assert file_node.content_hash is None
     assert list(download_path.parent.glob(".*.smmpart*")) == []
+    assert (
+        f"Downloaded {download_path} [{file_node.type}]" not in capsys.readouterr().out
+    )
 
 
 @pytest.mark.parametrize(
@@ -785,7 +792,7 @@ def test_fresh_compressed_full_response_ignores_encoded_content_length(tmp_path)
 
 def test_yt_dlp_progress_payload_updates_shared_progress():
     ctx = make_context()
-    progress = ctx.output.transfer("video.mp4", total=None)
+    progress = ctx.output.transfer(total=None)
 
     downloader.update_yt_dlp_progress(
         progress,
@@ -1541,6 +1548,7 @@ def test_target_changed_during_transfer_obeys_conflict_policy(
     conflict_mode,
     expected_target,
     expected_conflict,
+    capsys,
 ):
     original = b"original remote content"
     updated = b"updated remote content"
@@ -1574,6 +1582,8 @@ def test_target_changed_during_transfer_obeys_conflict_policy(
     else:
         assert len(conflicts) == 1
         assert conflicts[0].read_bytes() == expected_conflict
+    completed_line = f"Downloaded {download_path} [{current_file.type}]"
+    assert (completed_line in capsys.readouterr().out) is (conflict_mode != "keep")
 
 
 def test_legacy_course_cache_prevents_unchanged_file_false_conflict(tmp_path):
