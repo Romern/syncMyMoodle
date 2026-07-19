@@ -15,7 +15,11 @@ from syncmymoodle import (
     opencast,
     pathing,
 )
-from syncmymoodle.constants import COURSE_CACHE_FILENAME, YOUTUBE_WATCH_URL
+from syncmymoodle.constants import (
+    COURSE_CACHE_FILENAME,
+    YOUTUBE_WATCH_URL,
+    YT_DLP_TESTED_VERSION,
+)
 from syncmymoodle.downloader import download_file
 from syncmymoodle.node import DownloadKind, DownloadStatus, Node, RemoteMarkerKind
 from syncmymoodle.outcomes import HANDLED_DOWNLOAD
@@ -822,7 +826,13 @@ def test_yt_dlp_progress_payload_updates_shared_progress():
     assert progress.transferred_bytes == 768
 
 
-def test_failed_youtube_download_is_reported_by_tree_walk(tmp_path, monkeypatch):
+@pytest.mark.parametrize(
+    ("version", "outdated"),
+    [("2025.1.1", True), (YT_DLP_TESTED_VERSION, False)],
+)
+def test_failed_youtube_download_reports_yt_dlp_version(
+    tmp_path, monkeypatch, caplog, version, outdated
+):
     captured = {}
 
     class FakeYoutubeDL:
@@ -839,6 +849,7 @@ def test_failed_youtube_download_is_reported_by_tree_walk(tmp_path, monkeypatch)
             return 1
 
     monkeypatch.setattr(downloader.yt_dlp, "YoutubeDL", FakeYoutubeDL)
+    monkeypatch.setattr(downloader.yt_dlp.version, "__version__", version)
     ctx = make_context({"paths.sync_directory": str(tmp_path)})
     root, _, video = build_youtube_tree("https://youtu.be/abcdefghijk")
 
@@ -849,6 +860,10 @@ def test_failed_youtube_download_is_reported_by_tree_walk(tmp_path, monkeypatch)
     assert captured["noprogress"] is True
     assert len(captured["progress_hooks"]) == 1
     assert isinstance(captured["logger"], downloader.YtDlpLogger)
+    assert f"yt-dlp failed with installed version {version}" in caplog.text
+    assert (
+        f"older than the tested baseline {YT_DLP_TESTED_VERSION}" in caplog.text
+    ) is outdated
 
 
 def test_youtube_success_without_output_is_reported_by_tree_walk(
@@ -1469,6 +1484,21 @@ def test_identical_staged_update_does_not_create_conflict_copy(tmp_path):
     assert cached_file is not None
     assert cached_file.timemodified == 1710000400
     assert cached_file.content_hash == sha256(local_modified)
+
+
+def test_identical_staged_update_is_reported_as_unchanged(tmp_path, capsys):
+    syncer, file_node, download_path, local_modified = _setup_conflict(
+        tmp_path, "rename"
+    )
+    _add_new_remote(syncer, local_modified)
+
+    outcome = download_file(syncer, file_node)
+
+    assert outcome.unchanged == 1
+    assert outcome.downloaded == 0
+    output = capsys.readouterr().out
+    assert f"Unchanged {download_path} [{file_node.type}]" in output
+    assert f"Downloaded {download_path} [{file_node.type}]" not in output
 
 
 def test_unchanged_timemodified_skips_download_despite_local_edit(tmp_path):

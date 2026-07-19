@@ -1,0 +1,55 @@
+name: Check yt-dlp compatibility
+
+on:
+  schedule:
+    - cron: "23 5 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  youtube:
+    name: Public YouTube fixture
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Set up Python 3.13
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+          cache: pip
+
+      - name: Set up Deno
+        uses: denoland/setup-deno@v2
+        with:
+          deno-version: v2.x
+
+      - name: Install the lowest declared direct dependencies
+        run: |
+          python -m pip install --upgrade pip uv
+          uv pip install --system --resolution lowest-direct .
+
+      - name: Check the public yt-dlp test video
+        run: |
+          python - <<'PY'
+          import yt_dlp
+
+          # This is yt-dlp's current primary public YouTube fixture.
+          video_id = "YE7VzlLtp-4"
+          url = f"https://www.youtube.com/watch?v={video_id}"
+          options = {
+              "js_runtimes": {"deno": {}},
+              "noplaylist": True,
+              "quiet": True,
+              "skip_download": True,
+          }
+          with yt_dlp.YoutubeDL(options) as ydl:
+              info = ydl.extract_info(url, download=False)
+          if info is None or info.get("id") != video_id or not info.get("formats"):
+              raise SystemExit("yt-dlp did not return formats for the public fixture")
+          print(f"yt-dlp {yt_dlp.version.__version__}: extracted {video_id}")
+          PY

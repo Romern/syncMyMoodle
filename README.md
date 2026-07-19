@@ -60,6 +60,10 @@ Moodle.
 Quiz PDF generation additionally requires an installed Chrome, Chromium, or
 Microsoft Edge browser.
 
+Reliable YouTube downloads additionally require
+[Deno](https://docs.deno.com/runtime/getting_started/installation/), the
+JavaScript runtime enabled by default in yt-dlp.
+
 ## Installation
 
 Installing syncMyMoodle as an isolated command-line tool is recommended. Use

@@ -20,6 +20,7 @@ from syncmymoodle.constants import (
     DEFAULT_BLOCK_SIZE,
     HASH_ALGOS_BY_LENGTH,
     HTTP_TIMEOUT_SECONDS,
+    YT_DLP_TESTED_VERSION,
 )
 from syncmymoodle.context import (
     SyncContext,
@@ -154,6 +155,33 @@ class YtDlpLogger:
 
     def error(self, message: str) -> None:
         self.log.error("%s", message)
+
+
+def _yt_dlp_release_date(version: str) -> tuple[int, int, int] | None:
+    match = re.match(r"^(\d{4})\.(\d{1,2})\.(\d{1,2})(?:\D|$)", version)
+    if match is None:
+        return None
+    year, month, day = match.groups()
+    return int(year), int(month), int(day)
+
+
+def log_yt_dlp_failure(log: logging.Logger) -> None:
+    version = str(yt_dlp.version.__version__)
+    installed = _yt_dlp_release_date(version)
+    baseline = _yt_dlp_release_date(YT_DLP_TESTED_VERSION)
+    if installed is not None and baseline is not None and installed < baseline:
+        log.warning(
+            "yt-dlp failed with installed version %s, which is older than the "
+            "tested baseline %s. Upgrade yt-dlp through pip or your package manager.",
+            version,
+            YT_DLP_TESTED_VERSION,
+        )
+        return
+    log.error(
+        "yt-dlp failed with installed version %s. Check for a newer yt-dlp release "
+        "through pip or your package manager.",
+        version,
+    )
 
 
 def update_yt_dlp_progress(progress: TransferProgress, data: dict[str, Any]) -> None:
@@ -1340,7 +1368,7 @@ def process_download_response(
                 etag_header,
                 staged_hash,
             )
-            action.complete("Downloaded")
+            action.complete("Unchanged")
             return DownloadOutcome(
                 unchanged=1,
                 transferred_bytes=transferred_bytes,
@@ -1532,10 +1560,7 @@ def download_leaf(
     except Exception:
         log.exception("Failed to download the module %s", node)
         if node.download_kind in {DownloadKind.YOUTUBE, DownloadKind.EMEDIA}:
-            log.error(
-                "This could be caused by an out-of-date yt-dlp version. Try "
-                "upgrading yt-dlp through pip or your package manager."
-            )
+            log_yt_dlp_failure(log)
         return FAILED_DOWNLOAD
 
 
@@ -1623,6 +1648,7 @@ def download_emedia_video(
                 result = ydl.download([node.url])
             if result not in (None, 0) or not temporary_path.is_file():
                 log.warning("yt-dlp did not download VEIRA video %s", node.id)
+                log_yt_dlp_failure(log)
                 return FAILED_DOWNLOAD
 
             transfer = TransferPlan(
@@ -1727,6 +1753,7 @@ def scan_and_download_youtube(
             with progress:
                 result = ydl.download([link])
             if result not in (None, 0):
+                log_yt_dlp_failure(log)
                 return FAILED_DOWNLOAD
             if not youtube_download_exists(path, video_id):
                 log.warning(
