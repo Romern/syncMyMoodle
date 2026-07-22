@@ -738,7 +738,7 @@ def render_quiz_pdf(
         )
         return False
 
-    with ctx.output.tracked_action("Rendering", display_path, "Quiz PDF"):
+    with ctx.output.tracked_action("Rendering", display_path, "Quiz PDF") as action:
         pdf_ok = render_pdf_with_chromium(browser, html_path, pdf_path, log)
         if not pdf_ok:
             log.warning(
@@ -746,6 +746,7 @@ def render_quiz_pdf(
                 node.name,
             )
             return False
+        action.complete()
         return True
 
 
@@ -936,7 +937,7 @@ def _stage_quiz_snapshot(
         if announce
         else nullcontext()
     )
-    with action_context:
+    with action_context as action:
         html_path.parent.mkdir(parents=True, exist_ok=True)
         staged_path = _temporary_quiz_path(html_path)
         staged_path.unlink(missing_ok=True)
@@ -952,6 +953,8 @@ def _stage_quiz_snapshot(
             log.exception("Failed to create quiz snapshot %s", html_path)
             staged_path.unlink(missing_ok=True)
             return None
+        if action is not None:
+            action.complete()
         return staged_path
 
 

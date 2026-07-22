@@ -110,11 +110,11 @@ class WorkCountColumn(ProgressColumn):
 
 
 class WorkActivityColumn(SpinnerColumn):
-    """Show activity only for work that otherwise has no moving indicator."""
+    """Show activity when useful while always reserving its column width."""
 
     def render(self, task: Task) -> RenderableType:
         if task.fields.get("kind") not in {"course", "status"}:
-            return Text()
+            return Text(" ")
         return super().render(task)
 
 
@@ -141,18 +141,16 @@ class WorkRemainingColumn(ProgressColumn):
 
 
 class WorkProgress(Progress):
-    """Render the current named action separately from the progress table."""
+    """Render the current named action without moving the progress table."""
 
     _activity: RenderableType | None = None
 
     def get_renderables(self) -> Iterator[RenderableType]:
-        if self._activity is not None:
-            yield self._activity
+        yield self._activity if self._activity is not None else Text(" ")
         yield from super().get_renderables()
 
     def set_activity(self, activity: RenderableType | None) -> None:
         self._activity = activity
-        self.refresh()
 
 
 class SyncProgress:
@@ -221,20 +219,41 @@ class SyncProgress:
         if self._progress is not None and task_id is not None:
             self._progress.remove_task(task_id)
 
-    def _clear(self) -> None:
+    def _discard_transfer(self) -> None:
         self._remove_task(self._transfer_task)
+        self._transfer_task = None
+
+    def _clear(self) -> None:
+        self._discard_transfer()
         self._remove_task(self._detail_task)
         self._remove_task(self._stage_task)
-        self._transfer_task = None
         self._detail_task = None
         self._stage_task = None
         if self._progress is not None:
             self._progress.set_activity(None)
 
+    def _show_item_status(self, verb: str) -> None:
+        if self._progress is None or self._detail_task is None:
+            return
+        self._discard_transfer()
+        status_verb = safe_terminal_text(verb).split(maxsplit=1)[0]
+        self._progress.update(
+            self._detail_task,
+            description=f"{status_verb} item",
+            kind="status",
+            count=status_verb.casefold(),
+            detail="",
+            visible=True,
+        )
+
     def show_action(self, verb: str, target: str | Path, kind: str) -> bool:
         if self._progress is None:
             return False
-        self._progress.set_activity(_action_text(verb, target, kind, dry_run=False))
+        activity = _action_text(verb, target, kind, dry_run=False)
+        activity.no_wrap = True
+        activity.overflow = "ellipsis"
+        self._progress.set_activity(activity)
+        self._show_item_status(verb)
         return True
 
     def clear_action(self) -> None:
@@ -428,22 +447,17 @@ class SyncProgress:
             completed=index - 1,
             count=f"{index - 1}/{self._item_total} items",
         )
-        assert self._detail_task is not None
-        self._progress.update(
-            self._detail_task,
-            description="Checking item",
-            kind="status",
-            count="checking",
-            detail="",
-            visible=True,
-        )
+        self._show_item_status("Checking")
 
     def finish_item(self, index: int) -> None:
         if self._progress is None:
             return
         assert self._stage_task is not None
         assert self._detail_task is not None
-        self._progress.update(self._detail_task, visible=False)
+        if index == self._item_total:
+            self._progress.update(self._detail_task, visible=False)
+            if self._transfer_task is not None:
+                self._progress.update(self._transfer_task, visible=False)
         self._progress.update(
             self._stage_task,
             completed=index,
@@ -459,7 +473,7 @@ class SyncProgress:
             return None
         if self._detail_task is not None:
             self._progress.update(self._detail_task, visible=False)
-        self._remove_task(self._transfer_task)
+        self._discard_transfer()
         self._transfer_task = self._add_task(
             "Downloading",
             total=total,
@@ -469,9 +483,12 @@ class SyncProgress:
         return self._transfer_task
 
     def finish_transfer(self, task_id: TaskID | None) -> None:
-        self._remove_task(task_id)
-        if task_id == self._transfer_task:
-            self._transfer_task = None
+        if (
+            self._progress is not None
+            and task_id is not None
+            and task_id == self._transfer_task
+        ):
+            self._progress.stop_task(task_id)
 
     def finalizing(self, detail: str) -> None:
         self._clear()
@@ -603,6 +620,7 @@ class TrackedAction:
         self._target = target
         self._kind = kind
         self._live = False
+        self._completed = False
         self._completed_verb: str | None = None
 
     def __enter__(self) -> TrackedAction:
@@ -615,7 +633,9 @@ class TrackedAction:
             self._terminal.action(self._verb, self._target, self._kind)
         return self
 
-    def complete(self, verb: str) -> None:
+    def complete(self, verb: str | None = None) -> None:
+        """Mark the action successful and optionally print a completed form."""
+        self._completed = True
         self._completed_verb = verb
 
     def __exit__(
@@ -625,7 +645,11 @@ class TrackedAction:
         traceback: TracebackType | None,
     ) -> None:
         del exc_value, traceback
-        if self._live and not _was_interrupted(exc_type):
+        if (
+            self._live
+            and not _was_interrupted(exc_type)
+            and (exc_type is not None or not self._completed)
+        ):
             self._terminal.sync_progress.clear_action()
         if exc_type is None and self._completed_verb is not None:
             self._terminal.action(

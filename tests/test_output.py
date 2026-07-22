@@ -246,6 +246,109 @@ def test_tty_sync_progress_uses_a_stable_item_check_label(
     assert "a very long and slow metadata check" not in rendered
 
 
+def test_tty_item_display_stays_stable_during_fast_transfers(monkeypatch):
+    stderr = TtyBuffer()
+    monkeypatch.setattr(sys, "stderr", stderr)
+    terminal = TerminalOutput("never")
+
+    with terminal.sync_progress as progress:
+        renderer = progress.renderer
+        assert renderer is not None
+        progress.begin_items(2)
+        progress.start_item(1, "File: first")
+        checking_frame = render_progress_frame(renderer)
+        long_path = "/sync/" + "very-long-directory/" * 8 + "first.pdf"
+        with terminal.tracked_action("Downloading", long_path, "File") as action:
+            with terminal.transfer(total=100) as transfer:
+                transfer.advance(10)
+                transfer_frame = render_progress_frame(renderer)
+            completed_transfer_frame = render_progress_frame(renderer)
+            action.complete()
+        retained_action_frame = render_progress_frame(renderer)
+        progress.finish_item(1)
+        progress.start_item(2, "File: second")
+        next_item_frame = render_progress_frame(renderer)
+        with terminal.tracked_action("Rendering", "/sync/second.pdf", "Quiz PDF"):
+            replacement_action_frame = render_progress_frame(renderer)
+
+    checking_line = next(
+        line for line in checking_frame.splitlines() if "Checking item" in line
+    )
+    transfer_line = next(
+        line
+        for line in transfer_frame.splitlines()
+        if "Downloading" in line and "━" in line
+    )
+    checking_stage = next(
+        line for line in checking_frame.splitlines() if "Processing items" in line
+    )
+    transfer_stage = next(
+        line for line in transfer_frame.splitlines() if "Processing items" in line
+    )
+    assert checking_stage.index("Processing items") == transfer_stage.index(
+        "Processing items"
+    )
+    assert checking_line.index("Checking item") == transfer_line.index("Downloading")
+    assert checking_frame.splitlines().index(checking_stage) == (
+        transfer_frame.splitlines().index(transfer_stage)
+    )
+    assert any(
+        "Downloading" in line and "━" in line
+        for line in completed_transfer_frame.splitlines()
+    )
+    assert any(
+        "Downloading" in line and "━" in line
+        for line in retained_action_frame.splitlines()
+    )
+    assert retained_action_frame.splitlines()[0].startswith("Downloading ")
+    assert "Checking item" in next_item_frame
+    assert replacement_action_frame.splitlines()[0].startswith("Rendering ")
+    assert not replacement_action_frame.splitlines()[0].startswith("Downloading ")
+
+
+def test_tty_tracked_action_replaces_the_checking_status(monkeypatch):
+    stderr = TtyBuffer()
+    monkeypatch.setattr(sys, "stderr", stderr)
+    terminal = TerminalOutput("never")
+
+    with terminal.sync_progress as progress:
+        renderer = progress.renderer
+        assert renderer is not None
+        progress.begin_items(1)
+        progress.start_item(1, "Quiz: test")
+        with terminal.tracked_action("Rendering", "/sync/test.pdf", "Quiz PDF"):
+            rendering_frame = render_progress_frame(renderer)
+
+    rendering_line = next(
+        line for line in rendering_frame.splitlines() if "Rendering item" in line
+    )
+    assert "rendering" in rendering_line
+    assert "Checking item" not in rendering_frame
+
+
+def test_tty_incomplete_action_does_not_linger_during_skipped_items(monkeypatch):
+    stderr = TtyBuffer()
+    monkeypatch.setattr(sys, "stderr", stderr)
+    terminal = TerminalOutput("never")
+
+    with terminal.sync_progress as progress:
+        renderer = progress.renderer
+        assert renderer is not None
+        progress.begin_items(2)
+        progress.start_item(1, "File: old-file.pdf")
+        with terminal.tracked_action("Downloading", "/sync/old-file.pdf", "File"):
+            with terminal.transfer(total=100) as transfer:
+                transfer.advance(50)
+        incomplete_frame = render_progress_frame(renderer)
+        progress.finish_item(1)
+        progress.start_item(2, "File: skipped-file.pdf")
+        skipped_frame = render_progress_frame(renderer)
+
+    assert "old-file.pdf" not in incomplete_frame
+    assert "old-file.pdf" not in skipped_frame
+    assert "Checking item" in skipped_frame
+
+
 def test_interrupted_sync_retains_the_active_transfer_frame(monkeypatch):
     stdout = TtyBuffer()
     stderr = TtyBuffer()
@@ -341,7 +444,7 @@ def test_tty_sync_progress_combines_aggregate_detail_and_transfer(monkeypatch):
         "Downloading" in line and "100/100 bytes" in line for line in transfer_lines
     )
     assert not any(path in line and "100/100 bytes" in line for line in transfer_lines)
-    assert path not in finished_transfer_frame
+    assert path in finished_transfer_frame
     assert stdout.getvalue() == ""
 
 

@@ -718,25 +718,23 @@ def known_remote_size_violates_limit(
     )
 
 
-def download_violates_size_limits(
+def response_size_violates_limit(
     ctx: SyncContext,
     node: Node,
-    response: Any,
-    resume_size: int,
+    response_size: int | None,
     downloadpath: Path,
 ) -> bool:
-    """Whether the response reports a size outside the configured size limits.
-
-    Best-effort: responses without a Content-Length header are not limited.
-    """
-    total_size = trustworthy_response_size(response, resume_size)
-    if total_size is None:
+    """Record a limit violation for a trustworthy response size, if present."""
+    if response_size is None:
         return False
     if node.remote_size is None:
-        node.remote_size = total_size
-    if not size_limits_configured(ctx):
-        return False
-    return record_size_limit_filter(ctx, str(downloadpath), total_size, "size")
+        node.remote_size = response_size
+    return size_limits_configured(ctx) and record_size_limit_filter(
+        ctx,
+        str(downloadpath),
+        response_size,
+        "size",
+    )
 
 
 def _course_node(node: Node) -> Node | None:
@@ -969,20 +967,20 @@ def response_body_is_usable(
 
 def write_response_body(
     ctx: SyncContext,
-    node: Node,
     response: Any,
     transfer: TransferPlan,
     downloadpath: Path,
     content: Any,
     first_chunk: bytes,
+    *,
+    total_size: int | None,
 ) -> int:
-    total_size_in_bytes = content_length(response, transfer.resume_size)
     with ctx.output.transfer(
-        total_size_in_bytes,
+        total_size,
         transfer.resume_size,
     ) as progress:
         if transfer.resume_size:
-            progress.update(transfer.resume_size, total_size_in_bytes)
+            progress.update(transfer.resume_size, total_size)
         downloadpath.parent.mkdir(parents=True, exist_ok=True)
 
         etag_header = response.headers.get("ETag")
@@ -1324,7 +1322,8 @@ def process_download_response(
     resume_size = transfer.resume_size if transfer is not None else 0
     if not download_response_is_usable(node, response, downloadpath, log):
         return FAILED_DOWNLOAD
-    if download_violates_size_limits(ctx, node, response, resume_size, downloadpath):
+    response_size = trustworthy_response_size(response, resume_size)
+    if response_size_violates_limit(ctx, node, response_size, downloadpath):
         return SKIPPED_DOWNLOAD
 
     if ctx.config.dry_run:
@@ -1340,12 +1339,12 @@ def process_download_response(
     with ctx.output.tracked_action("Downloading", downloadpath, node.type) as action:
         transferred_bytes = write_response_body(
             ctx,
-            node,
             response,
             transfer,
             downloadpath,
             content,
             first_chunk,
+            total_size=node.remote_size if response_size is None else response_size,
         )
         staged_hash = validate_staged_download(
             node,

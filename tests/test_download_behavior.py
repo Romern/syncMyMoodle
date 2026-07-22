@@ -645,6 +645,34 @@ def test_download_streams_chunks_to_disk_and_records_metadata(tmp_path, capsys):
     assert f"Downloaded {download_path} [{file_node.type}]" in output
 
 
+def test_download_progress_falls_back_to_known_remote_size(tmp_path, monkeypatch):
+    content = b"%PDF-1.4 content"
+    syncer, file_node = make_run_syncer(
+        {"paths.sync_directory": str(tmp_path)},
+        timemodified=1710000500,
+        remote_size=len(content),
+    )
+    syncer.session.add(
+        "GET",
+        URL,
+        FakeResponse(
+            headers={"Content-Type": "application/pdf"},
+            chunks=[content],
+        ),
+    )
+    totals = []
+    transfer = syncer.output.transfer
+
+    def record_transfer(total, completed=0):
+        totals.append((total, completed))
+        return transfer(total, completed)
+
+    monkeypatch.setattr(syncer.output, "transfer", record_transfer)
+
+    assert download_file(syncer, file_node).downloaded == 1
+    assert totals == [(len(content), 0)]
+
+
 @pytest.mark.parametrize("algorithm", ["md5", "sha1", "sha256"])
 def test_download_rejects_wrong_advertised_checksum_at_expected_size(
     tmp_path,

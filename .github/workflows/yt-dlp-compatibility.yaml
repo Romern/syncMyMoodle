@@ -28,15 +28,26 @@ jobs:
         with:
           deno-version: v2.x
 
-      - name: Install the lowest declared direct dependencies
+      - name: Install the yt-dlp compatibility baseline
         run: |
-          python -m pip install --upgrade pip uv
-          uv pip install --system --resolution lowest-direct .
+          python -m pip install --upgrade pip
+          yt_dlp_version=$(python -c 'from syncmymoodle.constants import YT_DLP_TESTED_VERSION; print(YT_DLP_TESTED_VERSION)')
+          python -m pip install "yt-dlp[default]==${yt_dlp_version}"
 
       - name: Check the public yt-dlp test video
         run: |
           python - <<'PY'
+          from importlib.metadata import version
+
           import yt_dlp
+
+          from syncmymoodle.constants import YT_DLP_TESTED_VERSION
+
+          installed_version = version("yt-dlp")
+          if installed_version != YT_DLP_TESTED_VERSION:
+              raise SystemExit(
+                  f"expected yt-dlp {YT_DLP_TESTED_VERSION}, got {installed_version}"
+              )
 
           # This is yt-dlp's current primary public YouTube fixture.
           video_id = "YE7VzlLtp-4"
@@ -51,5 +62,5 @@ jobs:
               info = ydl.extract_info(url, download=False)
           if info is None or info.get("id") != video_id or not info.get("formats"):
               raise SystemExit("yt-dlp did not return formats for the public fixture")
-          print(f"yt-dlp {yt_dlp.version.__version__}: extracted {video_id}")
+          print(f"yt-dlp {installed_version}: extracted {video_id}")
           PY
