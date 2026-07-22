@@ -16,9 +16,18 @@ class TtyBuffer(io.StringIO):
         return True
 
 
-def render_progress_frame(progress: Progress) -> str:
+def render_progress_frame(
+    progress: Progress,
+    *,
+    legacy_windows: bool | None = None,
+) -> str:
     output = io.StringIO()
-    Console(file=output, width=120, color_system=None).print(progress.get_renderable())
+    Console(
+        file=output,
+        width=120,
+        color_system=None,
+        legacy_windows=legacy_windows,
+    ).print(progress.get_renderable())
     return output.getvalue()
 
 
@@ -246,7 +255,10 @@ def test_tty_sync_progress_uses_a_stable_item_check_label(
     assert "a very long and slow metadata check" not in rendered
 
 
-def test_tty_item_display_stays_stable_during_fast_transfers(monkeypatch):
+@pytest.mark.parametrize("legacy_windows", [False, True])
+def test_tty_item_display_stays_stable_during_fast_transfers(
+    monkeypatch, legacy_windows
+):
     stderr = TtyBuffer()
     monkeypatch.setattr(sys, "stderr", stderr)
     terminal = TerminalOutput("never")
@@ -256,20 +268,38 @@ def test_tty_item_display_stays_stable_during_fast_transfers(monkeypatch):
         assert renderer is not None
         progress.begin_items(2)
         progress.start_item(1, "File: first")
-        checking_frame = render_progress_frame(renderer)
+        checking_frame = render_progress_frame(
+            renderer,
+            legacy_windows=legacy_windows,
+        )
         long_path = "/sync/" + "very-long-directory/" * 8 + "first.pdf"
         with terminal.tracked_action("Downloading", long_path, "File") as action:
             with terminal.transfer(total=100) as transfer:
                 transfer.advance(10)
-                transfer_frame = render_progress_frame(renderer)
-            completed_transfer_frame = render_progress_frame(renderer)
+                transfer_frame = render_progress_frame(
+                    renderer,
+                    legacy_windows=legacy_windows,
+                )
+            completed_transfer_frame = render_progress_frame(
+                renderer,
+                legacy_windows=legacy_windows,
+            )
             action.complete()
-        retained_action_frame = render_progress_frame(renderer)
+        retained_action_frame = render_progress_frame(
+            renderer,
+            legacy_windows=legacy_windows,
+        )
         progress.finish_item(1)
         progress.start_item(2, "File: second")
-        next_item_frame = render_progress_frame(renderer)
+        next_item_frame = render_progress_frame(
+            renderer,
+            legacy_windows=legacy_windows,
+        )
         with terminal.tracked_action("Rendering", "/sync/second.pdf", "Quiz PDF"):
-            replacement_action_frame = render_progress_frame(renderer)
+            replacement_action_frame = render_progress_frame(
+                renderer,
+                legacy_windows=legacy_windows,
+            )
 
     checking_line = next(
         line for line in checking_frame.splitlines() if "Checking item" in line
@@ -277,7 +307,7 @@ def test_tty_item_display_stays_stable_during_fast_transfers(monkeypatch):
     transfer_line = next(
         line
         for line in transfer_frame.splitlines()
-        if "Downloading" in line and "━" in line
+        if "Downloading" in line and "10/100 bytes" in line
     )
     checking_stage = next(
         line for line in checking_frame.splitlines() if "Processing items" in line
@@ -293,11 +323,11 @@ def test_tty_item_display_stays_stable_during_fast_transfers(monkeypatch):
         transfer_frame.splitlines().index(transfer_stage)
     )
     assert any(
-        "Downloading" in line and "━" in line
+        "Downloading" in line and "10/100 bytes" in line
         for line in completed_transfer_frame.splitlines()
     )
     assert any(
-        "Downloading" in line and "━" in line
+        "Downloading" in line and "10/100 bytes" in line
         for line in retained_action_frame.splitlines()
     )
     assert retained_action_frame.splitlines()[0].startswith("Downloading ")
