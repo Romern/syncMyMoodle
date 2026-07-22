@@ -522,40 +522,6 @@ def starter_config_text(overrides: Mapping[str, Any] | None = None) -> str:
     return tomlkit.dumps(document)
 
 
-def migrated_config_text(values: Mapping[str, Any], baseline: Config) -> str:
-    """Render migrated values with behavior-compatible example defaults."""
-    text = starter_config_text()
-    example_values = canonicalize(tomllib.loads(text))
-    output_values = dict(canonicalize(values))
-    for option in CONFIG_OPTIONS:
-        key = option.canonical_key
-        if key in output_values or key not in example_values:
-            continue
-        candidate = {**output_values, key: example_values[key]}
-        try:
-            unchanged = Config.from_dict(candidate) == baseline
-        except ConfigValidationError:
-            unchanged = False
-        if unchanged:
-            output_values[key] = example_values[key]
-
-    document = tomlkit.parse(text)
-    for option in CONFIG_OPTIONS:
-        if option.canonical_key in output_values:
-            continue
-        table: MutableMapping[str, Any] = document
-        for group_part in option.group.split("."):
-            nested = table.get(group_part)
-            if not isinstance(nested, MutableMapping):
-                raise ValueError(
-                    f"starter config does not define table {option.group!r}"
-                )
-            table = nested
-        table.pop(option.key, None)
-    overlay_config_values(document, group_config_for_toml(output_values))
-    return tomlkit.dumps(document)
-
-
 def selected_config_path(
     args: Namespace,
     parser: ArgumentParser,
@@ -692,7 +658,7 @@ def migrate_config_command(args: Namespace, parser: ArgumentParser) -> None:
         with token_store_transaction(store, tokens):
             write_private_text(
                 output_path,
-                migrated_config_text(config_values, config),
+                starter_config_text(config_values),
                 "migrated config",
             )
     except (
@@ -849,7 +815,7 @@ def prompt_setup_config(
     )
     config: ConfigDict = {
         "auth.user": username,
-        "auth.login.method": "browser" if browser_login else DEFAULT_LOGIN_METHOD,
+        "auth.login.method": DEFAULT_LOGIN_METHOD if browser_login else "totp",
         "auth.login.provider": DEFAULT_LOGIN_PROVIDER,
         "paths.sync_directory": setup_sync_directory_value(sync_directory),
     }

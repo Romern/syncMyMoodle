@@ -39,10 +39,10 @@ CliValueKind: TypeAlias = Literal["scalar", "csv", "flag"]
 
 CONFLICT_HANDLING_OPTIONS = ("rename", "keep", "overwrite")
 DEFAULT_TOKEN_STORE = "keyring"
-DEFAULT_LOGIN_METHOD = "totp"
+DEFAULT_LOGIN_METHOD = "browser"
 DEFAULT_LOGIN_PROVIDER = "prompt"
 TOKEN_STORE_OPTIONS = (DEFAULT_TOKEN_STORE, "env-file")
-LOGIN_METHOD_OPTIONS = (DEFAULT_LOGIN_METHOD, "browser")
+LOGIN_METHOD_OPTIONS = (DEFAULT_LOGIN_METHOD, "totp")
 LOGIN_PROVIDER_OPTIONS = (
     DEFAULT_LOGIN_PROVIDER,
     *TOKEN_STORE_OPTIONS,
@@ -338,8 +338,9 @@ class Config:
         normalize=bool,
         cli=cli_flag(
             "keyring-store-totp-secret",
-            "store the TOTP seed when the configured RWTH sign-in method is "
-            "the system keyring",
+            "use a TOTP seed from the system keyring, prompting and storing it "
+            "if missing; the negative form ignores it for this run without "
+            "deleting it",
             aliases=("secretservicetotpsecret",),
         ),
     )
@@ -469,7 +470,7 @@ class Config:
         ),
     )
     course_prefix_handling: str = option(
-        "keep",
+        "suffix",
         group="courses",
         key="prefix_handling",
         falsey_uses_default=True,
@@ -485,7 +486,7 @@ class Config:
 
     # Download behaviour
     update_files: bool = option(
-        False,
+        True,
         group="downloads",
         normalize=bool,
         cli=cli_flag(
@@ -1082,6 +1083,11 @@ LEGACY_NOLINKS_KEYS = ("no_links", "nolinks")
 _LEGACY_QUIZ_ON_STRINGS = ("true", "yes")
 _LEGACY_QUIZ_OFF_STRINGS = ("false", "no", "none")
 FOLLOW_LINKS_KEY = "links.follow_links"
+_LEGACY_CONFIG_DEFAULTS: ConfigDict = {
+    "auth.login.method": "totp",
+    "courses.prefix_handling": "keep",
+    "downloads.update_files": False,
+}
 
 # Legacy flat JSON spelling -> canonical key.
 LEGACY_KEY_MAP = {
@@ -1139,13 +1145,13 @@ _LEGACY_KEY_HINTS = {
 def convert_legacy_config(raw: Mapping[str, Any] | None) -> ConfigDict:
     """Translate a legacy flat JSON config into the current format.
 
-    Resolves the legacy key spellings, inverts the old no_links/nolinks
-    toggle into links.follow_links, maps used_modules trees onto the flat
-    module/link keys (keeping their historical semantics: omitted entries
-    stay disabled) and drops null values (omitting a key means "use the
-    default"). Current-format keys and unknown keys pass through untouched.
+    Starts with the 0.5 defaults that differ from current defaults, resolves
+    legacy key spellings, inverts the old no_links/nolinks toggle into
+    links.follow_links, maps used_modules trees onto the flat module/link keys
+    and drops null values. Current-format keys and unknown keys pass through
+    untouched.
     """
-    converted: ConfigDict = {}
+    converted = dict(_LEGACY_CONFIG_DEFAULTS)
     for raw_key, value in _without_none(raw or {}).items():
         key = str(raw_key)
         if key in LEGACY_NOLINKS_KEYS:

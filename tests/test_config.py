@@ -639,13 +639,13 @@ def test_defaults_applied_for_empty_config(tmp_path, monkeypatch):
     cfg = Config.from_dict({})
     assert cfg.sync_directory == "./"
     assert cfg.cookie_file == str(tmp_path / "xdg" / "syncmymoodle" / "session")
-    assert cfg.course_prefix_handling == "keep"
+    assert cfg.course_prefix_handling == "suffix"
     assert cfg.conflict_handling == "rename"
     assert cfg.token_store == DEFAULT_TOKEN_STORE
     assert cfg.login_method == DEFAULT_LOGIN_METHOD
     assert cfg.login_provider == DEFAULT_LOGIN_PROVIDER
     assert cfg.follow_links is True
-    assert cfg.update_files is False
+    assert cfg.update_files is True
     assert cfg.selected_courses == []
     assert cfg.exclude_course_roles == []
     assert cfg.exclude_links == {}
@@ -688,6 +688,14 @@ def test_legacy_key_aliases_are_resolved():
     assert cfg.exclude_sections == {"*": ["Hidden*"]}
     assert cfg.exclude_modules == {"*": ["Skip Module"]}
     assert cfg.only_sync_semester == ["22s"]
+
+
+def test_missing_legacy_values_keep_historical_behavior():
+    cfg = Config.from_dict(convert_legacy_config({}))
+
+    assert cfg.login_method == "totp"
+    assert cfg.course_prefix_handling == "keep"
+    assert cfg.update_files is False
 
 
 def test_legacy_none_conflict_mode_preserves_keep_behavior():
@@ -816,45 +824,11 @@ def test_toml_example_is_valid():
     assert "password" not in raw["auth"]
     assert "totp_secret" not in raw["auth"]
     assert cfg.sync_directory == "./"
+    assert cfg.login_method == "browser"
     assert cfg.course_prefix_handling == "suffix"
     assert cfg.update_files is True
     assert cfg.follow_links is True
     assert cfg.quiz_mode == "html"
-
-
-def test_migrated_config_text_only_adds_behavior_compatible_defaults():
-    baseline = Config.from_dict({})
-
-    migrated_text = cli.migrated_config_text({}, baseline)
-    migrated = tomllib.loads(migrated_text)
-    migrated_values = canonicalize(migrated)
-
-    assert Config.from_dict(migrated) == baseline
-    assert migrated_values["downloads.conflict_handling"] == "rename"
-    assert migrated_values["downloads.dry_run"] is False
-    assert migrated_values["links.follow_links"] is True
-    assert migrated_values["modules.quiz"] == "html"
-    assert {
-        "auth.user",
-        "auth.login.totp_serial",
-        "courses.prefix_handling",
-        "downloads.update_files",
-    }.isdisjoint(migrated_values)
-    assert "# Relative paths in this file resolve" in migrated_text
-
-
-def test_migrated_config_text_keeps_explicit_non_default_values():
-    values = {
-        "courses.prefix_handling": "remove",
-        "downloads.update_files": True,
-    }
-
-    migrated = canonicalize(
-        tomllib.loads(cli.migrated_config_text(values, Config.from_dict(values)))
-    )
-
-    assert migrated["courses.prefix_handling"] == "remove"
-    assert migrated["downloads.update_files"] is True
 
 
 def test_current_config_parser_requires_toml_content(tmp_path):
@@ -1311,11 +1285,16 @@ def test_config_migrate_command_writes_secret_free_toml_and_tokens(
             "user": "json-user",
             "tokens": {"store": "env-file", "env_file": str(token_path)},
             "login": {
+                "method": "totp",
                 "provider": "prompt",
                 "totp_serial": "json-totp",
             },
         },
-        "courses": {"selected": ["course-a", "course-b"]},
+        "courses": {
+            "selected": ["course-a", "course-b"],
+            "prefix_handling": "keep",
+        },
+        "downloads": {"update_files": False},
         "links": {
             "follow_links": False,
             "youtube": False,
@@ -1334,8 +1313,8 @@ def test_config_migrate_command_writes_secret_free_toml_and_tokens(
     assert migrated_values["downloads.conflict_handling"] == "rename"
     assert migrated_values["downloads.dry_run"] is False
     assert migrated_values["links.emedia"] is True
-    assert "courses.prefix_handling" not in migrated_values
-    assert "downloads.update_files" not in migrated_values
+    assert migrated_values["courses.prefix_handling"] == "keep"
+    assert migrated_values["downloads.update_files"] is False
     assert "# Relative paths in this file resolve" in migrated_text
     if os.name != "nt":
         assert output_path.stat().st_mode & 0o777 == 0o600
@@ -1677,6 +1656,7 @@ SYNCMYMOODLE_TOTP_SECRET="env-totp-secret"
 user = "user"
 
 [auth.login]
+method = "totp"
 provider = "env-file"
 totp_serial = "totp"
 env_file = "secrets.env"
@@ -1723,6 +1703,7 @@ SYNCMYMOODLE_TOTP_SECRET=env-totp-secret
 user = "user"
 
 [auth.login]
+method = "totp"
 provider = "env-file"
 totp_serial = "totp"
 env_file = {str(env_path)!r}
@@ -1747,6 +1728,7 @@ EXTERNAL_PROVIDER_CONFIG = """
 user = "user"
 
 [auth.login]
+method = "totp"
 provider = "1password"
 totp_serial = "totp"
 password = "op://Private/RWTH/password"
@@ -1757,6 +1739,7 @@ COMMAND_PROVIDER_CONFIG = """
 user = "user"
 
 [auth.login]
+method = "totp"
 provider = "command"
 totp_serial = "totp"
 password_command = ["secret-tool", "lookup", "rwth"]
@@ -1875,6 +1858,7 @@ def test_external_secret_provider_requires_password_ref(tmp_path, capsys):
 user = "user"
 
 [auth.login]
+method = "totp"
 provider = "pass"
 totp_serial = "totp"
 """,
@@ -1901,6 +1885,7 @@ def test_external_secret_provider_availability_errors_fail_clearly(
 user = "user"
 
 [auth.login]
+method = "totp"
 provider = "bitwarden"
 totp_serial = "totp"
 password = "rwth"
@@ -1957,6 +1942,7 @@ def test_command_secret_provider_rejects_explicit_config(tmp_path, caplog):
 user = "user"
 
 [auth.login]
+method = "totp"
 provider = "command"
 totp_serial = "totp"
 password_command = ["secret-tool", "lookup", "rwth"]
@@ -2019,6 +2005,7 @@ def test_env_file_without_password_fails_clearly(tmp_path, caplog):
 user = "user"
 
 [auth.login]
+method = "totp"
 provider = "env-file"
 totp_serial = "totp"
 env_file = {str(env_path)!r}

@@ -132,6 +132,7 @@ store = "env-file"
 env_file = {str(token_path)!r}
 
 [auth.login]
+method = "totp"
 provider = "prompt"
 
 [paths]
@@ -182,6 +183,7 @@ def test_setup_logs_in_once_and_writes_only_non_secret_config(
     parsed = tomllib.loads(text)
     expected = tomllib.loads(cli.starter_config_text())
     expected["auth"]["user"] = stored.username
+    expected["auth"]["login"]["method"] = "totp"
     expected["auth"]["login"]["totp_serial"] = "TOTP123"
     expected["paths"]["sync_directory"] = str(tmp_path / "sync")
     assert parsed == expected
@@ -788,6 +790,7 @@ def test_sign_in_method_checks_password_manager_availability(
         {
             "auth": {
                 "login": {
+                    "method": "totp",
                     "provider": "1password",
                     "password": "op://Private/RWTH/password",
                 }
@@ -810,6 +813,7 @@ def test_sign_in_method_checks_configured_otp_command(monkeypatch):
         {
             "auth": {
                 "login": {
+                    "method": "totp",
                     "provider": "command",
                     "password_command": ["password-helper"],
                     "otp_command": ["otp-helper"],
@@ -936,7 +940,7 @@ def test_auth_login_uses_persisted_browser_method_without_totp_sso(
     config_path, token_path, stored = write_env_token_config(tmp_path)
     config_path.write_text(
         config_path.read_text(encoding="utf-8").replace(
-            '[auth.login]\nprovider = "prompt"',
+            '[auth.login]\nmethod = "totp"\nprovider = "prompt"',
             '[auth.login]\nmethod = "browser"\nprovider = "command"\n'
             'password_command = ["missing-password-helper"]',
         ),
@@ -989,7 +993,7 @@ def test_browser_login_rewrites_a_managed_token_file_after_account_change(
         config_path.read_text(encoding="utf-8")
         .replace(stored.username, replacement.username)
         .replace(
-            '[auth.login]\nprovider = "prompt"',
+            '[auth.login]\nmethod = "totp"\nprovider = "prompt"',
             '[auth.login]\nmethod = "browser"\nprovider = "prompt"',
         ),
         encoding="utf-8",
@@ -1024,7 +1028,7 @@ def test_browser_login_does_not_claim_session_support_without_private_token(
     EnvFileTokenStore(token_path, stored.username).store(limited)
     config_path.write_text(
         config_path.read_text(encoding="utf-8").replace(
-            '[auth.login]\nprovider = "prompt"',
+            '[auth.login]\nmethod = "totp"\nprovider = "prompt"',
             '[auth.login]\nmethod = "browser"\nprovider = "prompt"',
         ),
         encoding="utf-8",
@@ -1081,6 +1085,7 @@ store = "env-file"
 env_file = {str(missing_token_path)!r}
 
 [auth.login]
+method = "totp"
 provider = "prompt"
 """,
         encoding="utf-8",
@@ -1485,6 +1490,7 @@ def test_reusable_provider_reauthenticates_once_and_stores_only_valid_replacemen
                 "auth": {
                     "user": old.username,
                     "login": {
+                        "method": "totp",
                         "provider": "env-file",
                         "env_file": "/run/secrets/syncmymoodle-login.env",
                     },

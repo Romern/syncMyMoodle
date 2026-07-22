@@ -1,23 +1,34 @@
-<p align="center"> <img src="https://raw.githubusercontent.com/Romern/syncMyMoodle/30a29fdcf7206713e49bdd47f1d0dee1a8887294/docs/assets/syncmymoodle-logo.png" alt="syncMyMoodle logo" width="280" > </p>
+<p align="center">
+  <img src="https://raw.githubusercontent.com/Romern/syncMyMoodle/master/docs/assets/syncmymoodle-logo.png" alt="syncMyMoodle logo" width="280">
+</p>
 
 <h1 align="center">syncMyMoodle</h1>
 
-<p align="center"> Download and keep your RWTH Moodle course materials up to date. </p>
+<p align="center">Download and keep your RWTH Moodle course materials up to date.</p>
 
-<p align="center"> <a href="https://pypi.org/project/syncMyMoodle/"> <img src="https://img.shields.io/pypi/v/syncmymoodle" alt="PyPI version"> </a> <a href="https://pypi.org/project/syncMyMoodle/"> <img src="https://img.shields.io/pypi/pyversions/syncmymoodle" alt="Supported Python versions"> </a> <a href="https://github.com/Romern/syncMyMoodle/actions/workflows/test.yaml"> <img src="https://github.com/Romern/syncMyMoodle/actions/workflows/test.yaml/badge.svg?branch=master" alt="Test status"> </a> <a href="https://github.com/Romern/syncMyMoodle/blob/master/LICENSE"> <img src="https://img.shields.io/github/license/Romern/syncMyMoodle" alt="License"> </a> </p>
+<p align="center">
+  <a href="https://pypi.org/project/syncMyMoodle/"><img src="https://img.shields.io/pypi/v/syncmymoodle" alt="PyPI version"></a>
+  <a href="https://pypi.org/project/syncMyMoodle/"><img src="https://img.shields.io/pypi/pyversions/syncmymoodle" alt="Supported Python versions"></a>
+  <a href="https://github.com/Romern/syncMyMoodle/actions/workflows/test.yaml"><img src="https://github.com/Romern/syncMyMoodle/actions/workflows/test.yaml/badge.svg?branch=master" alt="Test status"></a>
+  <a href="https://github.com/Romern/syncMyMoodle/blob/master/LICENSE"><img src="https://img.shields.io/github/license/Romern/syncMyMoodle" alt="License"></a>
+</p>
 
-syncMyMoodle is a command-line client that downloads course content from
-[RWTH Moodle](https://moodle.rwth-aachen.de/) into a local directory.
+syncMyMoodle is a command-line client that downloads your course materials from
+[RWTH Moodle](https://moodle.rwth-aachen.de/) and keeps a local copy organized
+and up to date.
 
-Run it again later to add new materials and update files that changed remotely.
-Configurable conflict handling prevents remote updates from silently
-overwriting local edits.
+Run it again whenever you want to download newly published material or update
+files that changed on Moodle. Configurable conflict handling protects local
+edits from being silently overwritten by remote updates.
 
-Normal syncs use locally stored Moodle tokens and do not require your RWTH
-password or TOTP code.
+Normal syncs use stored Moodle API tokens, so you do not need to sign in every
+time. syncMyMoodle supports both interactive login and reusable credential
+providers for obtaining new tokens when necessary.
+
 
 > [!NOTE]
-> This README documents syncMyMoodle >= 1.0.0. For version 0.5.0 and its documentation, see the
+> This documentation targets syncMyMoodle 1.0.0. For the old 0.5.0 command-line
+> interface and JSON configuration format, see the
 > [syncMyMoodle 0.5.0 page on PyPI](https://pypi.org/project/syncMyMoodle/0.5.0/).
 
 > [!IMPORTANT]
@@ -25,64 +36,64 @@ password or TOTP code.
 > by, or supported by RWTH Aachen University, Moodle Pty Ltd, or the Moodle
 > project.
 
-## Features
+## What it downloads
 
-syncMyMoodle can download:
+syncMyMoodle supports:
 
-* Assignments, submissions, and feedback
-* File resources and Moodle folders
-* Pages and labels, including linked files and embedded media
-* Opencast, YouTube, Sciebo, and emedia Medizin VEIRA content
-* Quiz attempts as self-contained offline HTML
-* Quiz attempts as PDF using Chrome, Chromium, or Microsoft Edge
-* H5P packages and supported LTI content
+- Assignment attachments, your submissions, and feedback files
+- Moodle file resources and folders
+- Files exposed by books, pages, URL activities, and PDF annotator activities
+- Supported links and embedded media discovered in assignments, folders,
+  pages, labels, and H5P activities
+- YouTube, RWTH Opencast, public Sciebo shares, and emedia Medizin VEIRA videos
+- Opencast episodes and series exposed through supported LTI activities
+- Quiz attempts as self-contained offline HTML, PDF, or both
 
-It also supports:
+It also provides:
 
-* Course and semester selection
-* Course, section, module, file, link, domain, type, and size filters
-* Dry runs and explanations for filtered content
-* Remote file updates with configurable conflict handling
-* Browser-assisted or TOTP-based RWTH sign-in
-* System-keyring and environment-file Moodle token stores
-* Password-manager integrations for obtaining RWTH sign-in credentials
-* Configuration migration from syncMyMoodle 0.5.0 and earlier
+- Course, semester, and course-role selection
+- Course-specific and global section, module, link, and domain filters
+- Filename, extension, and known-size filters
+- Dry runs and explanations for filtered content
+- Remote-update detection with configurable local-conflict handling
+- Browser-assisted or terminal-based RWTH sign-in
+- System-keyring and environment-file Moodle token stores
+- Optional password-manager integrations for automatic TOTP sign-in recovery
+- Migration from syncMyMoodle <1.0.0 JSON configurations
 
-syncMyMoodle is a one-way download client. It does not upload local changes to
-Moodle.
+syncMyMoodle is a **one-way download client**. It does not upload local changes
+to Moodle.
 
 ## Requirements
 
-* Python 3.11 or newer
-* Linux, macOS, or Windows
-* An RWTH account with access to RWTH Moodle
+- Python 3.11 or newer
+- Linux, macOS, or Windows
+- An RWTH account with access to RWTH Moodle
 
-Quiz PDF generation additionally requires an installed Chrome, Chromium, or
-Microsoft Edge browser.
+Optional features have additional requirements:
 
-Reliable YouTube downloads additionally require
-[Deno](https://docs.deno.com/runtime/getting_started/installation/), the
-JavaScript runtime enabled by default in yt-dlp.
+- Quiz PDF generation needs Chrome, Chromium, or Microsoft Edge.
+- Reliable YouTube downloads with yt-dlp may need
+  [Deno](https://docs.deno.com/runtime/getting_started/installation/) 2.3.0 or
+  newer.
 
 ## Installation
 
-Installing syncMyMoodle as an isolated command-line tool is recommended. Use
-either [uv](https://docs.astral.sh/uv/) or
+Installing syncMyMoodle as an isolated command-line tool is recommended.
+Use either [uv](https://docs.astral.sh/uv/) or
 [pipx](https://pipx.pypa.io/).
 
-Using uv:
+With uv:
 
 ```shell
 uv tool install syncmymoodle
 ```
 
-Alternatively, using pipx:
+Or with pipx:
 
 ```shell
 pipx install syncmymoodle
 ```
-
-Only one of these commands is needed.
 
 Verify the installation:
 
@@ -92,15 +103,13 @@ syncmymoodle --version
 
 ### Install from a source checkout
 
-Clone the repository and create a virtual environment:
-
 ```shell
 git clone https://github.com/Romern/syncMyMoodle.git
 cd syncMyMoodle
 python -m venv .venv
 ```
 
-Activate the environment:
+Activate the virtual environment:
 
 ```shell
 # Linux or macOS
@@ -112,60 +121,52 @@ source .venv/bin/activate
 .venv\Scripts\Activate.ps1
 ```
 
-Install syncMyMoodle:
+Install the project:
 
 ```shell
 python -m pip install .
 ```
 
-### Existing <= 0.5.0 installations
+### Upgrading from <=0.5.0
 
-Starting with version 1.0.0, syncMyMoodle uses a different command-line interface and configuration
-format. Read [Migrating from 0.5.0](#migrating-from-05) before replacing an
-existing installation.
-
-The documentation for the 0.5.0 release remains available on its
-[PyPI project page](https://pypi.org/project/syncMyMoodle/0.5.0/).
+Version 1.0 uses a new command-line interface and TOML configuration format.
+Do not replace an existing <=0.5.0 installation until you have read
+[Migrating from syncMyMoodle 0.5](https://github.com/Romern/syncMyMoodle/blob/master/docs/migrating-from-0-5.md).
 
 ## Quick start
 
-Run the interactive setup once, then start your first sync.
+Run setup once, then start the first sync.
 
-The default setup opens the RWTH login page in your browser. This supports
-passkeys, security keys, TOTP, and the other sign-in methods offered there.
+| Setup mode       | Best for                                                           | Command                     |
+|------------------|--------------------------------------------------------------------|-----------------------------|
+| Browser-assisted | The simplest setup and supports any MFA method offered by RWTH SSO | `syncmymoodle setup`        |
+| Terminal TOTP    | Terminal-only use and optional automatic sign-in                   | `syncmymoodle setup --totp` |
 
-| Sign-in method | Use it when                                                                 | Command                     |
-|----------------|-----------------------------------------------------------------------------|-----------------------------|
-| Browser        | You want the simplest setup or use any MFA method supported by the login page | `syncmymoodle setup`        |
-| TOTP           | You want to stay in the terminal or configure automatic sign-in recovery     | `syncmymoodle setup --totp` |
-
-### Browser setup
+### Browser-assisted setup
 
 ```shell
 syncmymoodle setup
 ```
 
-Browser setup asks for your username, sync directory, and Moodle token store.
-It does not request your RWTH password or TOTP details.
+Setup asks for your RWTH username, sync directory, and Moodle token store. It
+does not request your RWTH password or TOTP information.
 
-The command opens an RWTH/Moodle sign-in link. After signing in, Moodle will
-display a blue link:
+The command opens an RWTH/Moodle sign-in page in your browser. After signing in, Moodle shows a
+blue app-launch link:
 
 1. Right-click the blue link.
 2. Copy its complete link address.
-3. Paste the address into the hidden syncMyMoodle prompt.
+3. Paste it into the hidden syncMyMoodle prompt.
+4. Confirm the Moodle account before the tokens are stored.
 
 > [!CAUTION]
-> The app-link address contains your Moodle tokens. Do not share, save, publish,
-> or paste it anywhere except the syncMyMoodle prompt.
+> The app-launch address contains your Moodle tokens. Do not share, save,
+> publish, or paste it anywhere except the syncMyMoodle prompt.
 
-Browser setup saves browser-assisted sign-in as the default login method. A
-later `syncmymoodle auth login` will therefore use the browser again.
+Browser setup remains interactive when replacement tokens are needed. Run
+`syncmymoodle auth login` to sign in again.
 
-### TOTP setup
-
-Use TOTP setup to complete sign-in entirely in the terminal and optionally
-configure a reusable credential provider for automatic sign-in recovery:
+### Terminal TOTP setup
 
 ```shell
 syncmymoodle setup --totp
@@ -173,22 +174,23 @@ syncmymoodle setup --totp
 
 TOTP setup asks for:
 
-* Your RWTH Single Sign-On username
-* Your RWTH TOTP serial, such as `TOTP12345678`
-* The directory where Moodle files should be downloaded
-* How RWTH sign-in credentials should be obtained when new Moodle tokens are
-  needed
-* Where the Moodle tokens should be stored
+- Your RWTH Single Sign-On username
+- Your RWTH TOTP serial, such as `TOTP12345678`
+- The directory where course content should be downloaded
+- An optional detected password-manager provider
+- The Moodle token store
 
 The TOTP serial is the identifier shown in the
-[RWTH IDM Token Manager](https://idm.rwth-aachen.de/selfservice/MFATokenManager).
+[RWTH IDM Token Manager](https://idm.rwth-aachen.de/selfservice/MFATokenManager),
+not the current six-digit code.
 
-Depending on the selected sign-in provider, setup may prompt for your RWTH
-password, TOTP secret, or password-manager references. These are used to
-complete the initial RWTH sign-in and, when configured through a reusable
-provider, to obtain new Moodle tokens later.
+The default `prompt` provider asks for your RWTH password and current TOTP code
+during the initial login. A reusable provider can instead obtain the password
+and optionally generate or retrieve future TOTP codes when stored Moodle tokens
+need replacement.
 
-### Start the first sync
+
+### Start syncing
 
 After setup completes:
 
@@ -196,97 +198,91 @@ After setup completes:
 syncmymoodle
 ```
 
-Running the command without a subcommand always starts a sync using the saved
-configuration.
+Running `syncmymoodle` without a subcommand always starts a sync using the
+selected configuration.
 
-Setup is intended for new installations. To change an existing setup, edit the
-configuration instead:
+A setup-generated configuration downloads into the directory you selected,
+enables remote-file updates, preserves local conflicts by renaming them, and
+saves quiz attempts as offline HTML.
 
-```shell
-syncmymoodle config path
-syncmymoodle config check
-```
-
-If you change the account or RWTH sign-in settings, obtain a new matching
-Moodle token record afterwards:
-
-```shell
-syncmymoodle auth login
-```
-
-## Everyday use
+## Common commands
 
 ```shell
 # Sync using the saved configuration
 syncmymoodle
 
-# Preview the sync without writing files or caches
+# Preview the sync without writing files or metadata caches
 syncmymoodle --dry-run
 
-# Sync selected course IDs or Moodle course URLs
+# Sync only selected course IDs or Moodle course URLs
 syncmymoodle --courses 12345,67890
 
 # Sync courses from one semester
 syncmymoodle --semesters 25ws
 
-# Ignore files larger than 50 MB when the remote size is known
+# Skip files larger than 50 MiB when the size is known
 syncmymoodle --max-file-size 50M
 
-# Preview the sync and explain configured exclusions
+# Preview the sync and explain every configured exclusion
 syncmymoodle --dry-run --show-filtered
 
-# Include diagnostic information
+# Include diagnostic logging
 syncmymoodle --verbose
 
 # Disable colored output
 syncmymoodle --color never
 ```
 
-Command-line sync options override the saved configuration for that run only.
-
-Use the built-in help for the complete option list:
-
-```shell
-syncmymoodle --help
-```
-
-Boolean settings have matching positive and negative options. For example:
+Command-line sync options override the configuration for that run only. Boolean
+settings have matching positive and negative forms:
 
 ```shell
 syncmymoodle --update-files
 syncmymoodle --no-update-files
 ```
 
-An empty command-line value clears a configured comma-separated list for one
-run:
+An empty value clears a configured comma-separated list for one run:
 
 ```shell
 syncmymoodle --courses ""
 ```
 
-## Output and exit status
+Use `syncmymoodle --help` for every sync option and see the
+[CLI reference](https://github.com/Romern/syncMyMoodle/blob/master/docs/cli-reference.md) for all subcommands.
 
-Interactive terminals show colored phases, prompts, and aggregate course, item,
-and byte-transfer progress.
+## Updates and local changes
 
-When output is redirected, syncMyMoodle disables animated progress and uses
-plain numbered course and item milestones. The
-[`NO_COLOR`](https://no-color.org/) convention is also respected.
+When `downloads.update_files = true`, syncMyMoodle checks whether previously
+seen remote files have changed. Depending on the source, it uses Moodle content
+hashes, modification timestamps, HTTP validators, or cached source metadata.
 
-Every sync ends with a summary of downloaded, updated, unchanged, filtered, and
-failed items.
+If a remote file changed and the local file still matches the previously synced
+copy, syncMyMoodle updates it directly. If the local file also changed,
+`downloads.conflict_handling` determines the result:
 
-A course, module, or download failure does not immediately stop the complete
-sync. syncMyMoodle finishes the remaining work and exits with a non-zero status
-afterwards.
+| Mode        | Behavior                                                                             |
+|-------------|--------------------------------------------------------------------------------------|
+| `rename`    | Move the local version to a `.syncconflict...` copy, then install the remote version |
+| `keep`      | Keep the local version and skip the remote update                                    |
+| `overwrite` | Replace the local version                                                            |
+
+`rename` is the default and is used by setup-generated configurations.
+
+> [!WARNING]
+> `overwrite` can permanently discard local changes. Use it only when the sync
+> directory is not edited manually or is backed up elsewhere.
+
+syncMyMoodle stages downloads before installing them and prevents two writing
+syncs from using the same sync directory concurrently. More detail is available
+in [How synchronization works](https://github.com/Romern/syncMyMoodle/blob/master/docs/how-sync-works.md).
 
 ## Configuration
 
-syncMyMoodle reads its global configuration from the platform-specific user
-configuration directory. It does not automatically discover configuration
-files in the current working directory.
+The global configuration is stored in the platform-specific user configuration
+directory. syncMyMoodle does not search the current working directory for a
+configuration file.
 
-Show the global configuration location:
+Show the global location:
 
 ```shell
 syncmymoodle config path
@@ -298,23 +294,14 @@ Print the complete commented example:
 syncmymoodle config example
 ```
 
-The packaged example is the authoritative reference for every setting and its
-accepted values.
-
-To create a configuration manually:
-
-```shell
-syncmymoodle config example > config.toml
-```
-
 Validate the global configuration after editing it:
 
 ```shell
 syncmymoodle config check
 ```
 
-Select another configuration explicitly by placing `--config` before the
-subcommand:
+Use another configuration by placing `--config` before the subcommand or sync
+arguments:
 
 ```shell
 syncmymoodle --config config.toml
@@ -322,402 +309,120 @@ syncmymoodle --config config.toml config check
 syncmymoodle --config config.toml auth status
 ```
 
-Relative paths inside a configuration file resolve from that file's directory.
+Relative paths in a configuration file resolve from that file's directory.
 Relative paths supplied on the command line resolve from the current working
 directory.
 
-### Course selection
-
-The primary course selectors are:
-
-| Setting                 | Effect                                                                            |
-| ----------------------- | --------------------------------------------------------------------------------- |
-| `courses.selected`      | Sync only the listed course URLs or numeric IDs                                   |
-| `courses.semesters`     | Sync courses belonging to the listed semester IDs                                 |
-| `courses.skip`          | Exclude the listed course URLs or numeric IDs                                     |
-| `courses.exclude_roles` | Exclude courses where your directly assigned Moodle course-role shortname matches |
-
-`courses.selected` takes priority over `courses.semesters`, `courses.skip`, and
-`courses.exclude_roles`.
-
-Role lookups are performed only when `courses.exclude_roles` is configured. If
-Moodle cannot determine your role for a course, the course is kept.
-
-The Moodle mobile API exposes only roles assigned directly in a course. Roles
-inherited from a course category or the Moodle system cannot be matched by
-this filter.
-
-### Sections, modules, and files
-
-`exclude_sections` skips complete Moodle topic or week blocks, including
-everything inside them.
-
-`exclude_modules` skips individual activities or resources. Rules can match
-module names, Moodle types, IDs, URLs, or patterns.
-
-Both settings can be either:
-
-* A global list
-* A table keyed by Moodle course ID
-
-Use `*` in a per-course table for rules shared by every course.
-
-Additional filters are available for:
-
-* Filenames and paths
-* File extensions and Moodle file types
-* Links and domains
-* Remote file size
-* Moodle module types
-* Individual courses and course roles
-
-Size limits apply only when Moodle or the linked service reports the remote
-size.
-
-Disabling `links.follow_links` also disables the linked-content handlers below
-it, including YouTube, Opencast, Sciebo, and emedia.
-
-Intentional exclusions are included in the final sync summary. To list each
-excluded item and the matching configuration rule, run:
-
-```shell
-syncmymoodle --dry-run --show-filtered
-```
-
-### Course directory names
-
-`courses.prefix_handling` controls leading two-character course prefixes:
-
-| Value    | Moodle course name | Local directory |
-| -------- | ------------------ | --------------- |
-| `keep`   | `(VO) Analysis`    | `(VO) Analysis` |
-| `remove` | `(VO) Analysis`    | `Analysis`      |
-| `suffix` | `(VO) Analysis`    | `Analysis (VO)` |
-
-Setup-generated configurations use `suffix`.
-
-When the setting is absent, `keep` remains the compatibility default. With
-`remove`, syncMyMoodle adds a stable suffix when otherwise identical directory
-names would collide.
-
-## Updates and local changes
-
-With `downloads.update_files = true`, syncMyMoodle replaces a file when Moodle
-or Sciebo reports a newer remote version.
-
-If the local file was also modified, `downloads.conflict_handling` determines
-what happens:
-
-| Mode        | Behavior                                                                                  |
-| ----------- | ----------------------------------------------------------------------------------------- |
-| `rename`    | Move the local version to a `.syncconflict.<hash>` file, then download the remote version |
-| `keep`      | Leave the local file unchanged and skip the update                                        |
-| `overwrite` | Replace the local file with the remote version                                            |
-
-`rename` is the default. It preserves the local version while allowing the
-newer remote file to be downloaded.
-
-> [!WARNING]
-> `overwrite` can permanently discard local changes. Use it only when files in
-> the sync directory are not edited manually or are backed up elsewhere.
+See the [complete configuration reference](https://github.com/Romern/syncMyMoodle/blob/master/docs/configuration.md) for every
+setting, accepted value, default, filter rule, and interaction.
 
 ## Authentication and tokens
 
-syncMyMoodle distinguishes between two categories of authentication data:
+syncMyMoodle separates normal Moodle access from RWTH sign-in:
 
-| Data                     | Used for                                           | Configuration   |
-| ------------------------ | -------------------------------------------------- | --------------- |
-| Moodle tokens            | Normal syncs and temporary Moodle browser sessions | `[auth.tokens]` |
-| RWTH sign-in credentials | Obtaining new Moodle tokens through RWTH SSO       | `[auth.login]`  |
+| Data                       | Purpose                                                        | Configuration   |
+|----------------------------|----------------------------------------------------------------|-----------------|
+| Moodle token record        | Normal syncs and creation of temporary Moodle browser sessions | `[auth.tokens]` |
+| RWTH sign-in configuration | Obtaining replacement Moodle tokens through RWTH SSO           | `[auth.login]`  |
 
-The Moodle token record contains an API token and, when Moodle provides one, a
-browser-login token.
+The Moodle token record contains an API token and, when Moodle supplies it, a
+browser-login token. It can be stored in the system keyring or in a private
+environment file managed by syncMyMoodle.
 
-The token record can be stored in:
+Start authentication diagnostics with:
 
-* The system keyring
-* An environment file managed by syncMyMoodle
-
-The system keyring is preferred when a working backend is available.
-
-In a desktop keyring viewer, look for the service `syncmymoodle` and an entry
-similar to:
-
-```text
-mobile-tokens:moodle.rwth-aachen.de:<username>
+```shell
+syncmymoodle auth status
 ```
 
-The grouping and display name depend on the operating system and keyring
-backend.
+A nonzero status means the stored token state is missing, invalid, unavailable,
+or insufficient for enabled browser-session features.
 
-### Authentication during a sync
+See the [authentication reference](https://github.com/Romern/syncMyMoodle/blob/master/docs/authentication.md) for token lifecycle,
+sign-in providers, environment files, password-manager references, and all
+authentication commands.
 
-A normal sync follows these rules:
+## Output and exit status
 
-* Valid stored Moodle tokens are used without contacting RWTH SSO.
-* Missing or invalid tokens require a new RWTH sign-in.
-* With `auth.login.method = "browser"`, the sync stops and directs you to the
-  browser-assisted `syncmymoodle auth login` flow.
-* With `auth.login.provider = "prompt"`, the sync stops and directs you to
-  `syncmymoodle auth login`.
-* A reusable sign-in provider can obtain replacement Moodle tokens
-  automatically.
-* Network and server errors do not cause token replacement because token
-  validity cannot be determined reliably.
+Interactive terminals show phases and aggregate course, item, and transfer
+progress. Redirected output uses plain numbered milestones instead of animated
+progress. The [`NO_COLOR`](https://no-color.org/) convention is respected.
 
-Automatic token replacement makes at most one RWTH SSO attempt during a sync.
+Every run ends with a summary of courses and downloaded, updated, unchanged,
+filtered, planned, or failed items as applicable.
 
-### Authentication commands
+A failure in one course, module, or download usually does not stop the entire
+sync. syncMyMoodle continues with the remaining work and exits with status `1`
+afterwards. Invalid command usage exits with status `2`; interruption with
+Ctrl+C exits with status `130`.
 
-| Command                                                   | Effect                                                                                 |
-| --------------------------------------------------------- | -------------------------------------------------------------------------------------- |
-| `syncmymoodle auth status`                                | Validate stored Moodle tokens and report the cached browser session without signing in |
-| `syncmymoodle auth login`                                 | Perform one fresh RWTH sign-in and replace the local Moodle token record               |
-| `syncmymoodle auth login --browser`                       | Perform a one-off browser-assisted sign-in                                             |
-| `syncmymoodle auth login --totp-manual`                   | Ignore the configured TOTP source and prompt for a current code for this login         |
-| `syncmymoodle auth migrate --to keyring`                  | Copy the Moodle tokens to the system keyring and update the configuration              |
-| `syncmymoodle auth migrate --to env-file --env-file PATH` | Copy the Moodle tokens to an environment file and update the configuration             |
-| `syncmymoodle auth forget`                                | Remove this installation's tokens and cached browser session                           |
-| `syncmymoodle auth reset-token`                           | Revoke and replace the shared Moodle API token                                         |
+## Troubleshooting and cleanup
 
-`auth login` replaces only this installation's local token record. It does not
-revoke the shared Moodle API token or log out other installations.
-
-New tokens are accepted only after Moodle confirms that they belong to the
-same account as an existing token record.
-
-`auth migrate` leaves the previous token store untouched.
-
-`auth forget` leaves the configuration, configured RWTH sign-in credentials,
-and shared server token unchanged. When a reusable sign-in provider remains
-configured, a later sync may obtain and store new local Moodle tokens again.
-
-> [!CAUTION]
-> `auth reset-token` revokes the shared Moodle API token. This logs out the
-> Moodle mobile app and every other syncMyMoodle installation using that token.
->
-> Use it only when recovering from a legacy token that cannot create browser
-> sessions or when the token may have been exposed.
-
-### Sign-in methods and providers
-
-`auth.login.method` selects the RWTH sign-in flow:
-
-* `totp`
-* `browser`
-
-With the TOTP method, `auth.login.provider` controls how syncMyMoodle obtains
-the RWTH password and TOTP information when new Moodle tokens are needed.
-
-Supported providers include:
-
-* Interactive prompts
-* The system keyring
-* An environment file
-* 1Password
-* Bitwarden
-* pass
-* rbw
-* gopass
-* A custom command
-
-Browser-assisted sign-in does not use the TOTP sign-in providers.
-
-During setup, syncMyMoodle detects installed password-manager CLIs without
-executing them. If you select one, setup asks for provider-native references
-and verifies them during the initial sign-in. The referenced secrets are
-requested only when new Moodle tokens are needed.
-
-For headless systems, `auth.login.env_file` can point to a user-managed
-environment file containing:
-
-```text
-SYNCMYMOODLE_PASSWORD=...
-SYNCMYMOODLE_TOTP_SECRET=...
-```
-
-This is separate from `auth.tokens.env_file`, which stores Moodle tokens and
-is managed by syncMyMoodle. Do not edit the Moodle token environment file
-manually.
-
-The `command` provider accepts `password_command` and an optional
-`otp_command` as argument arrays. It does not invoke a shell and is accepted
-only from the default global configuration.
-
-## Quizzes and linked content
-
-Quiz attempts are saved as self-contained offline HTML by default.
-
-The snapshot inlines supported same-origin assets and removes network-bearing
-content so it does not contact Moodle when opened later.
-
-Set `modules.quiz` to one of:
-
-| Value  | Output                     |
-| ------ | -------------------------- |
-| `off`  | Do not save quiz attempts  |
-| `html` | Save self-contained HTML   |
-| `pdf`  | Render a PDF               |
-| `both` | Save HTML and render a PDF |
-
-PDF output uses an installed Chrome, Chromium, or Microsoft Edge browser in
-headless mode.
-
-The browser is detected automatically on Linux, macOS, and Windows. A specific
-browser executable can be configured with `paths.browser`.
-
-If PDF rendering is unavailable, syncMyMoodle keeps the HTML snapshot so the
-attempt is not lost.
-
-Most content is downloaded directly through the Moodle API. Some content, such
-as embedded Opencast resources, requires a temporary Moodle browser session
-created with the browser-login token.
-
-Moodle rate-limits creation of this browser session across devices. If that
-causes a temporary download failure, wait a few minutes and retry the sync.
-
-## Cleanup and troubleshooting
-
-Start with these read-only checks:
+Begin with read-only diagnostics:
 
 ```shell
 syncmymoodle config check
 syncmymoodle auth status
 syncmymoodle --dry-run --verbose
-```
-
-To inspect configured exclusions:
-
-```shell
 syncmymoodle --dry-run --show-filtered
 ```
 
-Cleanup commands are previews unless `--apply` is supplied.
-
-### Redundant conflict copies
-
-Preview redundant `.syncconflict.*` files:
+Cleanup commands are previews unless `--apply` is supplied:
 
 ```shell
+# Find redundant local conflict copies
 syncmymoodle clean conflicts
-```
 
-Delete only the files listed as redundant:
-
-```shell
-syncmymoodle clean conflicts --apply
-```
-
-A conflict copy is considered redundant only when its content duplicates the
-current file or another conflict copy.
-
-### Course metadata caches
-
-Preview a reset of per-course metadata caches:
-
-```shell
+# Find per-course metadata caches
 syncmymoodle clean caches
 ```
 
-Delete the listed caches:
+See [Cleanup and troubleshooting](https://github.com/Romern/syncMyMoodle/blob/master/docs/cleanup-and-troubleshooting.md) before
+applying either cleanup operation.
 
-```shell
-syncmymoodle clean caches --apply
-```
+## Documentation
 
-This is a recovery operation. The next sync rebuilds the metadata caches and
-may perform additional work.
-
-Both cleanup commands use `paths.sync_directory` by default. To inspect another
-directory:
-
-```shell
-syncmymoodle clean conflicts --path DIRECTORY
-syncmymoodle clean caches --path DIRECTORY
-```
-
-## Migrating from 0.5
-
-Configurations from versions before 1.0.0 use a legacy JSON format which is no longer supported.
-
-You can migrate a JSON configuration to TOML using:
-
-```shell
-syncmymoodle config migrate --input config.json
-```
-
-Migration:
-
-* Uses the legacy sign-in credentials for one RWTH login
-* Obtains and stores a new Moodle token record
-* Writes a TOML configuration without embedding the legacy sign-in secrets
-* Retains comments from the packaged example
-* Preserves omitted example settings when needed to reproduce the legacy
-  behavior
-* Leaves the source JSON file unchanged
-
-Review the original and generated configuration files after migration. Delete
-the legacy JSON file once the new setup works, especially when the JSON file
-contains an RWTH password or TOTP secret.
-
-The default destination for migrated Moodle tokens is the system keyring.
-
-For a headless system:
-
-```shell
-syncmymoodle config migrate --input config.json \
-  --token-store env-file \
-  --token-env-file PATH
-```
-
-Use `--output` to select the TOML destination and `--force` to replace an
-existing destination:
-
-```shell
-syncmymoodle config migrate \
-  --input config.json \
-  --output config.toml \
-  --force
-```
-
-For the old configuration format and 0.5 command-line interface, see the
-[syncMyMoodle 0.5.0 documentation on PyPI](https://pypi.org/project/syncMyMoodle/0.5.0/).
+- [Documentation index](https://github.com/Romern/syncMyMoodle/blob/master/docs/README.md)
+- [Getting started](https://github.com/Romern/syncMyMoodle/blob/master/docs/getting-started.md)
+- [Everyday recipes](https://github.com/Romern/syncMyMoodle/blob/master/docs/everyday-recipes.md)
+- [How synchronization works](https://github.com/Romern/syncMyMoodle/blob/master/docs/how-sync-works.md)
+- [CLI reference](https://github.com/Romern/syncMyMoodle/blob/master/docs/cli-reference.md)
+- [Configuration reference](https://github.com/Romern/syncMyMoodle/blob/master/docs/configuration.md)
+- [Authentication reference](https://github.com/Romern/syncMyMoodle/blob/master/docs/authentication.md)
+- [Supported content and linked services](https://github.com/Romern/syncMyMoodle/blob/master/docs/quizzes-and-linked-content.md)
+- [Cleanup and troubleshooting](https://github.com/Romern/syncMyMoodle/blob/master/docs/cleanup-and-troubleshooting.md)
+- [Migrating from 0.5](https://github.com/Romern/syncMyMoodle/blob/master/docs/migrating-from-0-5.md)
 
 ## Reporting problems
 
 Use the [GitHub issue tracker](https://github.com/Romern/syncMyMoodle/issues)
 for reproducible bugs and feature requests.
 
-A useful bug report includes:
+Include:
 
-* Operating system
-* Python version
-* syncMyMoodle version
-* The command that was run
-* The relevant error message
-* Whether `syncmymoodle config check` succeeds
-* Whether `syncmymoodle auth status` succeeds
+- Operating system
+- Python version
+- syncMyMoodle version
+- The command that was run
+- The relevant error message
+- Whether `syncmymoodle config check` succeeds
+- Whether `syncmymoodle auth status` succeeds
 
 Before posting logs, screenshots, configuration excerpts, or command output,
 remove:
 
-* RWTH passwords
-* TOTP secrets and current TOTP codes
-* Moodle API and browser-login tokens
-* Moodle app-link addresses
-* Environment-file contents
-* Password-manager secret values
-* Private course or account information
+- RWTH passwords
+- TOTP seeds and current TOTP codes
+- Moodle API and browser-login tokens
+- Moodle app-launch addresses
+- Environment-file contents
+- Password-manager secret values
+- Private course or account information
 
 ## Project information
 
-* [Source code](https://github.com/Romern/syncMyMoodle)
-* [Issue tracker](https://github.com/Romern/syncMyMoodle/issues)
-* [Releases](https://github.com/Romern/syncMyMoodle/releases)
-* [Release documentation](docs/releasing.md)
-* License: [GPL-3.0-only](LICENSE)
-
-## License
-
-syncMyMoodle is licensed under the
-[GNU General Public License v3.0 only](LICENSE).
+- [Source code](https://github.com/Romern/syncMyMoodle)
+- [Issue tracker](https://github.com/Romern/syncMyMoodle/issues)
+- [Releases](https://github.com/Romern/syncMyMoodle/releases)
+- [Maintainer release process](https://github.com/Romern/syncMyMoodle/blob/master/docs/releasing.md)
+- License: [GPL-3.0-only](LICENSE)
