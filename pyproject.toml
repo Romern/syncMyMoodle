@@ -44,6 +44,9 @@ test = [
   "types-requests>=2.32.0.20240602"
 ]
 
+[tool.setuptools.packages.find]
+include = ["syncmymoodle*"]
+
 [tool.setuptools.package-data]
 syncmymoodle = ["config.toml.example", "certs/*.pem"]
 
